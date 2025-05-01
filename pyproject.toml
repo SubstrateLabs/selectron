@@ -1,0 +1,149 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "selectron"
+dynamic = ["version"]
+description = 'autonomous web parsing'
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+keywords = []
+authors = [{ name = "Ben G🥦", email = "ben@substrate.run" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: Implementation :: PyPy",
+]
+dependencies = [
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0", 
+    "pytest-cov>=4.0",
+    "pytest-xdist>=3.0",
+    "pytest-mock>=3.10.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-httpx>=0.24.0",
+    "ruff>=0.3.0",
+    "pyright>=1.1.350",
+]
+
+[project.urls]
+Documentation = "https://github.com/SubstrateLabs/selectron"
+Issues = "https://github.com/SubstrateLabs/selectron/issues"
+Source = "https://github.com/SubstrateLabs/selectron"
+
+[tool.hatch.version]
+path = "src/selectron/__about__.py"
+
+[tool.hatch.build]
+include = [
+  "src/**/*.py",
+]
+exclude = [
+  "tests/**"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/selectron"]
+
+[tool.hatch.envs.types]
+extra-dependencies = ["mypy>=1.0.0"]
+[tool.hatch.envs.types.scripts]
+check = "mypy --install-types --non-interactive {args:src/selectron tests}"
+
+[tool.coverage.run]
+source_pkgs = ["selectron", "tests"]
+branch = true
+parallel = true
+omit = ["src/selectron/__about__.py"]
+
+[tool.coverage.paths]
+selectron = ["src/selectron", "*/cli/src/selectron"]
+tests = ["tests", "*/cli/tests"]
+
+[tool.coverage.report]
+exclude_lines = ["no cov", "if __name__ == .__main__.:", "if TYPE_CHECKING:"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["**/__pycache__", "build", "dist"]
+reportMissingImports = true
+reportMissingTypeStubs = false
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+reportUnknownLambdaType = false
+reportPrivateUsage = false
+reportUnnecessaryIsInstance = false # trips up on bs4 tags
+reportOptionalMemberAccess = true
+reportOptionalCall = true
+reportOptionalOperand = true
+reportUnnecessaryCast = true
+reportAssertAlwaysTrue = true
+reportIncompatibleMethodOverride = true
+reportUninitializedInstanceVariable = true
+reportConstantRedefinition = true
+reportCallInDefaultInitializer = true
+reportUnusedClass = true
+reportDuplicateImport = true
+reportInvalidStringEscapeSequence = true
+reportMissingTypeArgument = false # too many errors
+reportMissingSuperCall = false # not needed if not inheriting
+reportImplicitStringConcatenation = false # this is fine
+reportUnnecessaryTypeIgnoreComment = false # doesn't work well with other rules
+reportUnusedVariable = true
+reportPropertyTypeMismatch = true
+reportUnusedCoroutine = true
+reportUnusedImport = true
+reportIncompatibleVariableOverride = true
+reportFunctionMemberAccess = true
+reportInvalidTypeForm = true
+reportUnnecessaryComparison = false # annoying
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Add these common directories to exclude
+extend-exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes 
+    "I",   # isort
+]
+extend-select = [
+    "B",   # flake8-bugbear (optional)
+    "C4",  # flake8-comprehensions (optional)
+]
+ignore = [
+    "E501",    # Line too long
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["selectron"]
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "auto"
+indent-style = "space"
+
