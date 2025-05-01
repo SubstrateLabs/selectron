@@ -1,0 +1,222 @@
+---
+description: 
+globs: *.py
+alwaysApply: false
+---
+# Writing modern Python: style guide
+
+Always catch granular exceptions if specific ones are expected.
+Do not escape " when beginning or ending docstrings fstrings or strings (and please don't add excessive comments or docstrings)
+
+## For-else statements
+
+If you ever need to check if a for loop completes without a break, for-else statements are a great way to accomplish this without using a temporary variable.
+
+### ===== Don't write this =====
+```py
+found_server = False  # Keep track of whether we found a server
+for server in servers:
+    if server.check_availability():
+        primary_server = server
+        found_server = True  # Set the flag to True
+        break
+if not found_server:
+    # Use the backup server if no server was found
+    primary_server = backup_server
+
+# Continue execution with whatever server we found
+deploy_application(primary_server)
+```
+
+### ===== Write this instead =====
+```py
+for server in servers:
+    if server.check_availability():
+        primary_server = server
+        break
+else:
+    # Use the backup server if no server was found
+    primary_server = backup_server
+
+# Continue execution with whatever server we found
+deploy_application(primary_server)
+```
+
+
+## Walrus Operator
+
+If you need to define and evaluate a variable all in one expression, the Walrus Operator (new in Python 3.8 with PEP 572) is a quick way to accomplish just that.
+
+Walrus operators are really useful for using a value right after checking if it is not None!
+
+### ===== Don't write this =====
+```py
+response = get_user_input()
+if response:
+    print('You pressed:', response)
+else:
+    print('You pressed nothing')
+```
+
+### ===== Write this instead =====
+```py
+if response := get_user_input():
+    print('You pressed:', response)
+else:
+    print('You pressed nothing')
+```
+
+## Short Circuit Evaluation
+
+Short-circuit Evaluation is a shortcut for getting the “next available” or “next truthy” value in a list of expressions. It turns out you can simply chain or statements!
+
+### ===== Don't write this =====
+```py
+username, full_name, first_name = get_user_info()
+
+if username is not None:
+    display_name = username
+elif full_name is not None:
+    display_name = full_name
+elif first_name is not None:
+    display_name = first_name
+else:
+    display_name = "Anonymous"
+copy
+```
+
+### ===== Write this instead =====
+```py
+username, full_name, first_name = get_user_info()
+
+display_name = username or full_name or first_name or "Anonymous"
+```
+
+## Operator Chaining
+
+Finally, Python lets you chain comparison operators together to shorten up integer range comparisons, making them more readable than the equivalent boolean expressions.
+
+### ===== Don't write this =====
+```py
+if 0 < x and x < 10:
+    print("x is between 0 and 10")
+```
+
+### ===== Write this instead =====
+```py
+if 0 < x < 10:  # Instead of if 0 < x and x < 10
+    print("x is between 0 and 10")
+```
+
+# Other useful tips for writing modern Python
+
+## Structural pattern matching & destructuring
+
+```py
+# Using OR pattern (|) to match multiple patterns
+match day:
+    case ("Monday"
+          | "Tuesday"
+          | "Wednesday"
+          | "Thursday"
+          | "Friday"):
+        return "Weekday"
+    case "Saturday" | "Sunday":
+        return "Weekend"
+
+# Guard clauses with inline 'if' statements
+match temperature:
+    case temp if temp < 0:
+        return "Freezing"
+    case temp if temp < 20:
+        return "Cold"
+    case temp if temp < 30:
+        return "Warm"
+    case _:
+        return "Hot"
+
+# Use walrus operator to create powerful patterns
+packet: list[int] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07]
+match packet:
+    case [c1, c2, *data, footer] if (  # Deconstruct packet into header, data, and footer
+        (checksum := c1 + c2) == sum(data) and  # Check that the checksum is correct
+        len(data) == footer  # Check that the data length is correct
+    ):
+        print(f"Packet received: {data} (Checksum: {checksum})")
+    case [c1, c2, *data]:  # Failure case where structure is correct but checksum is wrong
+        print(f"Packet received: {data} (Checksum Failed)")
+    case [_, *__]:  # Failure case where packet is too short
+        print("Invalid packet length")
+    case []:  # Failure case where packet is empty
+        print("Empty packet")
+    case _:  # Failure case where packet is invalid
+        print("Invalid packet")
+```
+
+## Modern Generic syntax
+
+Use modern Python 3.12+ generic syntax, and variadic generics when appropriate:
+
+```py
+# NEW SYNTAX - Python 3.12+
+class Foo[UnBounded, Bounded: int, Constrained: int | float]:
+    def __init__(self, x: UnBounded, y: Bounded, z: Constrained) -> None:
+        self.x = x
+        self.y = y
+        self.z = z
+
+# Variadic generics
+class Tuple[*Ts]:
+    def __init__(self, *args: *Ts) -> None:
+        self.values = args
+
+# Works with any number of types!
+pair = Tuple[str, int](mdc:"hello", 42)
+triple = Tuple[str, int, bool](mdc:"world", 100, True)
+```
+
+## Protocols
+
+Protocols (also known as Structural Subtyping) are typing classes in Python defining the structure or behavior that classes can follow without the use of interfaces or inheritance.
+
+```py
+from typing import Protocol
+
+class Quackable(Protocol):
+    def quack(self) -> None:
+        ...  # The ellipsis indicates this is just a method signature
+
+class Duck:
+    def quack(self): print('Quack!')
+
+class Dog:
+    def bark(self): print('Woof!')
+
+def run_quack(obj: Quackable):
+    obj.quack()
+
+run_quack(Duck())  # Works!
+run_quack(Dog())  # Fails during TYPE CHECKING (not runtime)
+
+# Add the @runtime_checkable decorator if you want isinstance() checks to work alongside your Protocols!
+@runtime_checkable
+class Drawable(Protocol):
+    def draw(self) -> None:
+        ...
+```
+
+## Context managers
+
+Contextlib simplifies context managers by wrapping all that boilerplate code in a single easy-to-use decorator.
+
+```py
+import contextlib
+
+@contextlib.contextmanager
+def context():
+    # Setup code here
+    setup()
+    yield (...)  # Any variables you want to be passed to the with block
+    # Teardown code here
+    takedown()
+```

@@ -1,4 +1,5 @@
-import pytest
+from selectron.template import template
+
 
 def test_example():
-    assert 1 + 1 == 2
+    assert template() == "Hello from selectron!"

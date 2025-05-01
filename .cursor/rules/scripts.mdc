@@ -1,0 +1,6 @@
+---
+description: 
+globs: scripts/*.py
+alwaysApply: false
+---
+You DO NOT need to add the project root to sys.path to allow importing 'selectron'. DO NOT ADD THIS.

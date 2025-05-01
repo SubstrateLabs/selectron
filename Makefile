@@ -1,13 +1,20 @@
-# Install the package in development mode
+.PHONY: format lint typecheck test install clean
+
+format:
+	ruff format . && ruff check --fix .
+
+lint:
+	ruff check .
+
+typecheck:
+	uv run pyright
+
 install:
 	uv pip install -e ".[dev]"
 
-# Run tests
 test:
 	uv run pytest
 
-
-# Clean up cache and build artifacts
 clean:
 	rm -rf .ruff_cache
 	rm -rf .pytest_cache

@@ -1,0 +1,20 @@
+---
+description: 
+globs: *.py
+alwaysApply: false
+---
+Always use [logger.py](mdc:src/selectron/internal/logger.py) to log:
+
+```py
+from .internal.logger import get_logger
+
+logger = get_logger(__name__)
+```
+
+- ALWAYS catch granular exceptions where possible and log the exception. NEVER use bare except.
+- Logs should be:
+    1. Focused (do not log in a redundant or overly noisy way. The signal to noise ratio should be high).
+    2. Concise and well-formatted (pretty-format JSON, use newlines to wrap long content, truncate potentially long values injected into format strings)
+    3. Prefixed with "NOTE:" or "TODO:" to call out subtleties or future work
+- If you see redundant or unnecessary logging, clean up! "Leave no trace"
+- Keep logs serious and minimal: no emoji.
