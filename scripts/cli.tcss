@@ -1,0 +1,22 @@
+Screen {
+    /* Ensures children are laid out vertically */
+    layout: vertical;
+}
+
+/* Container for the RichLog */
+.log-container {
+    /* Takes up all available vertical space */
+    height: 1fr;
+    /* Add some padding around the log */
+    padding: 1;
+}
+
+
+/* Style the input widget itself */
+#log-input {
+    /* Take up most horizontal space in its container */
+    width: 1fr;
+    /* Add margin to the right */
+    margin-right: 1;
+}
+

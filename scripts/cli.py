@@ -9,10 +9,11 @@ from typing import Optional
 
 import websockets
 from PIL import Image
+from textual import on  # Import 'on' decorator
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical  # Added containers
-from textual.widgets import Button, Footer, Header, RichLog  # Added Button
+from textual.containers import Container, Vertical
+from textual.widgets import Footer, Header, Input, RichLog
 from textual.worker import Worker  # Import Worker type
 
 from selectron.chrome.cdp_executor import CdpBrowserExecutor
@@ -48,9 +49,12 @@ LOG_FILE = get_app_dir() / "selectron.log"
 class CliApp(App[None]):
     """A Textual app with Chrome monitoring and log file watching."""
 
+    CSS_PATH = "cli.tcss"  # Add path to the CSS file
+
     BINDINGS = [
         Binding(key="ctrl+c", action="quit", description="Quit App", show=False),
         Binding(key="ctrl+q", action="quit", description="Quit App", show=True),
+        Binding(key="ctrl+l", action="open_log_file", description="Open Logs", show=True),
         # Binding(key="ctrl+t", action="toggle_dark", description="Toggle dark mode"), # Example if needed
     ]
 
@@ -83,10 +87,16 @@ class CliApp(App[None]):
         """Create child widgets for the app."""
         yield Header()
         with Container():  # Main container
-            # Log panel takes up most space
-            yield Vertical(RichLog(highlight=True, markup=False, id="log-panel", wrap=True))
-            # Button sits below logs
-            yield Horizontal(Button("Open Log File", id="open-log"), classes="button-bar")
+            yield Vertical(
+                RichLog(highlight=True, markup=False, id="log-panel", wrap=True),
+                classes="log-container",
+            )
+            # Input and Submit button row
+            # with Horizontal(classes="input-bar"):  # Container for input and submit - Removed container
+            yield Input(placeholder="Enter text to log...", id="log-input")
+            # yield Button("Open logs", id="open-log")  # Moved and renamed Open Log button - Removed button
+            # Button sits below logs and input
+            # yield Horizontal( # Removed this container
         yield Footer()
 
     def action_toggle_dark(self) -> None:
@@ -97,22 +107,28 @@ class CliApp(App[None]):
         """Called when the app is mounted."""
         # Manually clear log file at the start of mounting to ensure clean slate
         try:
-             # Opening with 'w' mode truncates the file.
-             open(self._log_file_path, "w").close() # Open in write mode and immediately close.
-             # with open(self._log_file_path, "w", encoding="utf-8") as f:
-             #     pass # Ensure the file is opened and closed in 'w' mode.
-             self._last_log_position = 0 # Reset position after clearing
+            # Opening with 'w' mode truncates the file.
+            open(self._log_file_path, "w").close()  # Open in write mode and immediately close.
+            # with open(self._log_file_path, "w", encoding="utf-8") as f:
+            #     pass # Ensure the file is opened and closed in 'w' mode.
+            self._last_log_position = 0  # Reset position after clearing
         except Exception as e:
-             # Log error to stderr as logger might not be fully ready or file is problematic
-             print(f"ERROR: Failed to clear log file {self._log_file_path} on mount: {e}", file=sys.stderr)
+            # Log error to stderr as logger might not be fully ready or file is problematic
+            print(
+                f"ERROR: Failed to clear log file {self._log_file_path} on mount: {e}",
+                file=sys.stderr,
+            )
 
         # Ensure logger is initialized (though clearing is now manual)
-        get_logger(__name__) # Still good practice to get the logger instance
+        get_logger(__name__)  # Still good practice to get the logger instance
 
         # Load initial logs from file (which should now be reliably empty)
         self._load_initial_logs()
         # Start watching the log file
         self.set_interval(0.5, self._watch_log_file)  # Check every 500ms
+
+        # Autofocus the input field
+        self.query_one("#log-input", Input).focus()
 
         logger.info("App mounted. Starting Chrome monitor...")  # This goes to file
         # Run the monitor setup and main loop in the background
@@ -192,6 +208,21 @@ class CliApp(App[None]):
                 f"Error reading log file {self._log_file_path}: {e}", exc_info=True
             )  # Log error to file
 
+    # --- Input Handling ---
+
+    @on(Input.Submitted, "#log-input")  # Handle Enter key on the specific input
+    def handle_log_input_submission(self, event: Input.Submitted) -> None:
+        """Logs the input field's content when Enter is pressed."""
+        if event.value:  # Only log if there's text
+            logger.info(f"User Input Logged: {event.value}")
+            event.input.clear()  # Clear the input after logging
+        else:
+            logger.debug(
+                "Log input submitted but was empty."
+            )  # Optional: log empty submissions as debug
+
+    # --- Monitoring ---
+
     async def run_monitoring(self) -> None:
         """Runs the main Chrome monitoring loop."""
         if not await ensure_chrome_connection():
@@ -224,6 +255,7 @@ class CliApp(App[None]):
             else:
                 logger.warning("Monitor object not initialized, skipping stop.")
             logger.info("Monitor worker finished.")
+            self.app.exit()
 
     async def _handle_polling_change(self, event: TabChangeEvent):
         """Callback function for tab changes detected ONLY by polling."""
@@ -421,10 +453,17 @@ class CliApp(App[None]):
 
     # --- Button Action ---
 
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        """Handle button clicks."""
-        if event.button.id == "open-log":
-            self.action_open_log_file()
+    # def on_button_pressed(self, event: Button.Pressed) -> None: # Removed method
+    #     """Handle button clicks.""" # Removed method
+    #     if event.button.id == "open-log": # Removed method
+    #         self.action_open_log_file() # Removed method
+    #     # elif event.button.id == "log-submit": # Removed handler for log-submit # Removed method
+    #     #     log_input_widget = self.query_one("#log-input", Input) # Removed method
+    #     #     if log_input_widget.value:  # Only log if there's text # Removed method
+    #     #         logger.info(f"User Input Logged (Button): {log_input_widget.value}") # Removed method
+    #     #         log_input_widget.clear()  # Clear the input after logging # Removed method
+    #     #     else: # Removed method
+    #     #          logger.debug("Log Submit button pressed but input was empty.")  # Optional # Removed method
 
     def action_open_log_file(self) -> None:
         """Opens the log file using the default system application."""
