@@ -1,0 +1,469 @@
+import traceback
+from typing import Optional
+
+from bs4 import BeautifulSoup, Tag
+
+from selectron.ai.selector_types import (
+    ChildDetail,
+    ChildrenTagsResult,
+    ExtractionResult,
+    MatchDetail,
+    SelectorEvaluationResult,
+    SiblingDetail,
+    SiblingsResult,
+)
+from selectron.util.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class SelectorTools:
+    """Internal class holding the BeautifulSoup instance and tool methods."""
+
+    def __init__(self, html_content: str):
+        self.soup = BeautifulSoup(html_content, "html.parser")
+        logger.info("HTML structure parsed for SelectorTools.")
+
+    async def evaluate_selector(
+        self, selector: str, target_text_to_check: str, anchor_selector: Optional[str] = None
+    ) -> SelectorEvaluationResult:
+        """Evaluates selector (optionally within anchor). Checks if target_text_to_check is found. Returns count, details, text found flag, errors."""
+        log_prefix = (
+            f"Evaluate Selector ('{selector}'"
+            + (f" within '{anchor_selector}'" if anchor_selector else "")
+            + f" for text '{target_text_to_check}')"
+        )
+        logger.info(f"{log_prefix}: Starting.")
+
+        base_element: BeautifulSoup | Tag | None = self.soup
+        if anchor_selector:
+            try:
+                possible_anchors = self.soup.select(anchor_selector)
+            except Exception as e:
+                error_msg = f"Anchor Selector Syntax Error: {type(e).__name__}: {e}"
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return SelectorEvaluationResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    element_count=0,
+                    error=error_msg,
+                    matches=[],
+                    target_text_found_in_any_match=False,
+                )
+
+            if len(possible_anchors) == 0:
+                error_msg = (
+                    f"Anchor Error: Anchor selector '{anchor_selector}' did not find any element."
+                )
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return SelectorEvaluationResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    element_count=0,
+                    error=error_msg,
+                    matches=[],
+                    target_text_found_in_any_match=False,
+                )
+            if len(possible_anchors) > 1:
+                error_msg = f"Anchor Error: Anchor selector '{anchor_selector}' is not unique (found {len(possible_anchors)})."
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return SelectorEvaluationResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    element_count=0,
+                    error=error_msg,
+                    matches=[],
+                    target_text_found_in_any_match=False,
+                )
+            base_element = possible_anchors[0]
+            logger.debug(f"{log_prefix}: Anchor found successfully.")
+
+        assert base_element is not None, "Base element for selection cannot be None"
+
+        max_matches_to_detail = 5
+        max_text_len = 150
+        text_found_flag = False
+        try:
+            elements = base_element.select(selector)
+            count = len(elements)
+            match_details: list[MatchDetail] = []
+
+            for i, el in enumerate(elements):
+                if not isinstance(el, Tag):
+                    continue  # Skip non-Tag elements like NavigableString
+                text = el.get_text(strip=True)
+                if target_text_to_check and target_text_to_check in text:
+                    text_found_flag = True
+                if len(text) > max_text_len:
+                    text = text[:max_text_len] + "..."
+                if i < max_matches_to_detail:
+                    attrs = {
+                        k: " ".join(v) if isinstance(v, list) else v for k, v in el.attrs.items()
+                    }
+                    match_details.append(
+                        MatchDetail(tag_name=el.name, text_content=text, attributes=attrs)
+                    )
+
+            result = SelectorEvaluationResult(
+                selector_used=selector,
+                anchor_selector_used=anchor_selector,
+                element_count=count,
+                matches=match_details,
+                target_text_found_in_any_match=text_found_flag,
+                error=None,
+            )
+            logger.info(
+                f"{log_prefix}: Result: Count={result.element_count}, TextFound={result.target_text_found_in_any_match}, MatchesDetailed={len(result.matches)}"
+            )
+            # Slightly more detailed log for the first match if present
+            if result.matches:
+                first = result.matches[0]
+                logger.debug(
+                    f"{log_prefix}: First Match: <{first.tag_name}> attrs={first.attributes} text='{first.text_content}'"
+                )
+            return result
+        except Exception as e:
+            error_msg = f"Evaluation Error: {type(e).__name__}: {e}"
+            tb_str = traceback.format_exc()
+            logger.error(f"{log_prefix}: {error_msg}", exc_info=False)  # No traceback in log
+            # Combine error message and traceback for the agent
+            error_for_agent = f"{error_msg}\nTraceback:\n{tb_str}"
+            return SelectorEvaluationResult(
+                selector_used=selector,
+                anchor_selector_used=anchor_selector,
+                element_count=0,
+                error=error_for_agent,  # Pass traceback to agent
+                matches=[],
+                target_text_found_in_any_match=False,
+            )
+
+    async def get_children_tags(
+        self, selector: str, anchor_selector: Optional[str] = None
+    ) -> ChildrenTagsResult:
+        """Gets details (tag name, snippet) of direct children of the FIRST element matched by selector (optionally within anchor)."""
+        log_prefix = (
+            f"Get Children ('{selector}'"
+            + (f" within '{anchor_selector}'" if anchor_selector else "")
+            + ")"
+        )
+        logger.info(f"{log_prefix}: Starting.")
+
+        base_element: BeautifulSoup | Tag | None = self.soup
+        parent_element: Optional[Tag] = None
+        if anchor_selector:
+            try:
+                possible_anchors = self.soup.select(anchor_selector)
+            except Exception as e:
+                error_msg = f"Anchor Selector Syntax Error: {type(e).__name__}: {e}"
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return ChildrenTagsResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    parent_found=False,
+                    error=error_msg,
+                    children_details=None,
+                )
+
+            if len(possible_anchors) == 0:
+                error_msg = (
+                    f"Anchor Error: Anchor selector '{anchor_selector}' did not find any element."
+                )
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return ChildrenTagsResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    parent_found=False,
+                    error=error_msg,
+                    children_details=None,
+                )
+            if len(possible_anchors) > 1:
+                error_msg = f"Anchor Error: Anchor selector '{anchor_selector}' is not unique (found {len(possible_anchors)})."
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return ChildrenTagsResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    parent_found=False,
+                    error=error_msg,
+                    children_details=None,
+                )
+            base_element = possible_anchors[0]
+            logger.debug(f"{log_prefix}: Anchor found successfully.")
+
+        assert base_element is not None, "Base element for get_children_tags cannot be None"
+
+        max_snippet_len = 500  # Reduced snippet length
+        try:
+            parent_element = base_element.select_one(selector)
+            if parent_element and isinstance(parent_element, Tag):
+                details_list: list[ChildDetail] = []
+                for child in parent_element.find_all(recursive=False):
+                    if isinstance(child, Tag) and child.name:
+                        snippet = str(child)
+                        if len(snippet) > max_snippet_len:
+                            snippet = snippet[:max_snippet_len] + "..."
+                        details_list.append(ChildDetail(tag_name=child.name, html_snippet=snippet))
+
+                child_tags_summary = (
+                    ", ".join([d.tag_name for d in details_list]) if details_list else "None"
+                )
+                logger.info(
+                    f"{log_prefix}: Result: ParentFound=True, ChildrenTags=[{child_tags_summary}]"
+                )
+                return ChildrenTagsResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    parent_found=True,
+                    children_details=details_list,
+                    error=None,
+                )
+            else:
+                error_msg = "Parent selector did not match any element or matched a non-Tag within the specified context."
+                logger.info(f"{log_prefix}: Result: ParentFound=False. {error_msg}")
+                return ChildrenTagsResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    parent_found=False,
+                    error=error_msg,
+                    children_details=None,
+                )
+        except Exception as e:
+            error_msg = f"Error getting children details: {type(e).__name__}: {e}"
+            tb_str = traceback.format_exc()
+            logger.error(f"{log_prefix}: {error_msg}", exc_info=False)  # No traceback in log
+            error_for_agent = f"{error_msg}\nTraceback:\n{tb_str}"
+            return ChildrenTagsResult(
+                selector_used=selector,
+                anchor_selector_used=anchor_selector,
+                parent_found=False,
+                error=error_for_agent,  # Pass traceback to agent
+                children_details=None,
+            )
+
+    async def get_siblings(
+        self, selector: str, anchor_selector: Optional[str] = None
+    ) -> SiblingsResult:
+        """Gets details (tag name, attributes) of immediate siblings of the FIRST element matched (optionally within anchor)."""
+        log_prefix = (
+            f"Get Siblings ('{selector}'"
+            + (f" within '{anchor_selector}'" if anchor_selector else "")
+            + ")"
+        )
+        logger.info(f"{log_prefix}: Starting.")
+
+        base_element: BeautifulSoup | Tag | None = self.soup
+        element: Optional[Tag] = None
+        if anchor_selector:
+            try:
+                possible_anchors = self.soup.select(anchor_selector)
+            except Exception as e:
+                error_msg = f"Anchor Selector Syntax Error: {type(e).__name__}: {e}"
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return SiblingsResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    element_found=False,
+                    error=error_msg,
+                    siblings=[],
+                )
+
+            if len(possible_anchors) == 0:
+                error_msg = (
+                    f"Anchor Error: Anchor selector '{anchor_selector}' did not find any element."
+                )
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return SiblingsResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    element_found=False,
+                    error=error_msg,
+                    siblings=[],
+                )
+            if len(possible_anchors) > 1:
+                error_msg = f"Anchor Error: Anchor selector '{anchor_selector}' is not unique (found {len(possible_anchors)})."
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return SiblingsResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    element_found=False,
+                    error=error_msg,
+                    siblings=[],
+                )
+            base_element = possible_anchors[0]
+            logger.debug(f"{log_prefix}: Anchor found successfully.")
+
+        assert base_element is not None, "Base element for sibling search cannot be None"
+
+        try:
+            element = base_element.select_one(selector)
+            if not element or not isinstance(element, Tag):
+                error_msg = "Selector did not match any element or matched a non-Tag within the specified context."
+                logger.info(f"{log_prefix}: Result: ElementFound=False. {error_msg}")
+                return SiblingsResult(
+                    selector_used=selector,
+                    anchor_selector_used=anchor_selector,
+                    element_found=False,
+                    error=error_msg,
+                    siblings=[],
+                )
+
+            siblings_details: list[SiblingDetail] = []
+            logger.debug(f"{log_prefix}: Reference element found: <{element.name}>")
+
+            siblings_summary_list = []
+            # Previous sibling - ensuring it's a Tag
+            prev_sib = element.find_previous_sibling()
+            while prev_sib and not isinstance(prev_sib, Tag):
+                prev_sib = prev_sib.find_previous_sibling()  # Skip non-Tag nodes
+            if prev_sib and isinstance(prev_sib, Tag):
+                attrs = {
+                    k: " ".join(v) if isinstance(v, list) else v for k, v in prev_sib.attrs.items()
+                }
+                siblings_details.append(
+                    SiblingDetail(tag_name=prev_sib.name, direction="previous", attributes=attrs)
+                )
+                logger.debug(
+                    f"{log_prefix}: Found Previous Sibling: <{prev_sib.name}> attrs={attrs}"
+                )
+                siblings_summary_list.append(f"prev=<{prev_sib.name}>")
+
+            # Next sibling - ensuring it's a Tag
+            next_sib = element.find_next_sibling()
+            while next_sib and not isinstance(next_sib, Tag):
+                next_sib = next_sib.find_next_sibling()  # Skip non-Tag nodes
+            if next_sib and isinstance(next_sib, Tag):
+                attrs = {
+                    k: " ".join(v) if isinstance(v, list) else v for k, v in next_sib.attrs.items()
+                }
+                siblings_details.append(
+                    SiblingDetail(tag_name=next_sib.name, direction="next", attributes=attrs)
+                )
+                logger.debug(f"{log_prefix}: Found Next Sibling: <{next_sib.name}> attrs={attrs}")
+                siblings_summary_list.append(f"next=<{next_sib.name}>")
+
+            siblings_summary = ", ".join(siblings_summary_list) if siblings_summary_list else "None"
+            logger.info(f"{log_prefix}: Result: ElementFound={True}, Siblings=[{siblings_summary}]")
+            return SiblingsResult(
+                selector_used=selector,
+                anchor_selector_used=anchor_selector,
+                element_found=True,
+                siblings=siblings_details,
+                error=None,
+            )
+        except Exception as e:
+            error_msg = f"Error getting siblings: {type(e).__name__}: {e}"
+            tb_str = traceback.format_exc()
+            logger.error(f"{log_prefix}: {error_msg}", exc_info=False)  # No traceback in log
+            error_for_agent = f"{error_msg}\nTraceback:\n{tb_str}"
+            return SiblingsResult(
+                selector_used=selector,
+                anchor_selector_used=anchor_selector,
+                element_found=False,
+                error=error_for_agent,  # Pass traceback to agent
+                siblings=[],
+            )
+
+    async def extract_data_from_element(
+        self,
+        selector: str,
+        attribute_to_extract: Optional[str] = None,
+        extract_text: bool = False,
+        anchor_selector: Optional[str] = None,
+    ) -> ExtractionResult:
+        """Extracts data (attribute or text) from the FIRST element matching the selector (optionally within anchor). Assumes selector is unique."""
+        log_prefix = (
+            f"Extract Data ('{selector}'"
+            + (f" within '{anchor_selector}'" if anchor_selector else "")
+            + f", attr='{attribute_to_extract}', text={extract_text})"
+        )
+        logger.info(f"{log_prefix}: Starting extraction.")
+
+        if not attribute_to_extract and not extract_text:
+            logger.warning(f"{log_prefix}: No extraction specified (neither attribute nor text).")
+            return ExtractionResult(
+                error="No extraction specified",
+                extracted_text=None,
+                extracted_attribute_value=None,
+            )
+
+        base_element: BeautifulSoup | Tag | None = self.soup
+        element: Optional[Tag] = None
+        if anchor_selector:
+            try:
+                possible_anchors = self.soup.select(anchor_selector)
+            except Exception as e:
+                error_msg = f"Anchor Selector Syntax Error: {type(e).__name__}: {e}"
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return ExtractionResult(
+                    error=error_msg, extracted_text=None, extracted_attribute_value=None
+                )
+
+            if len(possible_anchors) == 0:
+                error_msg = (
+                    f"Anchor Error: Anchor selector '{anchor_selector}' did not find any element."
+                )
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return ExtractionResult(
+                    error=error_msg, extracted_text=None, extracted_attribute_value=None
+                )
+            if len(possible_anchors) > 1:
+                error_msg = f"Anchor Error: Anchor selector '{anchor_selector}' is not unique (found {len(possible_anchors)})."
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return ExtractionResult(
+                    error=error_msg, extracted_text=None, extracted_attribute_value=None
+                )
+            base_element = possible_anchors[0]
+
+        assert base_element is not None, "Base element for extraction cannot be None"
+
+        try:
+            element = base_element.select_one(selector)
+            if not element or not isinstance(element, Tag):
+                error_msg = "Extraction Error: Selector did not match any element or matched non-Tag within the specified context."
+                logger.warning(f"{log_prefix}: {error_msg}")
+                return ExtractionResult(
+                    error=error_msg, extracted_text=None, extracted_attribute_value=None
+                )
+
+            extracted_text_val: Optional[str] = None
+            extracted_attr_val: Optional[str] = None
+
+            if extract_text:
+                extracted_text_val = element.get_text(strip=True)
+                logger.info(
+                    f"{log_prefix}: Extracted text: '{extracted_text_val[:100]}...'"
+                    if extracted_text_val
+                    else "(No text extracted)"
+                )
+
+            if attribute_to_extract:
+                attr_value = element.get(attribute_to_extract)
+                if attr_value is not None:
+                    if isinstance(attr_value, list):
+                        extracted_attr_val = " ".join(attr_value)
+                    else:
+                        extracted_attr_val = str(attr_value)
+                    logger.info(
+                        f"{log_prefix}: Extracted attribute '{attribute_to_extract}': '{extracted_attr_val}'"
+                    )
+                else:
+                    logger.warning(
+                        f"{log_prefix}: Attribute '{attribute_to_extract}' not found on the element."
+                    )
+                    # We return None for the value, not an error in this case.
+
+            return ExtractionResult(
+                extracted_text=extracted_text_val,
+                extracted_attribute_value=extracted_attr_val,
+                error=None,
+            )
+
+        except Exception as e:
+            error_msg = f"Extraction Exception: {type(e).__name__}: {e}"
+            tb_str = traceback.format_exc()
+            logger.error(f"{log_prefix}: {error_msg}", exc_info=False)  # No traceback in log
+            error_for_agent = f"{error_msg}\nTraceback:\n{tb_str}"
+            return ExtractionResult(
+                error=error_for_agent,
+                extracted_text=None,
+                extracted_attribute_value=None,  # Pass traceback to agent
+            )

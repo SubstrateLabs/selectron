@@ -1,2 +1,1 @@
-- allow selecting attributes
-- allow generating python
+- allow generating python?

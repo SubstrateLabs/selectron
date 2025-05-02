@@ -24,9 +24,9 @@ from selectron.chrome.connect import ensure_chrome_connection
 from selectron.chrome.types import TabReference
 from selectron.dom.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES
 from selectron.dom.dom_service import DomService
-from selectron.sampler.sampler_utils import save_sample_data
 from selectron.util.extract_metadata import HtmlMetadata, extract_metadata
 from selectron.util.logger import get_logger
+from selectron.util.sample_save import save_sample_data
 
 logger = get_logger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
