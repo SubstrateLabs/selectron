@@ -29,9 +29,13 @@ class SelectorTools:
         logger.info(f"HTML structure parsed for SelectorTools. Base URL: {self.base_url}")
 
     async def evaluate_selector(
-        self, selector: str, target_text_to_check: str, anchor_selector: Optional[str] = None
+        self,
+        selector: str,
+        target_text_to_check: str,
+        anchor_selector: Optional[str] = None,
+        max_html_length: Optional[int] = None,
     ) -> SelectorEvaluationResult:
-        """Evaluates selector (optionally within anchor). Checks if target_text_to_check is found. Returns count, details, text found flag, errors."""
+        """Evaluates selector (optionally within anchor). Checks if target_text_to_check is found. Returns count, details, text found flag, errors. Checks element size if max_html_length is provided."""
         log_prefix = (
             f"Evaluate Selector ('{selector}'"
             + (f" within '{anchor_selector}'" if anchor_selector else "")
@@ -53,6 +57,7 @@ class SelectorTools:
                     error=error_msg,
                     matches=[],
                     target_text_found_in_any_match=False,
+                    size_validation_error=None,
                 )
 
             if len(possible_anchors) == 0:
@@ -67,6 +72,7 @@ class SelectorTools:
                     error=error_msg,
                     matches=[],
                     target_text_found_in_any_match=False,
+                    size_validation_error=None,
                 )
             if len(possible_anchors) > 1:
                 error_msg = f"Anchor Error: Anchor selector '{anchor_selector}' is not unique (found {len(possible_anchors)})."
@@ -78,6 +84,7 @@ class SelectorTools:
                     error=error_msg,
                     matches=[],
                     target_text_found_in_any_match=False,
+                    size_validation_error=None,
                 )
             base_element = possible_anchors[0]
             logger.debug(f"{log_prefix}: Anchor found successfully.")
@@ -87,6 +94,7 @@ class SelectorTools:
         max_matches_to_detail = 5
         max_text_len = 150
         text_found_flag = False
+        size_validation_error_msg: Optional[str] = None
         try:
             elements = base_element.select(selector)
             count = len(elements)
@@ -108,6 +116,25 @@ class SelectorTools:
                         MatchDetail(tag_name=el.name, text_content=text, attributes=attrs)
                     )
 
+            # --- Perform size validation if unique element found --- #
+            if count == 1 and max_html_length is not None and isinstance(elements[0], Tag):
+                try:
+                    html_content = str(elements[0])
+                    html_len = len(html_content)
+                    if html_len > max_html_length:
+                        size_validation_error_msg = (
+                            f"Element HTML too large: {html_len} chars > {max_html_length}"
+                        )
+                        logger.warning(f"{log_prefix}: {size_validation_error_msg}")
+                    else:
+                        logger.debug(
+                            f"{log_prefix}: Size validation OK ({html_len} chars <= {max_html_length})"
+                        )
+                except Exception as size_err:
+                    size_validation_error_msg = f"Error during size validation: {size_err}"
+                    logger.warning(f"{log_prefix}: {size_validation_error_msg}")
+            # --- End size validation --- #
+
             result = SelectorEvaluationResult(
                 selector_used=selector,
                 anchor_selector_used=anchor_selector,
@@ -115,6 +142,7 @@ class SelectorTools:
                 matches=match_details,
                 target_text_found_in_any_match=text_found_flag,
                 error=None,
+                size_validation_error=size_validation_error_msg,
             )
             logger.info(
                 f"{log_prefix}: Result: Count={result.element_count}, TextFound={result.target_text_found_in_any_match}, MatchesDetailed={len(result.matches)}"
@@ -139,6 +167,7 @@ class SelectorTools:
                 error=error_for_agent,  # Pass traceback to agent
                 matches=[],
                 target_text_found_in_any_match=False,
+                size_validation_error=None,
             )
 
     async def get_children_tags(
@@ -373,22 +402,13 @@ class SelectorTools:
         extract_text: bool = False,
         anchor_selector: Optional[str] = None,
     ) -> ExtractionResult:
-        """Extracts data (attribute or text) from the FIRST element matching the selector (optionally within anchor). Assumes selector is unique."""
+        """Extracts data (attribute or text, plus HTML/Markdown) from the FIRST element matching the selector (optionally within anchor). Assumes selector is unique."""
         log_prefix = (
             f"Extract Data ('{selector}'"
             + (f" within '{anchor_selector}'" if anchor_selector else "")
             + f", attr='{attribute_to_extract}', text={extract_text})"
         )
         logger.info(f"{log_prefix}: Starting extraction.")
-
-        if not attribute_to_extract and not extract_text:
-            logger.warning(f"{log_prefix}: No extraction specified (neither attribute nor text).")
-            return ExtractionResult(
-                error="No extraction specified",
-                extracted_text=None,
-                extracted_attribute_value=None,
-                markdown_content=None,
-            )
 
         base_element: BeautifulSoup | Tag | None = self.soup
         element: Optional[Tag] = None
@@ -402,7 +422,8 @@ class SelectorTools:
                     error=error_msg,
                     extracted_text=None,
                     extracted_attribute_value=None,
-                    markdown_content=None,
+                    extracted_markdown=None,
+                    extracted_html=None,
                 )
 
             if len(possible_anchors) == 0:
@@ -414,7 +435,8 @@ class SelectorTools:
                     error=error_msg,
                     extracted_text=None,
                     extracted_attribute_value=None,
-                    markdown_content=None,
+                    extracted_markdown=None,
+                    extracted_html=None,
                 )
             if len(possible_anchors) > 1:
                 error_msg = f"Anchor Error: Anchor selector '{anchor_selector}' is not unique (found {len(possible_anchors)})."
@@ -423,7 +445,8 @@ class SelectorTools:
                     error=error_msg,
                     extracted_text=None,
                     extracted_attribute_value=None,
-                    markdown_content=None,
+                    extracted_markdown=None,
+                    extracted_html=None,
                 )
             base_element = possible_anchors[0]
 
@@ -438,12 +461,24 @@ class SelectorTools:
                     error=error_msg,
                     extracted_text=None,
                     extracted_attribute_value=None,
-                    markdown_content=None,
+                    extracted_markdown=None,
+                    extracted_html=None,
                 )
 
             extracted_text_val: Optional[str] = None
             extracted_attr_val: Optional[str] = None
             markdown_content_val: Optional[str] = None
+            html_content_val: Optional[str] = None
+
+            # Always get HTML content string if element is found
+            try:
+                html_content_val = str(element)
+                logger.debug(
+                    f"{log_prefix}: Extracted HTML content (first 100 chars): '{html_content_val[:100]}...'"
+                )
+            except Exception as html_err:
+                logger.warning(f"{log_prefix}: Failed to get HTML string: {html_err}")
+                html_content_val = f"Error getting HTML: {html_err}"
 
             if extract_text:
                 extracted_text_val = element.get_text(separator=" ", strip=True)
@@ -516,11 +551,42 @@ class SelectorTools:
                     )
                     # We return None for the value, not an error in this case.
 
+            # --- Generate Markdown AFTER potential text/attribute extraction --- #
+            # We generate markdown last, using the final element state (links might be absolute)
+            try:
+                # Use a copy to ensure any link absolutification doesn't affect other steps if run differently
+                element_copy_for_md = copy.copy(element)
+                # Process links again just in case they weren't processed (e.g., if only attr was extracted)
+                links_processed_count = 0
+                for link_tag in element_copy_for_md.find_all("a", href=True):
+                    if not isinstance(link_tag, Tag):
+                        continue
+                    original_href = link_tag.get("href")
+                    if isinstance(original_href, str) and self.base_url:
+                        absolute_href = urljoin(self.base_url, original_href)
+                        if absolute_href != original_href:
+                            link_tag["href"] = absolute_href
+                            links_processed_count += 1
+                if links_processed_count > 0:
+                    logger.debug(
+                        f"{log_prefix}: Absolutified {links_processed_count} href(s) before final markdown conversion."
+                    )
+
+                markdown_content_val = markdownify(str(element_copy_for_md), base_url=self.base_url)
+                logger.info(
+                    f"{log_prefix}: Generated markdown content (first 100 chars): '{markdown_content_val[:100]}...'"
+                )
+            except Exception as md_err:
+                logger.warning(f"{log_prefix}: Failed to generate markdown content: {md_err}")
+                markdown_content_val = f"Error generating markdown: {md_err}"
+            # --- End Markdown Generation --- #
+
             return ExtractionResult(
+                error=None,
                 extracted_text=extracted_text_val,
                 extracted_attribute_value=extracted_attr_val,
-                markdown_content=markdown_content_val,
-                error=None,
+                extracted_markdown=markdown_content_val,
+                extracted_html=html_content_val,
             )
 
         except Exception as e:
@@ -532,5 +598,6 @@ class SelectorTools:
                 error=error_for_agent,
                 extracted_text=None,
                 extracted_attribute_value=None,
-                markdown_content=None,
+                extracted_markdown=None,
+                extracted_html=None,
             )

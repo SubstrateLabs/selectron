@@ -16,6 +16,9 @@ class SelectorEvaluationResult(BaseModel):
     matches: list[MatchDetail] = Field([])
     target_text_found_in_any_match: bool = Field(False)
     error: Optional[str] = Field(None)
+    size_validation_error: Optional[str] = Field(
+        None, description="Error message if element size validation fails, otherwise None."
+    )
 
 
 class ChildDetail(BaseModel):
@@ -48,8 +51,11 @@ class SiblingsResult(BaseModel):
 class ExtractionResult(BaseModel):
     extracted_text: Optional[str] = Field(None)
     extracted_attribute_value: Optional[str] = Field(None)
-    markdown_content: Optional[str] = Field(
+    extracted_markdown: Optional[str] = Field(
         None, description="Markdown representation of the extracted element's content."
+    )
+    extracted_html: Optional[str] = Field(
+        None, description="Raw HTML string of the extracted element and its descendants."
     )
     error: Optional[str] = Field(None)
 
