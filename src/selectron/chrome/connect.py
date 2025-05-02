@@ -9,7 +9,7 @@ from selectron.chrome.chrome_launcher import (
     launch_chrome,
     restart_chrome_with_debug_port,
 )
-from selectron.lib.logger import get_logger
+from selectron.util.logger import get_logger
 
 logger = get_logger(__name__)
 console = Console()
@@ -28,7 +28,6 @@ async def ensure_chrome_connection() -> bool:
     if not chrome_running:
         console.print("No Chrome processes detected.")
         if Confirm.ask("Do you want to launch Chrome with the debug port enabled?", default=True):
-            console.print("Attempting to launch Chrome...")
             if await launch_chrome(quiet=True):
                 console.print("[green]Success:[/green] Chrome launched with debug port.")
                 return True
@@ -46,7 +45,6 @@ async def ensure_chrome_connection() -> bool:
             "Do you want to quit existing Chrome instances and relaunch with the debug port?",
             default=True,
         ):
-            console.print("Attempting to restart Chrome...")
             if await restart_chrome_with_debug_port(quiet=True):
                 console.print("[green]Success:[/green] Chrome restarted with debug port.")
                 return True

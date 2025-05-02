@@ -15,7 +15,7 @@ from typing import (
 from selectron.chrome.chrome_cdp import get_tabs
 from selectron.chrome.diff_tabs import diff_tabs
 from selectron.chrome.types import ChromeTab, TabReference
-from selectron.lib.logger import get_logger
+from selectron.util.logger import get_logger
 
 logger = get_logger(__name__)
 

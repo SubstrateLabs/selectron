@@ -11,7 +11,7 @@ import websockets
 from PIL import Image
 
 from selectron.chrome.types import ChromeTab
-from selectron.lib.logger import get_logger
+from selectron.util.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -238,6 +238,121 @@ async def get_active_tab_html() -> Optional[str]:
         return None
 
 
+async def get_tab_html(ws_url: str) -> Optional[str]:
+    """Connects to a specific tab's debugger WebSocket URL and retrieves its HTML."""
+    if not ws_url:
+        logger.error("get_tab_html called with empty ws_url.")
+        return None
+
+    try:
+        # Connect directly to the tab's debugger URL
+        async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+            # Execute script to get outerHTML - no need to attach/detach with direct connection
+            script = "document.documentElement.outerHTML"
+            eval_result = await _send_cdp_command(ws, "Runtime.evaluate", {"expression": script})
+
+            if not eval_result or "result" not in eval_result:
+                logger.error(f"Failed to evaluate script in tab with ws_url: {ws_url}.")
+                return None
+
+            if eval_result["result"].get("type") == "string":
+                html_content = eval_result["result"].get("value")
+                logger.info(
+                    f"Successfully retrieved HTML content (length: {len(html_content)}) from {ws_url}."
+                )
+                return html_content
+            else:
+                logger.error(
+                    f"Script evaluation did not return a string: {eval_result['result'].get('type')} / {eval_result['result'].get('description')} for {ws_url}"
+                )
+                return None
+
+    except websockets.exceptions.InvalidURI:
+        logger.error(f"Invalid WebSocket URI: {ws_url}")
+        return None
+    except websockets.exceptions.WebSocketException as e:
+        # Log specific connection errors like refused, timeout etc.
+        logger.error(f"WebSocket connection error to {ws_url}: {e}")
+        return None
+    except Exception as e:
+        logger.error(
+            f"An unexpected error occurred in get_tab_html for {ws_url}: {e}", exc_info=True
+        )
+        return None
+
+
+async def capture_tab_screenshot(
+    ws_url: str,
+    format: str = "png",
+    quality: Optional[int] = None,
+) -> Optional[Image.Image]:
+    """Connects to a specific tab's debugger WebSocket URL and captures a screenshot.
+
+    Args:
+        ws_url: The WebSocket debugger URL for the target tab.
+        format: Image format (png, jpeg, webp). Defaults to png.
+        quality: Compression quality (0-100) for jpeg/webp. Defaults to None (png lossless/jpeg 90).
+
+    Returns:
+        A PIL Image object, or None if failed.
+    """
+    if not ws_url:
+        logger.error("capture_tab_screenshot called with empty ws_url.")
+        return None
+
+    if format not in ["png", "jpeg", "webp"]:
+        logger.error(f"Invalid screenshot format: {format}. Use png, jpeg, or webp.")
+        return None
+
+    try:
+        # Connect directly to the tab's debugger URL
+        async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+            # Capture Screenshot - no need to attach/detach with direct connection
+            screenshot_params: dict[str, str | int] = {"format": format}
+            if format == "jpeg" or format == "webp":
+                # Provide a default quality if None is specified for lossy formats
+                screenshot_params["quality"] = quality if quality is not None else 90
+
+            capture_result = await _send_cdp_command(
+                ws, "Page.captureScreenshot", screenshot_params
+            )
+
+            if not capture_result or "data" not in capture_result:
+                logger.error(f"Failed to capture screenshot for tab {ws_url}.")
+                return None
+
+            # Decode and create PIL Image
+            image_data_base64 = capture_result["data"]
+            try:
+                image_data = base64.b64decode(image_data_base64)
+            except (TypeError, binascii.Error) as e:
+                logger.error(f"Failed to decode base64 image data for {ws_url}: {e}")
+                return None
+
+            try:
+                image = Image.open(BytesIO(image_data))
+                logger.info(
+                    f"Successfully captured screenshot for {ws_url} (format: {format}, size: {image.size})."
+                )
+                return image
+            except Exception as e:
+                logger.error(f"Failed to create PIL Image from screenshot data for {ws_url}: {e}")
+                return None
+
+    except websockets.exceptions.InvalidURI:
+        logger.error(f"Invalid WebSocket URI: {ws_url}")
+        return None
+    except websockets.exceptions.WebSocketException as e:
+        logger.error(f"WebSocket connection error during screenshot for {ws_url}: {e}")
+        return None
+    except Exception as e:
+        logger.error(
+            f"An unexpected error occurred in capture_tab_screenshot for {ws_url}: {e}",
+            exc_info=True,
+        )
+        return None
+
+
 async def capture_active_tab_screenshot(
     output_dir: str = ".",
     filename: Optional[str] = None,
@@ -357,7 +472,6 @@ async def capture_active_tab_screenshot(
 if __name__ == "__main__":
 
     async def run_test():
-        print("Attempting to get active tab HTML...")
         html = await get_active_tab_html()
         if html:
             print("\nSuccessfully retrieved HTML:")

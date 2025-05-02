@@ -8,7 +8,7 @@ from typing import Optional
 import httpx
 import psutil
 
-from selectron.lib.logger import get_logger
+from selectron.util.logger import get_logger
 
 logger = get_logger(__name__)
 

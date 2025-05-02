@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from selectron.lib.extract_metadata import HtmlMetadata, extract_metadata
+from selectron.util.extract_metadata import HtmlMetadata, extract_metadata
 
 
 class TestHtmlMetadata:
@@ -56,7 +56,7 @@ class TestHtmlMetadata:
         assert metadata.description == "OG description"
         assert metadata.author == "John Doe"
         assert metadata.og_image == "https://example.com/image.jpg"
-        assert metadata.favicon == "/favicon.ico"
+        assert metadata.favicon == "https://example.com/favicon.ico"
         assert metadata.url == "https://example.com"
         assert metadata.keywords == ["test", "metadata", "extraction"]
         assert metadata.published_at == datetime(2023, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
@@ -404,6 +404,66 @@ class TestHtmlMetadata:
         metadata = extract_metadata(html)
         # article:published_time should take precedence
         assert metadata.published_at == datetime(2023, 5, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+    def test_relative_favicon_conversion(self):
+        """Test that relative favicons are converted to absolute URLs."""
+        html = '<html><head><link rel="icon" href="/images/icon.png"></head></html>'
+        url = "https://sub.example.com/path/page.html"
+        metadata = extract_metadata(html, url=url)
+        assert metadata.favicon == "https://sub.example.com/images/icon.png"
+
+        # Test favicon already absolute
+        html_abs = '<html><head><link rel="icon" href="https://other.com/icon.png"></head></html>'
+        metadata_abs = extract_metadata(html_abs, url=url)
+        assert metadata_abs.favicon == "https://other.com/icon.png"
+
+        # Test root-relative favicon without scheme/netloc in href
+        html_root_rel = '<html><head><link rel="icon" href="/just/icon.ico"></head></html>'
+        metadata_root_rel = extract_metadata(html_root_rel, url="http://domain.net")
+        assert metadata_root_rel.favicon == "http://domain.net/just/icon.ico"
+
+    def test_title_fallback(self):
+        """Test fallback logic for title when missing in HTML but URL is provided."""
+        html = "<html><head></head><body>Content</body></html>"
+
+        # Test fallback to last path segment
+        metadata_path = extract_metadata(html, url="https://example.com/path/to/page-title")
+        assert metadata_path.title == "page title"
+
+        # Test fallback to last path segment with extension removal
+        metadata_ext = extract_metadata(html, url="https://example.com/path/to/another_page.html")
+        assert metadata_ext.title == "another page"
+
+        # Test fallback to hostname when path is empty or root
+        metadata_root = extract_metadata(html, url="https://hostname.com/")
+        assert metadata_root.title == "hostname.com"
+        metadata_no_path = extract_metadata(html, url="https://another-host.net")
+        assert metadata_no_path.title == "another-host.net"
+
+        # Test no fallback when URL is not provided
+        metadata_no_url = extract_metadata(html, url=None)
+        assert metadata_no_url.title is None
+
+    def test_favicon_fallback(self):
+        """Test fallback logic for favicon when missing in HTML but URL is provided."""
+        html = "<html><head><title>Title</title></head><body>Content</body></html>"
+
+        # Test favicon fallback
+        metadata_fallback = extract_metadata(html, url="https://example.com/path/page")
+        assert metadata_fallback.favicon == "https://example.com/favicon.ico"
+
+        # Test with different scheme
+        metadata_http = extract_metadata(html, url="http://test.org/another")
+        assert metadata_http.favicon == "http://test.org/favicon.ico"
+
+        # Test no fallback when URL is not provided
+        metadata_no_url = extract_metadata(html, url=None)
+        assert metadata_no_url.favicon is None
+
+        # Test fallback doesn't overwrite existing favicon
+        html_with_favicon = '<html><head><link rel="icon" href="/real_icon.png"></head></html>'
+        metadata_existing = extract_metadata(html_with_favicon, url="https://exists.com")
+        assert metadata_existing.favicon == "https://exists.com/real_icon.png"
 
     def test_whitespace_handling_for_new_fields(self):
         """Test whitespace is properly stripped from extracted values for new fields"""

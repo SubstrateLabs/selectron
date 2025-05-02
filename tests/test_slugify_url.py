@@ -2,7 +2,7 @@ import re
 
 import pytest
 
-from selectron.lib.slugify_url import slugify_url, unslugify_url
+from selectron.util.slugify_url import slugify_url, unslugify_url
 
 
 @pytest.mark.parametrize(
