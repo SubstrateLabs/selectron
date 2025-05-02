@@ -153,9 +153,9 @@ class CdpBrowserExecutor(BrowserExecutor):
                 return result_data.get("value")
             else:
                 logger.debug(
-                    "[evaluate] JS result type is undefined, returning None."
-                )  # Log if undefined
-                return None  # Represent undefined JS result as None
+                    f"[evaluate] JS result type is undefined for expr starting with '{expression[:100]}...'. Raw result: {eval_result}. Returning None."
+                ) # Log if undefined
+                return None # Represent undefined JS result as None
         elif eval_result and "exceptionDetails" in eval_result:
             exception_details = eval_result["exceptionDetails"]
             logger.error(f"JavaScript exception during evaluate: {exception_details}")

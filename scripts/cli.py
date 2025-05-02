@@ -33,6 +33,7 @@ from selectron.chrome.chrome_cdp import (
 )
 from selectron.chrome.chrome_monitor import ChromeMonitor, TabChangeEvent
 from selectron.chrome.connect import ensure_chrome_connection
+from selectron.chrome.highlight_service import HighlightService
 from selectron.chrome.types import TabReference
 from selectron.dom.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES
 from selectron.dom.dom_service import DomService
@@ -77,9 +78,7 @@ class CliApp(App[None]):
     _active_tab_ref: Optional[TabReference] = None
     _active_tab_dom_string: Optional[str] = None
     _agent_worker: Optional[Worker[None]] = None
-    _highlights_active: bool = False  # Track if highlights are currently shown
-    _last_highlight_selector: Optional[str] = None  # Remember last selector
-    _last_highlight_color: Optional[str] = None  # Remember last color
+    highlight_service: HighlightService
 
     def __init__(self):
         super().__init__()
@@ -90,6 +89,7 @@ class CliApp(App[None]):
         # Ensure log file exists (logger.py should also do this)
         self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_file_path.touch(exist_ok=True)  # Explicitly create if doesn't exist
+        self.highlight_service = HighlightService()
 
     @property
     def log_panel(self) -> RichLog:
@@ -235,17 +235,17 @@ class CliApp(App[None]):
             if self._agent_worker and self._agent_worker.is_running:
                 logger.debug("Cancelling previous agent worker.")
                 self._agent_worker.cancel()
-            # Clear highlight state
-            self._highlights_active = False
-            self._last_highlight_selector = None
-            self._last_highlight_color = None
+            # Clear highlight state via service
+            self.highlight_service.set_active(False)
             # Use call_later to ensure visual highlight clearing happens in the event loop
-            self.call_later(self._clear_all_highlights)
+            self.call_later(self.highlight_service.clear, self._active_tab_ref)
             # --- Start new agent worker ---
             logger.debug(f"Starting new agent worker for '{selector_to_try}'.")
             self._agent_worker = self.run_worker(
                 self._run_agent_and_highlight(selector_to_try), exclusive=False
             )  # Assign the new worker
+            # Set highlight service inactive explicitly when starting agent
+            self.highlight_service.set_active(False)
         else:
             logger.debug(
                 "Log input submitted but was empty."
@@ -259,7 +259,8 @@ class CliApp(App[None]):
             logger.error("Failed to establish Chrome connection.")
             return
         self.monitor = ChromeMonitor(
-            rehighlight_callback=self.trigger_rehighlight, check_interval=1.5
+            rehighlight_callback=self.trigger_rehighlight,
+            check_interval=1.5,
         )
         try:
             logger.info("Initializing Chrome monitor...")
@@ -292,6 +293,27 @@ class CliApp(App[None]):
     async def _handle_polling_change(self, event: TabChangeEvent):
         """Callback function for tab changes detected ONLY by polling."""
         tasks = []
+        # Immediately clear highlights if the active tab is closed or navigates away
+        active_tab_closed_or_navigated = False
+        if self._active_tab_ref:
+            for closed_ref in event.closed_tabs:
+                if closed_ref.id == self._active_tab_ref.id:
+                    active_tab_closed_or_navigated = True
+                    break
+            if not active_tab_closed_or_navigated:
+                for _navigated_tab, old_ref in event.navigated_tabs:
+                    if old_ref.id == self._active_tab_ref.id:
+                        active_tab_closed_or_navigated = True
+                        break
+
+        if active_tab_closed_or_navigated:
+            logger.info("Active tab closed or navigated, clearing highlights.")
+            await self.highlight_service.clear(self._active_tab_ref)
+            self.highlight_service.set_active(False)
+            # Consider clearing _active_tab_ref here too?
+            # self._active_tab_ref = None
+            # self._active_tab_dom_string = None
+
         for new_tab in event.new_tabs:
             if new_tab.webSocketDebuggerUrl:
                 logger.info(f"Polling: New Tab: {new_tab.title} ({new_tab.url})")
@@ -443,14 +465,32 @@ class CliApp(App[None]):
         else:
             logger.error(f"Process Failed: Tab {tab.id} ({tab.url}) - No final URL")
 
-        # --- Update Active Tab Reference ---
+        # --- Update Active Tab Reference --- #
         # Set the active tab reference ONLY if we successfully got the core data needed for the agent
         if final_url and html and ws_url:
-            logger.info(f"Setting active tab reference: {tab.id} ({final_url})")
-            self._active_tab_ref = TabReference(
+            new_tab_ref = TabReference(
                 id=tab.id, url=final_url, title=final_title, html=html, ws_url=ws_url
             )
+            logger.info(
+                f"Processing complete for tab {tab.id}, preparing to update active reference."
+            )
+
+            # --- Clear highlights if switching FROM a different active tab ---
+            if self._active_tab_ref and self._active_tab_ref.id != new_tab_ref.id:
+                logger.info(
+                    f"Switching active tab from {self._active_tab_ref.id} to {new_tab_ref.id}. Clearing old highlights."
+                )
+                await self.highlight_service.clear(self._active_tab_ref)
+            # --- End clear highlights ---
+
+            # Now, update the active tab reference
+            self._active_tab_ref = new_tab_ref
             self._active_tab_dom_string = dom_string  # Store the DOM string we fetched
+            logger.info(f"Active tab reference UPDATED to: {tab.id} ({final_url})")
+
+            # Ensure highlight state is inactive for the new context
+            self.highlight_service.set_active(False)
+
         elif self._active_tab_ref and self._active_tab_ref.id == tab.id:
             # If this tab *was* the active one but processing failed, clear it
             logger.warning(f"Clearing active tab reference for {tab.id} due to processing failure.")
@@ -499,12 +539,10 @@ class CliApp(App[None]):
         if self._agent_worker and self._agent_worker.is_running:
             logger.info("Cancelling agent worker on exit...")
             self._agent_worker.cancel()
-        # Clear highlight state
-        self._highlights_active = False
-        self._last_highlight_selector = None
-        self._last_highlight_color = None
+        # Clear highlight state via service
+        self.highlight_service.set_active(False)
         # Clear highlights before exiting (fire and forget)
-        self.call_later(self._clear_all_highlights)
+        self.call_later(self.highlight_service.clear, self._active_tab_ref)
         await asyncio.sleep(0.1)  # Short delay to allow cleanup task to run
         # --- End cleanup --- #
 
@@ -658,7 +696,9 @@ class CliApp(App[None]):
                 if result and result.element_count > 0 and not result.error:
                     logger.debug(f"Highlighting intermediate selector: '{selector}'")
                     asyncio.create_task(
-                        self._highlight_elements_by_selector(selector, color="yellow")
+                        self.highlight_service.highlight(
+                            self._active_tab_ref, selector, color="yellow"
+                        )
                     )
                 return result
 
@@ -668,7 +708,11 @@ class CliApp(App[None]):
                 # Highlight the parent element being inspected
                 if result and result.parent_found and not result.error:
                     logger.debug(f"Highlighting parent for get_children_tags: '{selector}'")
-                    asyncio.create_task(self._highlight_elements_by_selector(selector, color="red"))
+                    asyncio.create_task(
+                        self.highlight_service.highlight(
+                            self._active_tab_ref, selector, color="red"
+                        )
+                    )
                 return result
 
             async def get_siblings_wrapper(selector: str, **kwargs):
@@ -678,7 +722,9 @@ class CliApp(App[None]):
                 if result and result.element_found and not result.error:
                     logger.debug(f"Highlighting element for get_siblings: '{selector}'")
                     asyncio.create_task(
-                        self._highlight_elements_by_selector(selector, color="blue")
+                        self.highlight_service.highlight(
+                            self._active_tab_ref, selector, color="blue"
+                        )
                     )
                 return result
 
@@ -776,13 +822,15 @@ class CliApp(App[None]):
                             f"CLI verification failed for UNIQUE target (count={verification_result.element_count}, error='{verification_result.error}', size_error='{verification_result.size_validation_error}'). Not highlighting final."
                         )
                     else:
-                        logger.error("CLI verification step failed unexpectedly for UNIQUE target. Not highlighting final.")
+                        logger.error(
+                            "CLI verification step failed unexpectedly for UNIQUE target. Not highlighting final."
+                        )
                 elif proposal.target_cardinality == "multiple":
                     if (
                         verification_result
-                        and verification_result.element_count > 0 # Check for > 0 instead of == 1
+                        and verification_result.element_count > 0  # Check for > 0 instead of == 1
                         and not verification_result.error
-                        and not verification_result.size_validation_error # Still check size error if applicable? Maybe not for multiple.
+                        and not verification_result.size_validation_error  # Still check size error if applicable? Maybe not for multiple.
                     ):
                         logger.info(
                             f"CLI verification successful for MULTIPLE targets (count={verification_result.element_count}). Highlighting '{proposal.proposed_selector}' green..."
@@ -793,23 +841,27 @@ class CliApp(App[None]):
                             f"CLI verification failed for MULTIPLE targets (count={verification_result.element_count}, error='{verification_result.error}', size_error='{verification_result.size_validation_error}'). Not highlighting final."
                         )
                     else:
-                        logger.error("CLI verification step failed unexpectedly for MULTIPLE target. Not highlighting final.")
+                        logger.error(
+                            "CLI verification step failed unexpectedly for MULTIPLE target. Not highlighting final."
+                        )
                 else:
                     # Should not happen if pydantic validation works
                     logger.error(f"Unknown target_cardinality: {proposal.target_cardinality}")
 
                 # --- Perform Highlight / Clear State --- #
                 if verification_passed:
+                    # Use highlight_service
                     asyncio.create_task(
-                        self._highlight_elements_by_selector(
-                            proposal.proposed_selector, color=highlight_color
+                        self.highlight_service.highlight(
+                            self._active_tab_ref, proposal.proposed_selector, color=highlight_color
                         )
                     )
                 else:
-                    # Clear state if verification fails for either cardinality
-                    self._highlights_active = False
-                    self._last_highlight_selector = None
-                    self._last_highlight_color = None
+                    # Clear highlights and state via service if verification fails
+                    self.call_later(
+                        self.highlight_service.clear, self._active_tab_ref
+                    )  # Use call_later for consistency
+                    self.highlight_service.set_active(False)
 
             else:
                 logger.error(
@@ -822,187 +874,10 @@ class CliApp(App[None]):
                 exc_info=True,
             )
 
-    async def _highlight_elements_by_selector(self, selector: str, color: str = "yellow") -> None:
-        """Highlights elements matching a selector with a specific color using overlays."""
-        logger.debug(f"Request to highlight: '{selector}' with color {color}")
-
-        # --- Determine alternating color logic --- #
-        current_color = color
-        alternate_color_map = {
-            "yellow": "orange",
-            "blue": "purple",  # Added blue -> purple
-            "red": "brown",  # Added red -> brown
-            # Add other base colors and their alternates if needed
-        }
-        # Check if the requested color is a base color that should alternate
-        # and if the last highlight used that *same* base color.
-        if color in alternate_color_map and self._last_highlight_color == color:
-            current_color = alternate_color_map[color]
-            logger.debug(f"Alternating highlight from {color} to {current_color}.")
-        # --- End alternate color logic --- #
-
-        # --- Store state for re-highlighting ---
-        self._last_highlight_selector = selector
-        self._last_highlight_color = current_color  # Store the actual color used
-        self._highlights_active = True
-        # --- End store state ---
-
-        # --- Clear previous highlights FIRST ---
-        await self._clear_all_highlights()  # Ensure this is called
-        # --- End clear previous ---
-
-        if not self._active_tab_ref or not self._active_tab_ref.ws_url:
-            logger.warning("Cannot highlight selector: No active tab reference or websocket URL.")
-            return
-
-        ws_url = self._active_tab_ref.ws_url
-        url = self._active_tab_ref.url
-        tab_id = self._active_tab_ref.id
-        logger.info(
-            f"Attempting to highlight selector '{selector}' on tab {tab_id} with color {color}"
-        )
-
-        # Escape the selector string for use within the JS string literal
-        escaped_selector = (
-            selector.replace("\\", "\\\\")
-            .replace("'", "\\'")
-            .replace('"', '\\"')
-            .replace("`", "\\`")
-        )
-
-        highlight_style = f"2px solid {current_color}"  # Use current_color
-        background_color = current_color + "33"  # Use current_color
-        container_id = "selectron-highlight-container"
-        overlay_attribute = "data-selectron-highlight-overlay"
-
-        js_code = f"""
-        (function() {{
-            const selector = `{escaped_selector}`;
-            const borderStyle = '{highlight_style}';
-            const bgColor = '{background_color}';
-            const containerId = '{container_id}';
-            const overlayAttr = '{overlay_attribute}';
-
-            // Find or create the container
-            let container = document.getElementById(containerId);
-            if (!container) {{
-                container = document.createElement('div');
-                container.id = containerId;
-                container.style.position = 'fixed';
-                container.style.pointerEvents = 'none';
-                container.style.top = '0';
-                container.style.left = '0';
-                container.style.width = '100%';
-                container.style.height = '100%';
-                container.style.zIndex = '2147483647'; // Max z-index
-                container.style.backgroundColor = 'transparent';
-                document.body.appendChild(container);
-            }}
-
-            const elements = document.querySelectorAll(selector);
-            if (!elements || elements.length === 0) {{
-                return `No elements found for selector: ${{selector}}`;
-            }}
-
-            let highlightedCount = 0;
-            elements.forEach(el => {{
-                try {{
-                    const rects = el.getClientRects();
-                    if (!rects || rects.length === 0) return; // Skip elements without geometry
-
-                    for (const rect of rects) {{
-                        if (rect.width === 0 || rect.height === 0) continue; // Skip empty rects
-
-                        const overlay = document.createElement('div');
-                        overlay.setAttribute(overlayAttr, 'true'); // Mark as overlay
-                        overlay.style.position = 'fixed';
-                        overlay.style.border = borderStyle;
-                        overlay.style.backgroundColor = bgColor;
-                        overlay.style.pointerEvents = 'none';
-                        overlay.style.boxSizing = 'border-box';
-                        overlay.style.top = `${{rect.top}}px`;
-                        overlay.style.left = `${{rect.left}}px`;
-                        overlay.style.width = `${{rect.width}}px`;
-                        overlay.style.height = `${{rect.height}}px`;
-                        overlay.style.zIndex = '2147483647'; // Ensure overlay is on top
-
-                        container.appendChild(overlay);
-                    }}
-                    highlightedCount++;
-                }} catch (e) {{
-                     console.warn('Selectron highlight error for one element:', e);
-                }}
-            }});
-
-            return `Highlighted ${{highlightedCount}} element(s) (using overlays) for: ${{selector}}`;
-        }})();
-        """
-
-        try:
-            executor = CdpBrowserExecutor(ws_url, url)
-            result = await executor.evaluate(js_code)
-            logger.info(f"Highlight JS execution result: {result}")
-        except websockets.exceptions.WebSocketException as e:
-            logger.error(f"Highlight selector failed for tab {tab_id}: WebSocket error - {e}")
-        except Exception as e:
-            logger.error(
-                f"Highlight selector failed for tab {tab_id}: Unexpected error - {e}",
-                exc_info=True,
-            )
-
-    async def _clear_all_highlights(self) -> None:
-        """Removes all highlights previously added by this tool."""
-        if not self._active_tab_ref or not self._active_tab_ref.ws_url:
-            # Don't warn here, this might be called when no tab is active
-            return
-
-        ws_url = self._active_tab_ref.ws_url
-        url = self._active_tab_ref.url
-        tab_id = self._active_tab_ref.id
-        # logger.debug(f"Attempting to clear highlights on tab {tab_id}") # Debug log
-
-        container_id = "selectron-highlight-container"
-
-        js_code = f"""
-        (function() {{
-            const containerId = '{container_id}'; // Capture ID for message
-            const container = document.getElementById(containerId);
-            let count = 0;
-            if (container) {{
-                count = container.childElementCount; // Count overlays before removing
-                try {{
-                    container.remove(); // Remove the whole container
-                    return `SUCCESS: Removed highlight container ('${{containerId}}') with ${{count}} overlays.`;
-                }} catch (e) {{
-                    return `ERROR: Failed to remove container ('${{containerId}}'): ${{e.message}}`;
-                }}
-            }} else {{
-                return 'INFO: Highlight container not found, nothing to remove.';
-            }}
-        }})();
-        """
-        try:
-            # Use CdpBrowserExecutor to handle connection and execution
-            # logger.info(f"Attempting to clear highlights on tab {tab_id}...") # Changed to info
-            executor = CdpBrowserExecutor(ws_url, url)
-            _result = await executor.evaluate(js_code)
-            # logger.info(f"Clear highlights JS result: {result}") # Changed to info
-        except websockets.exceptions.WebSocketException:
-            # Ignore connection errors during cleanup, tab might be closed
-            pass
-        except Exception as e:
-            logger.warning(f"Non-critical error clearing highlights on tab {tab_id}: {e}")
-
     async def trigger_rehighlight(self):
-        """Triggers a re-highlight using the last known selector and color."""
-        # logger.debug("Triggering rehighlight") # Optional debug log
-        if self._highlights_active and self._last_highlight_selector and self._last_highlight_color:
-            # logger.debug(f"Rehighlighting '{self._last_highlight_selector}' with {self._last_highlight_color}")
-            await self._highlight_elements_by_selector(
-                self._last_highlight_selector, self._last_highlight_color
-            )
-        # else:
-        # logger.debug("Skipping rehighlight (not active or no selector/color)")
+        """Triggers a re-highlight using the HighlightService."""
+        logger.debug("[CliApp] Triggering rehighlight via HighlightService")  # Updated log source
+        await self.highlight_service.rehighlight(self._active_tab_ref)
 
 
 if __name__ == "__main__":
@@ -1010,4 +885,3 @@ if __name__ == "__main__":
     get_logger("__main__")  # Initial call to setup file logging
     app = CliApp()
     app.run()
-
