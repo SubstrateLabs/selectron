@@ -8,9 +8,9 @@ import imagehash
 from PIL import Image
 
 from selectron.util.extract_metadata import HtmlMetadata
+from selectron.util.image_utils import stitch_vertical
 from selectron.util.logger import get_logger
 from selectron.util.slugify_url import slugify_url
-from selectron.util.stitch_images import stitch_vertical
 
 logger = get_logger(__name__)
 

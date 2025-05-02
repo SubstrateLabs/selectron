@@ -1,4 +1,3 @@
-import os
 from typing import Optional
 
 from pydantic_ai import Agent, Tool
@@ -16,7 +15,7 @@ logger = get_logger(__name__)
 
 DEFAULT_MODEL_NAME = "openai:gpt-4.1"
 
-_SYSTEM_PROMPT = """
+_SYSTEM_PROMPT_BASE = """
 You are an expert web developer finding the MOST ROBUST and precise CSS selector for real-world websites AND extracting specified data. Websites often contain unstable, auto-generated IDs (like `emberXXX`) and CSS class names (like `aBcXyZ123` or random-looking strings). Your primary goal is to **avoid these unstable identifiers**.
 
 Goal: Find a unique selector for the *smallest possible element* matching the user's description (which might involve specific text content, stable attributes like `role`, `aria-label`, meaningful parts of `href`, or stable class names). Then, extract the requested data (e.g., a specific attribute's value or the element's text). Output the result as an `AgentResult` model.
@@ -50,36 +49,32 @@ Goal: Find a unique selector for the *smallest possible element* matching the us
 8.  **Final Verification & Output:** Call `evaluate_selector` one last time with the final `proposed_selector` and relevant `target_text_to_check` to get final verification details. Package the `proposed_selector`, `reasoning` (explaining stable selector choice *and* extraction), the extraction parameters (`attribute_extracted`, `text_extracted_flag`), the `ExtractionResult` from step 7, and the `SelectorEvaluationResult` from this step into the final `AgentResult` model.
 """
 
+_DOM_CONTEXT_PROMPT_SECTION = """
+
+**ADDITIONAL CONTEXT: SIMPLIFIED DOM REPRESENTATION**
+A simplified text representation of the DOM structure (derived from `dom.txt`) is provided below. It uses a format like `[node_id]<tag attributes...> text_snippet`. You can use this simplified view to help understand the stable structure and relationships between elements when choosing identifiers. However, remember that your final `proposed_selector` **MUST** work on the full HTML and be verified using the provided tools (`evaluate_selector`, etc.). Do not attempt to directly query this text representation with tools.
+
+--- SIMPLIFIED DOM START ---
+{dom_representation}
+--- SIMPLIFIED DOM END ---
+"""
+
 
 class SelectorAgent:
-    """
-    Uses an AI model guided by a system prompt and a set of tools operating on parsed HTML
-    to identify the most stable selector for a target element described by the user,
-    and optionally extract text content or attribute values from that element.
-    """
-
     def __init__(
         self,
         html_content: str,
         base_url: str,
-        openai_api_key: Optional[str] = None,
         model_name: str = DEFAULT_MODEL_NAME,
+        dom_representation: Optional[str] = None,
     ):
         """
-        Initializes the SelectorAgent.
-
         Args:
             html_content: The HTML content string to analyze.
             base_url: The base URL of the page, used for resolving relative URLs.
-            openai_api_key: Your OpenAI API key. If None, attempts to read from OPENAI_API_KEY env var.
-            model_name: The name of the OpenAI model to use (e.g., "openai:gpt-4o-mini", "openai:gpt-4.1-mini").
+            model_name: The Pydantic AI model name (e.g., "openai:gpt-4o-mini", "openai:gpt-4.1-mini").
+            dom_representation: Optional simplified text representation of the DOM.
         """
-        if not openai_api_key:
-            openai_api_key = os.getenv("OPENAI_API_KEY")
-        if not openai_api_key:
-            raise ValueError(
-                "OpenAI API key not provided and OPENAI_API_KEY environment variable not set."
-            )
         if not base_url:
             raise ValueError("base_url must be provided.")
 
@@ -103,12 +98,28 @@ class SelectorAgent:
             ),
         ]
 
+        # Construct the system prompt, adding DOM context if provided
+        system_prompt = _SYSTEM_PROMPT_BASE
+        if dom_representation:
+            # Limit DOM representation size to avoid excessive prompt length
+            # TODO: Make this limit configurable or smarter?
+            max_dom_len = 10000
+            truncated_dom = dom_representation[:max_dom_len]
+            if len(dom_representation) > max_dom_len:
+                truncated_dom += "\n... (truncated)"
+                logger.warning(f"DOM representation truncated to {max_dom_len} characters.")
+
+            system_prompt += _DOM_CONTEXT_PROMPT_SECTION.format(dom_representation=truncated_dom)
+            logger.info("Added simplified DOM representation to system prompt.")
+        else:
+            logger.info("No simplified DOM representation provided.")
+
         # Use the provided or default model name
         self._agent = Agent(
             model_name,
             output_type=AgentResult,
             tools=self._tools,
-            system_prompt=_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             # Add other Agent parameters if needed (e.g., temperature)
         )
         logger.info(f"SelectorAgent initialized with model: {model_name}")

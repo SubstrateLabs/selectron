@@ -1,3 +1,5 @@
+import base64
+from pathlib import Path
 from typing import List, Optional
 
 from PIL import Image
@@ -5,6 +7,19 @@ from PIL import Image
 from selectron.util.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def encode_image_to_base64(image_path: Path) -> str:
+    """Reads an image file and encodes it as a base64 string."""
+    try:
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode("utf-8")
+    except FileNotFoundError:
+        logger.error(f"Image file not found at {image_path}")
+        raise
+    except Exception:
+        logger.error(f"Failed to read or encode image {image_path}", exc_info=True)
+        raise
 
 
 def stitch_vertical(images: List[Image.Image], bg_color=(255, 255, 255)) -> Optional[Image.Image]:
