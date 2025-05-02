@@ -1,5 +1,4 @@
 # NOTE: modified from the original
-import json
 import logging
 from importlib import resources
 from typing import Optional, Protocol
@@ -121,14 +120,6 @@ class DomService:
                     parent=None,
                 ),
                 {},
-            )
-
-        # Only log performance metrics in debug mode
-        if debug_mode and "perfMetrics" in eval_page:
-            logger.debug(
-                "DOM Tree Building Performance Metrics for: %s\n%s",
-                self.browser_executor.url,  # Use browser_executor.url
-                json.dumps(eval_page["perfMetrics"], indent=2),
             )
 
         return await self._construct_dom_tree(eval_page)

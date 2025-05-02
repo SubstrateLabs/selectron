@@ -1,12 +1,12 @@
-(
-    args = {
-      doHighlightElements: true,
-      focusHighlightIndex: -1,
-      viewportExpansion: 0,
-      debugMode: false,
-    }
-  ) => {
-    const { doHighlightElements, focusHighlightIndex, viewportExpansion, debugMode } = args;
+(args) => {
+    // Destructure args with default values inside the function body
+    const {
+        doHighlightElements = true,
+        focusHighlightIndex = -1,
+        viewportExpansion = 0,
+        debugMode = false,
+    } = args || {}; // Use empty object default if args itself is null/undefined
+  
     let highlightIndex = 0; // Reset highlight index
   
     // Add timing stack to handle recursion

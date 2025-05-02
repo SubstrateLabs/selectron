@@ -1,10 +1,7 @@
 .PHONY: format lint typecheck test install clean
 
-sample:
-	uv run scripts/sample.py
-
-draw:
-	uv run scripts/draw.py
+cli:
+	uv run scripts/cli.py
 
 # ================================
 # housekeeping

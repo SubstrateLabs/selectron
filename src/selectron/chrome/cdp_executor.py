@@ -128,9 +128,9 @@ class CdpBrowserExecutor(BrowserExecutor):
             # Simple serialization for basic args - beware of complex objects
             expression_with_arg = f"({expression})(JSON.parse('{json.dumps(arg)}'))"
             params["expression"] = expression_with_arg
-            logger.debug(
-                f"Using Runtime.evaluate with serialized args: {expression_with_arg[:100]}..."
-            )
+            # logger.debug(
+            #     f"Using Runtime.evaluate with serialized args: {expression_with_arg[:100]}..."
+            # ) # COMMENTED OUT - Suspected source of unwanted JS code log
             eval_result = await self._send_command("Runtime.evaluate", params)
             # Log raw result immediately after call
             logger.debug(
