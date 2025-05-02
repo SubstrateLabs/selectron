@@ -1,6 +1,6 @@
 import re
 
-from selectron.browser_use.dom_views import DOMElementNode
+from selectron.dom.dom_views import DOMElementNode
 
 
 def convert_simple_xpath_to_css_selector(xpath: str) -> str:

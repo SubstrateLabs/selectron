@@ -3,7 +3,7 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Dict, List, Optional
 
 # Import from history_tree_views
-from selectron.browser_use.history_tree_views import (
+from selectron.dom.history_tree_views import (
     CoordinateSet,
     HashedDomElement,
     ViewportInfo,
@@ -75,6 +75,7 @@ class DOMElementNode(DOMBaseNode):
     viewport_coordinates: Optional[CoordinateSet] = None
     page_coordinates: Optional[CoordinateSet] = None
     viewport_info: Optional[ViewportInfo] = None
+    is_content_element: bool = False
 
     """
 	### State injected by the browser context.
@@ -127,7 +128,7 @@ class DOMElementNode(DOMBaseNode):
 
     @cached_property
     def hash(self) -> HashedDomElement:
-        from selectron.browser_use.history_tree_processor import HistoryTreeProcessor
+        from selectron.dom.history_tree_processor import HistoryTreeProcessor
 
         return HistoryTreeProcessor._hash_dom_element(self)
 
@@ -164,7 +165,7 @@ class DOMElementNode(DOMBaseNode):
             depth_str = depth * "\t"
 
             if isinstance(node, DOMElementNode):
-                # Add element with highlight_index
+                # --- Render Interactive Element ---
                 if node.highlight_index is not None:
                     next_depth += 1
 
@@ -209,7 +210,7 @@ class DOMElementNode(DOMBaseNode):
                             attr_parts.append(f"{key}='{escaped_value}'")
                         attributes_html_str = " ".join(attr_parts)
 
-                    # Build the line
+                    # Build the line for interactive element
                     if node.is_new:
                         highlight_indicator = f"*[{node.highlight_index}]*"
                     else:
@@ -233,30 +234,105 @@ class DOMElementNode(DOMBaseNode):
                             line += " />"
                         else:
                             # No space needed if no attributes
-                            # Ensure self-closing tags have a space before />, e.g. <img /> not <img/>
-                            # Though technically not required by HTML5, it's common practice.
-                            # However, for conciseness here, maybe omit it? Let's omit it for now.
-                            # line += " />"
-                            # Let's stick to the original logic: add space if *neither* attrs nor text
                             line += (
                                 " />"  # Reverting to add space for consistency with previous code
                             )
-
                     formatted_text.append(line)
+                    # Process children of interactive elements
+                    for child in node.children:
+                        process_node(child, next_depth)
 
-                # Process children regardless
-                for child in node.children:
-                    process_node(child, next_depth)
+                # --- Render Content Element (or structural parent without highlight) ---
+                elif node.is_content_element or not any(
+                    isinstance(c, DOMElementNode) and c.highlight_index is not None
+                    for c in node.children
+                ):  # Include structural parents only if they lead to content
+                    # Only render if it has text or leads to something renderable
+                    text = (
+                        node.get_all_text_till_next_clickable_element()
+                    )  # Maybe limit depth here?
+                    # Or just get immediate text? Let's try immediate text first for content elements.
+                    immediate_text = "".join(
+                        c.text for c in node.children if isinstance(c, DOMTextNode)
+                    ).strip()
+
+                    # Decide whether to render this node based on text or if children will be rendered
+                    has_renderable_children = any(
+                        (
+                            isinstance(child, DOMElementNode)
+                            and (child.highlight_index is not None or child.is_content_element)
+                        )
+                        or (
+                            isinstance(child, DOMTextNode)
+                            and child.text.strip()
+                            and not child.has_parent_with_highlight_index()
+                        )
+                        for child in node.children
+                    )
+
+                    if immediate_text or has_renderable_children:
+                        # Use a different prefix/indentation? Maybe just indent without index.
+                        line_prefix = f"{depth_str}  "
+                        line = f"{line_prefix}<{node.tag_name}"
+
+                        # Optionally add some attributes for context (e.g., class, id)?
+                        attributes_html_str = ""
+                        context_attributes = {}
+                        if "class" in node.attributes and node.attributes["class"]:
+                            context_attributes["class"] = node.attributes["class"]
+                        if "id" in node.attributes and node.attributes["id"]:
+                            context_attributes["id"] = node.attributes["id"]
+
+                        if context_attributes:
+                            attr_parts = []
+                            for key, value in context_attributes.items():
+                                escaped_value = str(value).replace("'", "\\'")
+                                attr_parts.append(f"{key}='{escaped_value}'")
+                            attributes_html_str = " ".join(attr_parts)
+                            line += f" {attributes_html_str}"
+
+                        # Add immediate text if present
+                        if immediate_text:
+                            if attributes_html_str:
+                                line += " "  # Add space if attributes were added
+                            line += f">{immediate_text} />"
+                        else:
+                            if attributes_html_str:
+                                line += " "  # Add space if attributes were added
+                            line += "/>"  # Self-close if no text
+
+                        formatted_text.append(line)
+
+                        # Process children for content elements too
+                        for child in node.children:
+                            process_node(
+                                child, depth + 1
+                            )  # Keep same depth or increment? Let's increment.
+                    else:
+                        # If it's a structural node with no immediate text and no renderable children,
+                        # still process its children at the *same* depth, don't render the parent itself.
+                        for child in node.children:
+                            process_node(child, depth)
+                else:
+                    # If it's neither highlighted nor content/structural, just process children at same depth.
+                    for child in node.children:
+                        process_node(child, depth)
 
             elif isinstance(node, DOMTextNode):
-                # Add text only if it doesn't have a highlighted parent
+                # Add text only if it doesn't have a highlighted parent AND is relevant
                 if (
                     not node.has_parent_with_highlight_index()
                     and node.parent
                     and node.parent.is_visible
                     and node.parent.is_top_element
-                ):  # and node.is_parent_top_element()
-                    formatted_text.append(f"{depth_str}{node.text}")
+                    # Also check if parent is a content element we decided to include
+                    # (This logic might need refinement based on how structural parents are handled above)
+                    # and (node.parent.highlight_index is not None or node.parent.is_content_element)
+                ):
+                    # Indent text relative to its parent element
+                    formatted_text.append(
+                        f"{depth_str}  {node.text.strip()}"
+                    )  # Add extra indent for text
 
         process_node(self, 0)
         return "\n".join(formatted_text)

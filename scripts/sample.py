@@ -1,14 +1,9 @@
 import asyncio
-import json
 import logging
 import signal
 import sys
-from collections import defaultdict
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from typing import Optional
 
-import imagehash
 import websockets
 from PIL import Image
 from rich.console import Console
@@ -16,45 +11,32 @@ from rich.pretty import pretty_repr
 from term_image.exceptions import InvalidSizeError
 from term_image.image import AutoImage
 
-from selectron.browser_use.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES
-
-# Import DomService and CdpBrowserExecutor
-from selectron.browser_use.dom_service import DomService
 from selectron.chrome.cdp_executor import CdpBrowserExecutor
 from selectron.chrome.chrome_cdp import (
     ChromeTab,
     capture_tab_screenshot,
-    send_cdp_command,
+    get_final_url_and_title,
+    get_html_via_ws,
     wait_for_page_load,
 )
 from selectron.chrome.chrome_monitor import ChromeMonitor, TabChangeEvent
 from selectron.chrome.connect import ensure_chrome_connection
 from selectron.chrome.types import TabReference
-from selectron.util.extract_markdown import extract_markdown
+from selectron.dom.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES
+from selectron.dom.dom_service import DomService
+from selectron.sampler.sampler_utils import save_sample_data
 from selectron.util.extract_metadata import HtmlMetadata, extract_metadata
 from selectron.util.logger import get_logger
-from selectron.util.slugify_url import slugify_url
-from selectron.util.stitch_images import stitch_vertical
 
 logger = get_logger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("websockets").setLevel(logging.INFO)
 console = Console()
 
-# Store tuples of (Image, hash) to allow deduplication
-url_screenshot_data: Dict[str, List[Tuple[Image.Image, imagehash.ImageHash]]] = defaultdict(list)
 
+# --- Helper Functions (moved most to sampler_utils) ---
 
-# --- Helper for Hashing ---
-def compute_perceptual_hash(img: Image.Image) -> Optional[imagehash.ImageHash]:
-    """Computes the average perceptual hash (aHash) of an image."""
-    try:
-        # aHash is generally fast and good for this type of deduplication
-        img_hash = imagehash.average_hash(img)
-        return img_hash
-    except Exception as e:
-        logger.error(f"Failed to compute image hash: {e}", exc_info=True)
-        return None
+# --- Event Handlers ---
 
 
 async def handle_polling_change(event: TabChangeEvent):
@@ -109,22 +91,20 @@ async def handle_content_fetched(
 ):
     """Callback triggered after interaction + debounce + content fetch."""
     console.print(
-        f"  [green]Interaction: Content Fetched:[/green] Tab {ref.id} ({ref.title} - {ref.url}) ScrollY: {scroll_y}"
+        f"  [green]Interaction: Content Fetched:[/green] Tab {ref.id} ({ref.title} - {ref.url}) ScrollY: {scroll_y if scroll_y is not None else 'N/A'}"
     )
 
     # Log if DOM string was fetched
     if dom_string:
-        console.print(
-            f"    [blue]Info:[/blue] Fetched DOM representation (Length: {len(dom_string)})"
-        )
+        console.print(f"    [blue]Info:[/blue] Fetched DOM (Length: {len(dom_string)})")
     else:
         console.print(
-            f"    [yellow]Warning:[/yellow] DOM representation was not fetched for {ref.url} after interaction."
+            f"    [yellow]Warning:[/yellow] DOM string not fetched for {ref.url} after interaction."
         )
 
     if not ref.html:
         console.print(
-            f"    [yellow]Warning:[/yellow] No HTML content fetched for {ref.url}, skipping metadata and save."
+            f"    [yellow]Warning:[/yellow] HTML not fetched for {ref.url}, skipping metadata/save."
         )
         if image:
             _display_screenshot(image, ref.title or "Unknown Title")
@@ -133,8 +113,10 @@ async def handle_content_fetched(
     metadata: Optional[HtmlMetadata] = None
     try:
         metadata = extract_metadata(ref.html, url=ref.url)
-        console.print(f"    [green]Success:[/green] Extracted Metadata for {ref.title}:")
-        console.print(pretty_repr(metadata, indent_size=2, max_length=20))
+        console.print(f"    [green]Success:[/green] Extracted Metadata for {ref.title}")
+        logger.info(
+            f"Extracted metadata for {ref.url}: {pretty_repr(metadata, indent_size=2, max_length=20)}"
+        )
     except Exception as e:
         logger.error(
             f"Error extracting metadata for {ref.url} after interaction: {e}", exc_info=True
@@ -152,7 +134,6 @@ async def handle_content_fetched(
             html=ref.html,
             metadata=metadata,
             image=image,
-            scroll_y=scroll_y,
             dom_string=dom_string,
         )
     else:
@@ -163,11 +144,9 @@ async def handle_content_fetched(
             missing.append("Metadata")
         if not image:
             missing.append("Image")
-        logger.warning(
-            f"Skipping save for {ref.url} after interaction due to missing data: {', '.join(missing)}"
-        )
+        logger.warning(f"Skipping save for {ref.url} due to missing data: {', '.join(missing)}")
         console.print(
-            f"    [yellow]Warning:[/yellow] Skipping save for {ref.url} due to missing data: {', '.join(missing)}."
+            f"    [yellow]Warning:[/yellow] Skipping save for {ref.url} due to missing: {', '.join(missing)}."
         )
 
 
@@ -176,8 +155,7 @@ def _display_screenshot(image: Image.Image, title: str):
         f"    [green]Success:[/green] Captured screenshot for {title}. Displaying cropped preview:"
     )
     try:
-        # Define the box (left, upper, right, lower)
-        # Keep original width, crop height to max 600px
+        # Crop image for terminal display (max height 600px)
         width, height = image.size
         crop_height = min(height, 600)
         cropped_image = image.crop((0, 0, width, crop_height))
@@ -198,122 +176,81 @@ async def process_new_tab(tab: ChromeTab):
     """Fetches HTML, metadata, screenshot for a NEW or NAVIGATED tab and saves samples.
     Connects via WebSocket, waits for load, gets final URL, then fetches content.
     """
-    console.print(f"    [cyan]Processing Tab:[/cyan] {tab.title} ({tab.url}) Initial fetch...")
+    logger.info(f"Processing tab {tab.id}: {tab.title} ({tab.url})")
+    console.print(f"    [cyan]Processing Tab:[/cyan] {tab.title} ({tab.url})")
     html: Optional[str] = None
     metadata: Optional[HtmlMetadata] = None
     screenshot_pil_image: Optional[Image.Image] = None
-    final_url: Optional[str] = tab.url  # Start with the initial URL
-    final_title: Optional[str] = tab.title
     ws = None
-    dom_string: Optional[str] = None  # Initialize dom_string
+    dom_string: Optional[str] = None
 
     if not tab.webSocketDebuggerUrl:
-        logger.warning(f"Tab {tab.id} missing websocket URL in process_new_tab, cannot process.")
+        logger.warning(f"Tab {tab.id} missing websocket URL, cannot process.")
         return
 
     ws_url = tab.webSocketDebuggerUrl
+    final_url: Optional[str] = None
+    final_title: Optional[str] = None
 
     try:
-        # --- Establish Connection ---
         logger.debug(f"Connecting to WebSocket: {ws_url}")
         ws = await websockets.connect(ws_url, max_size=20 * 1024 * 1024)
         logger.debug(f"Connected to WebSocket for tab {tab.id}.")
 
-        # --- Wait for Load & Get Final URL ---
         loaded = await wait_for_page_load(ws)
         if not loaded:
             logger.warning(f"Page load timeout/failure for {tab.id}, proceeding anyway.")
         else:
             logger.debug(f"Page load confirmed for tab {tab.id}.")
 
-        # Add a small delay to let the page settle further
         settle_delay = 1.0
         logger.debug(f"Waiting {settle_delay}s for page {tab.id} to settle...")
         await asyncio.sleep(settle_delay)
 
-        # Get final URL after load/redirects
-        try:
-            url_script = "window.location.href"
-            url_eval = await send_cdp_command(
-                ws, "Runtime.evaluate", {"expression": url_script, "returnByValue": True}
-            )
-            if url_eval and url_eval.get("result", {}).get("type") == "string":
-                final_url = url_eval["result"]["value"]
-                if final_url != tab.url:
-                    logger.info(
-                        f"URL changed after load for tab {tab.id}: {tab.url} -> {final_url}"
-                    )
-                else:
-                    logger.debug(f"URL confirmed after load for tab {tab.id}: {final_url}")
-            else:
-                logger.warning(
-                    f"Could not get final URL for tab {tab.id}. Using initial: {tab.url}"
-                )
-                final_url = tab.url  # Fallback
-        except Exception as url_e:
-            logger.error(f"Error getting final URL for tab {tab.id}: {url_e}", exc_info=True)
-            final_url = tab.url  # Fallback
+        final_url, final_title = await get_final_url_and_title(
+            ws, tab.url, tab.title or "Unknown", tab_id_for_logging=tab.id
+        )
+        logger.info(f"Tab {tab.id} final URL: {final_url}, Title: {final_title}")
 
-        # --- Fetch HTML (using existing connection) ---
-        try:
-            html_script = "document.documentElement.outerHTML"
-            html_eval = await send_cdp_command(ws, "Runtime.evaluate", {"expression": html_script})
-            if html_eval and html_eval.get("result", {}).get("type") == "string":
-                html = html_eval["result"].get("value")
-                # Check html is not None before logging length
-                if html:
-                    console.print(
-                        f"    [green]Success:[/green] Retrieved HTML for final URL {final_url} (Length: {len(html)})"
-                    )
-                else:
-                    # Should not happen if type is string, but safety check
-                    console.print(
-                        f"    [yellow]Warning:[/yellow] Retrieved HTML for {final_url}, but content is unexpectedly None/empty."
-                    )
-            else:
-                console.print(
-                    f"    [yellow]Warning:[/yellow] Could not retrieve HTML for {final_url} via WebSocket."
-                )
-        except Exception as html_e:
-            logger.error(
-                f"Error getting HTML via WebSocket for {final_url}: {html_e}", exc_info=True
-            )
-            console.print(f"    [red]Error:[/red] Failed to get HTML for {final_url}: {html_e}")
+        if final_url:
+            html = await get_html_via_ws(ws, final_url)
+        else:
+            logger.warning(f"Skipping HTML fetch for {tab.id} because final URL is missing.")
+            html = None
 
-        # --- Extract Metadata (using final URL) ---
-        if html:
+        if html and final_url and final_title:
             try:
-                # Get final title from document if possible (might differ from tab title)
-                title_script = "document.title"
-                title_eval = await send_cdp_command(
-                    ws, "Runtime.evaluate", {"expression": title_script, "returnByValue": True}
+                metadata = extract_metadata(html, url=final_url)
+                console.print(f"    [green]Success:[/green] Extracted Metadata for {final_title}")
+                logger.info(
+                    f"Extracted metadata for {final_url}: {pretty_repr(metadata, indent_size=2, max_length=20)}"
                 )
-                if title_eval and title_eval.get("result", {}).get("type") == "string":
-                    final_title = title_eval["result"]["value"]
-                else:
-                    final_title = tab.title  # Fallback to tab title
-
-                metadata = extract_metadata(html, url=final_url)  # Use final_url
-                console.print(f"    [green]Success:[/green] Extracted Metadata for {final_title}:")
-                console.print(pretty_repr(metadata, indent_size=2, max_length=20))
             except Exception as meta_e:
                 logger.error(f"Error extracting metadata for {final_url}: {meta_e}", exc_info=True)
                 console.print(
                     f"    [red]Error:[/red] Failed extracting metadata for {final_url}: {meta_e}"
                 )
+                metadata = None
+        else:
+            missing_for_meta = []
+            if not html:
+                missing_for_meta.append("HTML")
+            if not final_url:
+                missing_for_meta.append("Final URL")
+            if not final_title:
+                missing_for_meta.append("Final Title")
+            logger.warning(
+                f"Skipping metadata extraction for {tab.id} due to missing data: {', '.join(missing_for_meta)}"
+            )
+            metadata = None
 
-        # --- Fetch DOM State (using existing connection) --- #
-        if html and final_url:  # Only try if we have HTML and a URL
+        if html and final_url:
             try:
                 logger.debug(f"Fetching DOM state via executor for {tab.id}")
-                # Use the existing ws connection with CdpBrowserExecutor
-                # IMPORTANT: Ensure Runtime.enable is implicitly called by executor
                 browser_executor = CdpBrowserExecutor(ws_url, final_url, ws_connection=ws)
                 dom_service = DomService(browser_executor)
-                # Get DOM state (disable highlighting for initial capture)
                 dom_state = await dom_service.get_clickable_elements(highlight_elements=False)
                 if dom_state and dom_state.element_tree:
-                    # Generate DOM string WITH attributes
                     dom_string = dom_state.element_tree.clickable_elements_to_string(
                         include_attributes=DOM_STRING_INCLUDE_ATTRIBUTES
                     )
@@ -324,31 +261,40 @@ async def process_new_tab(tab: ChromeTab):
                     console.print(
                         f"    [yellow]Warning:[/yellow] get_clickable_elements returned empty state for {final_url}"
                     )
+                    dom_string = None
             except Exception as dom_e:
                 logger.error(
-                    f"Error fetching or serializing DOM for {final_url}: {dom_e}",
-                    exc_info=True,
+                    f"Error fetching/serializing DOM for {final_url}: {dom_e}", exc_info=True
                 )
                 console.print(
-                    f"    [red]Error:[/red] Failed to fetch/serialize DOM for {final_url}: {dom_e}"
+                    f"    [red]Error:[/red] Failed fetching/serializing DOM for {final_url}: {dom_e}"
                 )
+                dom_string = None
         else:
             logger.warning(f"Skipping DOM fetch for {tab.id} because HTML or final URL is missing.")
+            dom_string = None
 
-        # --- Capture Screenshot (using existing connection) ---
-        try:
-            screenshot_pil_image = await capture_tab_screenshot(ws_url=ws_url, ws_connection=ws)
-            if screenshot_pil_image:
-                _display_screenshot(screenshot_pil_image, final_title or "Unknown Title")
-            else:
+        if final_url and final_title:
+            try:
+                screenshot_pil_image = await capture_tab_screenshot(ws_url=ws_url, ws_connection=ws)
+                if screenshot_pil_image:
+                    _display_screenshot(screenshot_pil_image, final_title)
+                else:
+                    console.print(
+                        f"    [yellow]Warning:[/yellow] Could not capture screenshot for {final_url}."
+                    )
+                    screenshot_pil_image = None
+            except Exception as ss_e:
+                logger.error(f"Error capturing screenshot for {final_url}: {ss_e}", exc_info=True)
                 console.print(
-                    f"    [yellow]Warning:[/yellow] Could not capture screenshot for {final_url}."
+                    f"    [red]Error:[/red] Failed capturing screenshot for {final_url}: {ss_e}"
                 )
-        except Exception as ss_e:
-            logger.error(f"Error capturing screenshot for {final_url}: {ss_e}", exc_info=True)
-            console.print(
-                f"    [red]Error:[/red] Failed to capture screenshot for {final_url}: {ss_e}"
+                screenshot_pil_image = None
+        else:
+            logger.warning(
+                f"Skipping screenshot capture for {tab.id} because final URL or Title is missing."
             )
+            screenshot_pil_image = None
 
     except websockets.exceptions.WebSocketException as ws_e:
         logger.error(f"WebSocket error during processing tab {tab.id}: {ws_e}", exc_info=True)
@@ -357,16 +303,13 @@ async def process_new_tab(tab: ChromeTab):
         logger.error(f"Unexpected error processing tab {tab.id} ({tab.url}): {e}", exc_info=True)
         console.print(f"    [red]Error:[/red] Unexpected error for {tab.url}: {e}")
     finally:
-        # --- Ensure WebSocket is closed ---
         if ws and ws.state != websockets.protocol.State.CLOSED:
             try:
                 await ws.close()
                 logger.debug(f"WebSocket closed for tab {tab.id}.")
             except Exception as close_e:
-                logger.warning(f"Error closing WebSocket for tab {tab.id}: {close_e}")
+                logger.warning(f"Error closing WebSocket for {tab.id}: {close_e}")
 
-    # --- Save Data (using final URL) ---
-    # Ensure final_url is valid before proceeding
     if not final_url:
         logger.error(
             f"Cannot save data for tab {tab.id} because final URL could not be determined."
@@ -379,7 +322,6 @@ async def process_new_tab(tab: ChromeTab):
             html=html,
             metadata=metadata,
             image=screenshot_pil_image,
-            scroll_y=0,  # Initial load is always scrollY 0
             dom_string=dom_string,
         )
     else:
@@ -388,202 +330,12 @@ async def process_new_tab(tab: ChromeTab):
             missing.append("HTML")
         if not metadata:
             missing.append("Metadata")
-        # Don't require image for saving metadata/html/md
-        # if not screenshot_pil_image: missing.append("Image")
+        if not screenshot_pil_image:
+            missing.append("Image")
         logger.warning(f"Skipping save for {final_url} due to missing data: {', '.join(missing)}")
         console.print(
-            f"    [yellow]Warning:[/yellow] Skipping save for {final_url} due to missing data: {', '.join(missing)}."
+            f"    [yellow]Warning:[/yellow] Skipping save for {final_url} due to missing: {', '.join(missing)}."
         )
-
-
-async def save_sample_data(
-    url: str,
-    html: str,
-    metadata: HtmlMetadata,
-    image: Optional[Image.Image],
-    scroll_y: Optional[int],
-    dom_string: Optional[str],
-) -> None:
-    """Saves HTML, metadata, manages screenshot stacking with deduplication, saves raw markdown, and saves DOM string."""
-    try:
-        parsed_url = urlparse(url)
-        host = parsed_url.netloc.split(":")[0] if parsed_url.netloc else "unknown_host"
-        # --- Path Slug Logic ---
-        path = parsed_url.path.strip("/")
-        path_slug = slugify_url(path) if path else "_root_"  # Slugify only the path
-        target_dir = Path("samples") / host / path_slug  # Subdirectory is the path slug
-        target_dir.mkdir(parents=True, exist_ok=True)  # Ensure the final directory exists
-
-        # Filenames use the path slug
-        html_path = target_dir / f"{path_slug}.html"
-        json_path = target_dir / f"{path_slug}.json"
-        image_path = target_dir / f"{path_slug}.jpg"
-        md_path = target_dir / f"{path_slug}.md"
-        dom_path = target_dir / f"{path_slug}.dom.txt"  # Path for DOM string
-
-        # Save HTML
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(html)
-        logger.debug(f"Saved HTML to {html_path}")
-
-        # Save Metadata
-        try:
-            # Pydantic models use .model_dump() (v2) or .dict() (v1)
-            # No need to check type explicitly if extract_metadata is trusted
-            # Let Pydantic handle validation/errors during model creation
-            if metadata:
-                # Use model_dump() for Pydantic v2+, fallback to dict() for v1
-                if hasattr(metadata, "model_dump"):
-                    metadata_dict = metadata.model_dump(mode="json")  # Get JSON-serializable dict
-                elif hasattr(metadata, "dict"):
-                    metadata_dict = metadata.dict()  # Pydantic v1 fallback
-                else:
-                    logger.error(
-                        f"Metadata object for {url} lacks .model_dump() or .dict() method. Cannot serialize."
-                    )
-                    metadata_dict = {}  # Fallback to empty
-            else:
-                logger.warning(f"Metadata for {url} is None. Saving empty dict.")
-                metadata_dict = {}
-
-            with open(json_path, "w", encoding="utf-8") as f:
-                # json.dump expects a dict, model_dump(mode='json') provides this
-                json.dump(metadata_dict, f, indent=2, ensure_ascii=False)
-            logger.debug(f"Saved metadata to {json_path}")
-        except Exception as json_e:
-            logger.error(f"Failed to serialize or save metadata for {url}: {json_e}", exc_info=True)
-            console.print(f"    [red]Error:[/red] Failed saving metadata JSON for {url}: {json_e}")
-
-        # --- Handle Markdown --- -> Save Raw Markdown Directly
-        try:
-            # 1. Extract original markdown
-            original_md_content = extract_markdown(html)
-            # 2. Determine save path
-            try:
-                parsed_url_for_md = urlparse(url)
-                host_for_md = (
-                    parsed_url_for_md.netloc.split(":")[0]
-                    if parsed_url_for_md.netloc
-                    else "unknown_host"
-                )
-                path_for_md = parsed_url_for_md.path.strip("/")
-                path_slug_for_md = slugify_url(path_for_md) if path_for_md else "_root_"
-                target_dir_for_md = Path("samples") / host_for_md / path_slug_for_md
-                target_dir_for_md.mkdir(parents=True, exist_ok=True)
-                md_path = target_dir_for_md / f"{path_slug_for_md}.md"
-            except Exception as path_e:
-                logger.error(
-                    f"Error determining markdown save path for {url}: {path_e}", exc_info=True
-                )
-                md_path = None  # Indicate path failure
-
-            # 3. Save the original markdown if path is valid
-            if md_path:
-                with open(md_path, "w", encoding="utf-8") as f:
-                    f.write(original_md_content)
-                logger.info(
-                    f"Saved original markdown (len {len(original_md_content)}) to {md_path}"
-                )
-            else:
-                logger.error(f"Could not save markdown for {url} due to path error.")
-
-        except Exception as md_e:
-            logger.error(
-                f"Failed to extract or save raw markdown for {url}: {md_e}",
-                exc_info=True,
-            )
-            # Don't save markdown if extraction failed
-
-        # --- Save DOM String --- #
-        if dom_string is not None:
-            try:
-                with open(dom_path, "w", encoding="utf-8") as f:
-                    f.write(dom_string)
-                logger.info(f"Saved DOM string (len {len(dom_string)}) to {dom_path}")
-            except Exception as dom_save_e:
-                logger.error(f"Failed to save DOM string for {url}: {dom_save_e}", exc_info=True)
-                console.print(
-                    f"    [red]Error:[/red] Failed saving DOM string for {url}: {dom_save_e}"
-                )
-        else:
-            logger.debug(f"No DOM string provided for {url}. Skipping save.")
-
-        # Accumulate and Stack Screenshot (with Deduplication)
-        if image is not None:
-            new_hash = compute_perceptual_hash(image)
-            if not new_hash:
-                logger.warning(
-                    f"Could not compute hash for new image ({url}). Skipping append/stack."
-                )
-            else:
-                logger.debug(f"New image for {url} (scrollY {scroll_y}) hash: {new_hash}")
-                # Get the hash of the last image added for this URL, if any
-                last_hash: Optional[imagehash.ImageHash] = None
-                if url_screenshot_data[url]:
-                    last_hash = url_screenshot_data[url][-1][1]
-
-                # Define a threshold for hash difference (hamming distance)
-                # 0 means identical, small numbers mean very similar.
-                # Adjust this threshold based on testing.
-                HASH_DIFF_THRESHOLD = 1
-
-                should_append = True
-                if last_hash is not None:
-                    hash_diff = new_hash - last_hash
-                    if hash_diff <= HASH_DIFF_THRESHOLD:
-                        logger.info(
-                            f"Skipping duplicate image for {url}. Hash diff: {hash_diff} <= {HASH_DIFF_THRESHOLD}"
-                        )
-                        should_append = False
-                    else:
-                        logger.debug(
-                            f"Image for {url} is different enough (hash diff: {hash_diff}). Appending."
-                        )
-
-                if should_append:
-                    # Append the image and its hash
-                    url_screenshot_data[url].append((image, new_hash))
-                    logger.debug(
-                        f"Appended new unique image for {url}. Total images: {len(url_screenshot_data[url])}"
-                    )
-
-                    # No need to sort anymore
-
-                    # Attempt to stack all *unique* images collected for this URL so far
-                    current_images = [
-                        img for img, _h in url_screenshot_data[url]
-                    ]  # Extract images from tuples
-                    console.print(
-                        f"    [blue]Attempting to stack {len(current_images)} unique images for {url}...[/blue]"
-                    )
-                    stitched_image = stitch_vertical(current_images)
-
-                    if stitched_image:
-                        stitched_image.save(image_path, "JPEG", quality=85)  # Save stacked image
-                        logger.info(
-                            f"Saved stacked screenshot (size {stitched_image.size}) to {image_path}"
-                        )
-                        console.print(
-                            f"    [green]Success:[/green] Saved stacked screenshot to {image_path}"
-                        )
-                    else:
-                        logger.warning(f"Stacking failed for {url}. Screenshot not saved.")
-                        console.print(
-                            f"    [yellow]Warning:[/yellow] Stacking failed, screenshot not saved for {url}."
-                        )
-        else:
-            logger.info(f"No image provided for {url} in this call. No screenshot saved/stacked.")
-
-        console.print(
-            f"    [green]Success:[/green] Saved sample data to {target_dir / path_slug}.[html|json|jpg|md|dom.txt]"
-        )
-
-    except OSError as e:
-        logger.error(f"OS error saving sample data for {url}: {e}", exc_info=True)
-        console.print(f"    [red]Error:[/red] File system error saving data for {url}: {e}")
-    except Exception as e:
-        logger.error(f"Unexpected error saving sample data for {url}: {e}", exc_info=True)
-        console.print(f"    [red]Error:[/red] Failed saving sample data for {url}: {e}")
 
 
 async def main():

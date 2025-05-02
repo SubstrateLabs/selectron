@@ -1,5 +1,3 @@
-# Define the list of attributes we want to see in the .dom.txt output
-# These help identify elements more robustly.
 DOM_STRING_INCLUDE_ATTRIBUTES = [
     "id",
     "class",
@@ -18,5 +16,5 @@ DOM_STRING_INCLUDE_ATTRIBUTES = [
     "data-testid",
     "data-cy",
     "data-qa",
-    # Add other relevant attributes like 'pattern', 'required', 'disabled', etc. if needed
+    # NOTE: Add other relevant attributes like 'pattern', 'required', 'disabled', etc. if needed
 ]

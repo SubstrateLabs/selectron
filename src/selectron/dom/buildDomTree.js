@@ -985,7 +985,23 @@
       return false;
     }
     // --- End distinct interaction check ---
-  
+
+    // --- Content Element Check ---
+    const CONTENT_ELEMENT_TAGS = new Set([
+      'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'li', 'span', 'label',
+      'th', 'td', // Table headers and cells
+      'dt', 'dd'  // Definition list terms and descriptions
+    ]);
+
+    function isContentElement(element) {
+      if (!element || element.nodeType !== Node.ELEMENT_NODE) {
+        return false;
+      }
+      const tagName = element.tagName.toLowerCase();
+      return CONTENT_ELEMENT_TAGS.has(tagName);
+    }
+    // --- End Content Element Check ---
+
     /**
      * Handles the logic for deciding whether to highlight an element and performing the highlight.
      */
@@ -1130,91 +1146,142 @@
         attributes: {},
         xpath: getXPathTree(node, true),
         children: [],
+        isContentElement: false, // Initialize flag
       };
   
+      // --- Determine if it's a potential content element ---
+      const isPotentiallyContent = isContentElement(node);
+      // Get text content early if it might be a content element
+      const directTextContent = isPotentiallyContent ? node.textContent.trim() : null;
+      // --- End Content Element Check ---
+
       // Get attributes for interactive elements or potential text containers
-      if (isInteractiveCandidate(node) || node.tagName.toLowerCase() === 'iframe' || node.tagName.toLowerCase() === 'body') {
+      // Expand attribute fetching slightly for content elements too
+      if (isInteractiveCandidate(node) || isPotentiallyContent || node.tagName.toLowerCase() === 'iframe' || node.tagName.toLowerCase() === 'body') {
         const attributeNames = node.getAttributeNames?.() || [];
         for (const name of attributeNames) {
           nodeData.attributes[name] = node.getAttribute(name);
         }
       }
-  
+
       let nodeWasHighlighted = false;
+      let shouldIncludeNode = false; // Flag to determine if node makes it to the map
+
       // Perform visibility, interactivity, and highlighting checks
       if (node.nodeType === Node.ELEMENT_NODE) {
-        nodeData.isVisible = isElementVisible(node); // isElementVisible uses offsetWidth/Height, which is fine
+        nodeData.isVisible = isElementVisible(node);
         if (nodeData.isVisible) {
           nodeData.isTopElement = isTopElement(node);
           if (nodeData.isTopElement) {
             nodeData.isInteractive = isInteractiveElement(node);
-            // Call the dedicated highlighting function
-            nodeWasHighlighted = handleHighlighting(nodeData, node, parentIframe, isParentHighlighted);
-          }
-        }
-      }
-  
-      // Process children, with special handling for iframes and rich text editors
-      if (node.tagName) {
-        const tagName = node.tagName.toLowerCase();
-  
-        // Handle iframes
-        if (tagName === "iframe") {
-          try {
-            const iframeDoc = node.contentDocument || node.contentWindow?.document;
-            if (iframeDoc) {
-              for (const child of iframeDoc.childNodes) {
-                const domElement = buildDomTree(child, node, false);
-                if (domElement) nodeData.children.push(domElement);
+            if (nodeData.isInteractive) {
+              // Call the dedicated highlighting function
+              nodeWasHighlighted = handleHighlighting(nodeData, node, parentIframe, isParentHighlighted);
+              if (nodeWasHighlighted || nodeData.isInViewport) { // Include if highlighted OR just interactive & in viewport
+                shouldIncludeNode = true;
               }
             }
-          } catch (e) {
-            console.warn("Unable to access iframe:", e);
           }
-        }
-        // Handle rich text editors and contenteditable elements
-        else if (
-          node.isContentEditable ||
-          node.getAttribute("contenteditable") === "true" ||
-          node.id === "tinymce" ||
-          node.classList.contains("mce-content-body") ||
-          (tagName === "body" && node.getAttribute("data-id")?.startsWith("mce_"))
-        ) {
-          // Process all child nodes to capture formatted text
-          for (const child of node.childNodes) {
-            const domElement = buildDomTree(child, parentIframe, nodeWasHighlighted);
-            if (domElement) nodeData.children.push(domElement);
+          // --- Check if it's a content element worth including --- 
+          if (!shouldIncludeNode && isPotentiallyContent && directTextContent) {
+            nodeData.isContentElement = true;
+            shouldIncludeNode = true; // Include visible content elements with text
+            // console.log(`Including content element: ${nodeData.tagName} with text: "${directTextContent.substring(0, 30)}..."`);
           }
+          // --- End Content Element Check ---
         }
-        else {
-          // Handle shadow DOM
-          if (node.shadowRoot) {
-            nodeData.shadowRoot = true;
-            for (const child of node.shadowRoot.childNodes) {
-              const domElement = buildDomTree(child, parentIframe, nodeWasHighlighted);
-              if (domElement) nodeData.children.push(domElement);
+      }
+
+      // Recursively process children ONLY if the current node should be included OR is a necessary structural parent
+      const isStructuralParent = ['body', 'div', 'main', 'article', 'section', 'nav', 'header', 'footer', 'ul', 'ol', 'table', 'thead', 'tbody', 'tr'].includes(nodeData.tagName);
+      let childWasIncluded = false;
+
+      if (shouldIncludeNode || isStructuralParent) { 
+          // Process children, with special handling for iframes and rich text editors
+          if (node.tagName) {
+            const tagName = node.tagName.toLowerCase();
+
+            // Handle iframes
+            if (tagName === "iframe") {
+              try {
+                const iframeDoc = node.contentDocument || node.contentWindow?.document;
+                if (iframeDoc) {
+                  for (const child of iframeDoc.childNodes) {
+                    const childId = buildDomTree(child, node, false); // Reset highlight parent status for iframe
+                    if (childId) {
+                        nodeData.children.push(childId);
+                        childWasIncluded = true;
+                    } 
+                  }
+                }
+              } catch (e) {
+                console.warn("Unable to access iframe:", e);
+              }
+            }
+            // Handle rich text editors and contenteditable elements (Keep existing logic)
+            else if (
+              node.isContentEditable ||
+              node.getAttribute("contenteditable") === "true" ||
+              node.id === "tinymce" ||
+              node.classList.contains("mce-content-body") ||
+              (tagName === "body" && node.getAttribute("data-id")?.startsWith("mce_"))
+            ) {
+              for (const child of node.childNodes) {
+                const childId = buildDomTree(child, parentIframe, nodeWasHighlighted);
+                if (childId) {
+                    nodeData.children.push(childId);
+                    childWasIncluded = true;
+                }
+              }
+            }
+            else {
+              // Handle shadow DOM
+              if (node.shadowRoot) {
+                nodeData.shadowRoot = true;
+                for (const child of node.shadowRoot.childNodes) {
+                  const childId = buildDomTree(child, parentIframe, nodeWasHighlighted); // Shadow roots reset parent highlight?
+                  if (childId) {
+                    nodeData.children.push(childId);
+                    childWasIncluded = true;
+                    }
+                }
+              }
+              // Handle regular elements
+              for (const child of node.childNodes) {
+                // Pass the highlighted status of the *current* node to its children
+                const passHighlightStatusToChild = nodeWasHighlighted || isParentHighlighted;
+                const childId = buildDomTree(child, parentIframe, passHighlightStatusToChild);
+                if (childId) {
+                    nodeData.children.push(childId);
+                    childWasIncluded = true;
+                }
+              }
             }
           }
-          // Handle regular elements
-          for (const child of node.childNodes) {
-            // Pass the highlighted status of the *current* node to its children
-            const passHighlightStatusToChild = nodeWasHighlighted || isParentHighlighted;
-            const domElement = buildDomTree(child, parentIframe, passHighlightStatusToChild);
-            if (domElement) nodeData.children.push(domElement);
-          }
-        }
+      } // End of child processing block
+
+      // Final decision: Include the node if it was marked for inclusion OR if it's a structural parent AND has included children
+      if (!shouldIncludeNode && isStructuralParent && childWasIncluded) {
+          shouldIncludeNode = true;
+          // console.log(`Including structural parent ${nodeData.tagName} because it has included children.`);
       }
-  
-      // Skip empty anchor tags
-      if (nodeData.tagName === 'a' && nodeData.children.length === 0 && !nodeData.attributes.href) {
-        if (debugMode) PERF_METRICS.nodeMetrics.skippedNodes++;
-        return null;
+
+      // Skip empty anchor tags (redundant if !shouldIncludeNode)
+      // if (nodeData.tagName === 'a' && nodeData.children.length === 0 && !nodeData.attributes.href) {
+      //   if (debugMode) PERF_METRICS.nodeMetrics.skippedNodes++;
+      //   return null;
+      // }
+
+      // Only add to map if it should be included
+      if (shouldIncludeNode) {
+          const id = `${ID.current++}`;
+          DOM_HASH_MAP[id] = nodeData;
+          if (debugMode) PERF_METRICS.nodeMetrics.processedNodes++;
+          return id;
+      } else {
+          if (debugMode) PERF_METRICS.nodeMetrics.skippedNodes++;
+          return null; // Node did not meet criteria for inclusion
       }
-  
-      const id = `${ID.current++}`;
-      DOM_HASH_MAP[id] = nodeData;
-      if (debugMode) PERF_METRICS.nodeMetrics.processedNodes++;
-      return id;
     }
   
     // After all functions are defined, wrap them with performance measurement

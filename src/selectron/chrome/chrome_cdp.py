@@ -4,7 +4,7 @@ import binascii
 import json
 import re
 from io import BytesIO
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
 import websockets
@@ -368,6 +368,106 @@ async def get_tab_html(ws_url: str, settle_delay_s: float = 0.0) -> Optional[str
     except Exception as e:
         logger.error(
             f"An unexpected error occurred in get_tab_html for {ws_url}: {e}", exc_info=True
+        )
+        return None
+
+
+async def get_final_url_and_title(
+    ws: Any, initial_url: str, initial_title: str, tab_id_for_logging: Optional[str] = None
+) -> Tuple[str, str]:
+    """Gets the final URL and title of the page after load and redirects using an existing websocket.
+
+    Args:
+        ws: The active WebSocket connection to the tab.
+        initial_url: The URL known before potential redirects.
+        initial_title: The title known before potential changes.
+        tab_id_for_logging: Optional tab ID for more informative logging.
+
+    Returns:
+        A tuple containing the (final_url, final_title).
+    """
+    final_url = initial_url
+    final_title = initial_title
+    log_prefix = f"tab {tab_id_for_logging}" if tab_id_for_logging else "tab"
+
+    # Get Final URL
+    try:
+        url_script = "window.location.href"
+        url_eval = await send_cdp_command(
+            ws, "Runtime.evaluate", {"expression": url_script, "returnByValue": True}
+        )
+        if url_eval and url_eval.get("result", {}).get("type") == "string":
+            final_url = url_eval["result"]["value"]
+            if final_url != initial_url:
+                logger.info(
+                    f"URL changed after load for {log_prefix}: {initial_url} -> {final_url}"
+                )
+            else:
+                logger.debug(f"URL confirmed after load for {log_prefix}: {final_url}")
+        else:
+            logger.warning(
+                f"Could not get final URL for {log_prefix}. Using initial: {initial_url}"
+            )
+            final_url = initial_url  # Fallback
+    except Exception as url_e:
+        logger.error(f"Error getting final URL for {log_prefix}: {url_e}", exc_info=True)
+        final_url = initial_url  # Fallback
+
+    # Get Final Title
+    try:
+        title_script = "document.title"
+        title_eval = await send_cdp_command(
+            ws, "Runtime.evaluate", {"expression": title_script, "returnByValue": True}
+        )
+        if title_eval and title_eval.get("result", {}).get("type") == "string":
+            final_title = title_eval["result"]["value"]
+        else:
+            logger.warning(
+                f"Could not get final title for {log_prefix}. Using initial: {initial_title}"
+            )
+            final_title = initial_title  # Fallback
+    except Exception as title_e:
+        logger.warning(
+            f"Error getting final title for {log_prefix}: {title_e}. Using initial: {initial_title}"
+        )
+        final_title = initial_title  # Fallback
+
+    return final_url, final_title
+
+
+async def get_html_via_ws(ws: Any, url_for_logging: str) -> Optional[str]:
+    """Fetches the HTML content of the page using an existing WebSocket connection.
+
+    Args:
+        ws: The active WebSocket connection to the tab.
+        url_for_logging: The URL to use in log messages.
+
+    Returns:
+        The HTML string, or None if an error occurred.
+    """
+    try:
+        html_script = "document.documentElement.outerHTML"
+        html_eval = await send_cdp_command(ws, "Runtime.evaluate", {"expression": html_script})
+        if html_eval and html_eval.get("result", {}).get("type") == "string":
+            html = html_eval["result"].get("value")
+            if html:
+                logger.debug(
+                    f"Retrieved HTML via ws for URL {url_for_logging} (Length: {len(html)})"
+                )
+            else:
+                # Should not happen if type is string, but safety check
+                logger.warning(
+                    f"Retrieved HTML via ws for {url_for_logging}, but content is unexpectedly None/empty."
+                )
+            return html
+        else:
+            logger.warning(
+                f"Could not retrieve HTML via ws for {url_for_logging}. Eval result: {html_eval}"
+            )
+            return None
+    except Exception as html_e:
+        logger.error(
+            f"Error getting HTML via WebSocket for {url_for_logging}: {html_e}", exc_info=True
         )
         return None
 

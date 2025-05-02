@@ -1,8 +1,8 @@
 import hashlib
 from typing import Optional
 
-from selectron.browser_use.dom_views import DOMElementNode
-from selectron.browser_use.history_tree_views import DOMHistoryElement, HashedDomElement
+from selectron.dom.dom_views import DOMElementNode
+from selectron.dom.history_tree_views import DOMHistoryElement, HashedDomElement
 
 
 class HistoryTreeProcessor:
@@ -14,7 +14,7 @@ class HistoryTreeProcessor:
 
     @staticmethod
     def convert_dom_element_to_history_element(dom_element: DOMElementNode) -> DOMHistoryElement:
-        from selectron.browser_use.enhanced_css_selector import enhanced_css_selector_for_element
+        from selectron.dom.enhanced_css_selector import enhanced_css_selector_for_element
 
         parent_branch_path = HistoryTreeProcessor._get_parent_branch_path(dom_element)
         css_selector = enhanced_css_selector_for_element(dom_element)

@@ -4,14 +4,14 @@ import logging
 from importlib import resources
 from typing import Optional, Protocol
 
-from selectron.browser_use.dom_views import (
+from selectron.dom.dom_views import (
     DOMBaseNode,
     DOMElementNode,
     DOMState,
     DOMTextNode,
     SelectorMap,
 )
-from selectron.browser_use.history_tree_views import ViewportInfo
+from selectron.dom.history_tree_views import ViewportInfo
 from selectron.util.time_execution import time_execution_async
 
 logger = logging.getLogger(__name__)
