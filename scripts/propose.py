@@ -11,14 +11,19 @@ from rich.console import Console
 from rich.pretty import pretty_repr
 
 # --- Model Constants ---
-IMAGE_ANALYSIS_MODEL = "gpt-4.1-mini"
-MARKDOWN_MAPPING_MODEL = "gpt-4.1-mini"
-SELECTOR_MAPPING_MODEL = "gpt-4.1-mini"
+IMAGE_ANALYSIS_MODEL = "gpt-4.1-nano"
+MARKDOWN_MAPPING_MODEL = "gpt-4.1"
+SELECTOR_MAPPING_MODEL = "gpt-4.1-nano"
+
+MAX_TOKENS = 4096
 
 # --- Pydantic Models ---
 
 
 class ProposedContentRegion(BaseModel):
+    id: Optional[int] = Field(
+        None, description="Unique identifier assigned after initial image analysis."
+    )
     region_description: str = Field(
         ...,
         description="Clear description of the major content region identified in the image (e.g., 'Main article content', 'Header navigation', 'Featured posts section').",
@@ -46,14 +51,19 @@ class ExtractionProposal(BaseModel):
     )
 
 
-class MarkdownMappingResponse(BaseModel):
-    markdown_snippets: List[str] = Field(
-        ...,
-        description="A list of markdown text snippets. Each snippet corresponds to an item in the input list provided to the LLM, maintaining the original order.",
+class MarkdownMappingItem(BaseModel):
+    markdown_snippet: Optional[str] = Field(
+        None, description="The corresponding markdown snippet for the region, or null if none found."
     )
-    metadata_list: List[Optional[dict[str, str]]] = Field(
+    metadata: Optional[dict[str, str]] = Field(
+        None, description="Extracted factual metadata dictionary, or null/empty if none found."
+    )
+
+
+class MarkdownMappingResponse(BaseModel):
+    mapped_items: List[MarkdownMappingItem] = Field(
         ...,
-        description="A list of dictionaries, each containing extracted metadata corresponding to an item in the input list. The order MUST be maintained. Use null or an empty dict if no metadata is found.",
+        description="A list containing exactly one item for each input region, in the original order. Each item bundles the markdown snippet and metadata for that region.",
     )
 
 
@@ -109,13 +119,15 @@ async def propose_extractions(image_path: Path) -> Optional[ExtractionProposal]:
     image_analysis_prompt = (
         "You are an expert analyst specializing in understanding webpage content from screenshots."
         "\nAnalyze the provided image, which is a screenshot of a webpage."
-        "\nIdentify the major functional or informational regions visible."
-        "\n**Important:** If you identify a region that contains a list or feed of similar items (like articles, products, posts), treat EACH item in the list as a SEPARATE region."
-        "\nFor each region (or individual list item), provide:"
+        "\nIdentify the major functional or informational regions visible. **Be granular.**"
+        "\n**Important:**"
+        "\n1. If you identify a region that contains a list or feed of similar items (like articles, products, posts), treat EACH item in the list as a SEPARATE region."
+        "\n2. **AVOID** identifying overly broad, top-level containers like 'main content area', 'body', or 'page wrapper' as single regions. Instead, identify the distinct sections *within* those areas (e.g., 'featured posts section', 'latest articles feed', 'sidebar', 'user profile block'). Focus on semantically meaningful blocks."
+        "\nFor each granular region (or individual list item), provide:"
         "\n1. `region_description`: A clear description of the region or list item."
         "\n2. `observed_content_summary`: A brief summary of the actual text or content observed within that region/item in the image."
         "\nDo NOT suggest CSS selectors or HTML element names. Focus ONLY on the visible content and structure."
-        "\nRespond using the structure defined by the provided Pydantic model."
+        "\nRespond using the structure defined by the provided `ExtractionProposal` Pydantic model."
     )
 
     console.print(
@@ -141,6 +153,7 @@ async def propose_extractions(image_path: Path) -> Optional[ExtractionProposal]:
                 }
             ],
             response_format=ExtractionProposal,
+            max_tokens=MAX_TOKENS,
         )
 
         initial_proposal = response.choices[0].message.parsed
@@ -154,6 +167,12 @@ async def propose_extractions(image_path: Path) -> Optional[ExtractionProposal]:
         console.print(
             "[bold green]Success:[/bold green] Received and parsed initial proposal from OpenAI."
         )
+
+        # --- Assign sequential IDs --- 
+        if initial_proposal and initial_proposal.items:
+            for i, item in enumerate(initial_proposal.items):
+                item.id = i + 1 # Assign 1-based IDs
+            console.print(f"Assigned IDs to {len(initial_proposal.items)} proposed regions.", style="dim")
 
     except openai.APIConnectionError as e:
         console.print(f"[bold red]OpenAI Error (Image Analysis):[/bold red] Failed to connect: {e}")
@@ -211,7 +230,7 @@ async def propose_extractions(image_path: Path) -> Optional[ExtractionProposal]:
     region_descriptions_for_prompt = []
     for i, item in enumerate(initial_proposal.items):
         region_descriptions_for_prompt.append(
-            f"{i + 1}. Description: {item.region_description}\n   Observed Content: {item.observed_content_summary}"
+            f"{i + 1}. Region ID: {item.id} \n   Description: {item.region_description}\n   Observed Content: {item.observed_content_summary}"
         )
     descriptions_text = "\n\n".join(region_descriptions_for_prompt)
 
@@ -234,8 +253,7 @@ Your task is twofold for EACH of the {num_items} identified regions:
 2.  **Metadata:** Generate a key-value dictionary of specific, factual metadata *strictly based on verifiable information*. Examine the region's description/summary (derived from the image) AND the corresponding markdown snippet. Extract ONLY discrete metadata points explicitly present (e.g., 'author', 'date', 'likes', 'comments', 'read_time', 'status', 'link_url', image alt text). **DO NOT include summaries or descriptions of the main content within the metadata dictionary.** The `markdown_snippet` field is for the content itself.
 
 Respond with a JSON object adhering precisely to the `MarkdownMappingResponse` schema. This object must contain two keys:
-*   `markdown_snippets`: A list containing exactly {num_items} strings. Each string is the corresponding markdown snippet. Use an empty string "" if no *direct* match is found.
-*   `metadata_list`: A list containing exactly {num_items} dictionaries (or null). Each dictionary holds the factual, discrete key-value metadata extracted. **Use an empty dictionary {{}} or null if NO verifiable metadata can be extracted for a region.**
+*   `mapped_items`: A list containing exactly {num_items} items. Each item bundles the markdown snippet and metadata for that region.
 
 Maintain the exact order from the input regions in both lists. Prioritize accuracy and avoid hallucination; only report what is demonstrably present."""
 
@@ -246,13 +264,14 @@ Maintain the exact order from the input regions in both lists. Prioritize accura
             model=MARKDOWN_MAPPING_MODEL,
             messages=[{"role": "user", "content": markdown_mapping_prompt}],
             response_format=MarkdownMappingResponse,
+            max_tokens=MAX_TOKENS,
         )
 
         markdown_mapping = mapping_response.choices[0].message.parsed
         if (
             not markdown_mapping
-            or markdown_mapping.markdown_snippets is None
-            or markdown_mapping.metadata_list is None  # Also check metadata_list
+            or markdown_mapping.mapped_items is None
+            or len(markdown_mapping.mapped_items) != num_items  # Also check length
         ):
             console.print(
                 "[bold red]Error:[/bold red] Markdown mapping call returned invalid content."
@@ -260,25 +279,14 @@ Maintain the exact order from the input regions in both lists. Prioritize accura
             return initial_proposal  # Return original proposal
 
         # --- Step 3: Merge Results ---
-        if (
-            len(markdown_mapping.markdown_snippets) != num_items
-            or len(markdown_mapping.metadata_list) != num_items  # Check metadata length too
-        ):
-            console.print(
-                f"[bold yellow]Warning:[/bold yellow] Mismatch between number of proposed items ({num_items}) and returned markdown/metadata snippets ({len(markdown_mapping.markdown_snippets)}/{len(markdown_mapping.metadata_list)}). Skipping merge."
-            )
-            return initial_proposal
-
         console.print("Merging markdown snippets and metadata into proposal...", style="dim")
-        for i, (snippet, meta) in enumerate(
-            zip(markdown_mapping.markdown_snippets, markdown_mapping.metadata_list, strict=False)
-        ):
+        for i, item in enumerate(markdown_mapping.mapped_items):
             # Use None if the snippet is empty or just whitespace, otherwise store the snippet
             initial_proposal.items[i].markdown_content = (
-                snippet.strip() if snippet and snippet.strip() else None
+                item.markdown_snippet.strip() if item.markdown_snippet and item.markdown_snippet.strip() else None
             )
             # Store metadata if it's a non-empty dictionary, otherwise None
-            initial_proposal.items[i].metadata = meta if meta else None
+            initial_proposal.items[i].metadata = item.metadata if item.metadata else None
 
         console.print(
             "[bold green]Success:[/bold green] Successfully mapped and merged markdown content and metadata."
@@ -366,7 +374,7 @@ Maintain the exact order from the input regions in both lists. Prioritize accura
             for i, original_index in enumerate(current_indices_list):
                 item = initial_proposal.items[original_index]
                 region_descriptions_for_chunk_prompt.append(
-                    f"{i + 1}. (Original Index: {original_index + 1}) Description: {item.region_description}\n   Observed Content: {item.observed_content_summary}"
+                    f"{i + 1}. (Region ID: {item.id}) Description: {item.region_description}\n   Observed Content: {item.observed_content_summary}"
                 )
                 original_index_map[i] = (
                     original_index  # Map response index back to original item index
@@ -391,13 +399,14 @@ Your task is to find selectors *only for the following {num_regions_in_chunk} re
 Instructions for EACH region above:
 1.  Determine if its main container element is likely present in the provided HTML CHUNK.
 2.  If present, provide the *single best CSS selector* for that region's container.
-3.  **Selector Quality Guidelines (Strictly follow):**
-    *   **Prioritize:** Unique IDs (`#element-id`), stable `data-*` attributes (`[data-testid="..."], [data-cy="..."]`), or specific, meaningful class combinations (`.class-a.class-b`).
-    *   **Avoid:** Overly generic tags (`div`, `span`, `a`) unless they have specific, unique attributes.
-    *   **Avoid:** Highly brittle positional selectors (`:nth-child`, `:nth-of-type`) *unless absolutely necessary* for lists where items lack unique identifiers.
-    *   **Avoid:** Relying solely on text content (`:contains(...)`) if structural selectors are available.
-    *   The selector MUST be specific enough to target the intended container for the described region.
-4.  If a region's main content does NOT appear to be in this chunk, or you cannot find a selector meeting the quality guidelines, use `null` for that region.
+3.  **Selector Quality Guidelines (MUST Follow Strictly):**
+    *   **Prioritize:** Unique IDs (`#element-id`), stable `data-*` attributes (`[data-testid="..."]`), or specific, meaningful class combinations (`.meaningful-class.specific-context`). These are robust against page changes.
+    *   **AVOID:** Returning only generic tag names (`div`, `span`, `a`, `p`). These are useless.
+    *   **AVOID:** Highly brittle positional selectors (`:nth-child`, `:nth-of-type`) as they break easily. Use ONLY as a last resort if items truly lack unique identifiers.
+    *   **AVOID:** Relying solely on text content (`:contains(...)` - non-standard and unreliable) if structural selectors exist.
+    *   The selector MUST be specific enough to **uniquely target** the intended container for the described region within the broader page context, not just within the chunk.
+    *   **Goal:** Find the most stable, robust, and specific selector possible.
+4.  If a region's main content does NOT appear to be in this chunk, or you cannot find a selector meeting these strict quality guidelines, use `null` for that region.
 
 Respond with a JSON object adhering precisely to the `SelectorMappingResponse` schema. The object must contain one key:
 *   `css_selectors`: A list containing exactly {num_regions_in_chunk} strings or nulls. The order MUST correspond EXACTLY to the order of the regions listed above (1 to {num_regions_in_chunk}).
@@ -411,6 +420,7 @@ Provide ONLY the selector strings or nulls in the list, no explanations.
                     model=SELECTOR_MAPPING_MODEL,
                     messages=[{"role": "user", "content": selector_mapping_prompt}],
                     response_format=SelectorMappingResponse,
+                    max_tokens=MAX_TOKENS,
                 )
 
                 chunk_mapping = selector_response.choices[0].message.parsed
@@ -440,16 +450,16 @@ Provide ONLY the selector strings or nulls in the list, no explanations.
                             selector = selector.strip()
                             # --- Basic Validation ---
                             try:
-                                # Check if selector finds at least one element in the *whole* cleaned soup
-                                # Using soup object created during initial cleaning
+                                # Check 1: Basic syntax and existence check
                                 found_element = soup.select_one(selector)
                                 if found_element:
-                                    is_valid_selector = True
-                                else:
-                                    console.print(
-                                        f"      Selector '{selector}' for item {original_item_index + 1} returned by LLM but found 0 elements in HTML. Invalid for this chunk.",
-                                        style="yellow",
-                                    )
+                                    # Check 2: Reject overly generic tag-only selectors
+                                    simple_tags = {'div', 'span', 'a', 'p', 'ul', 'li', 'h1', 'h2', 'h3', 'img'}
+                                    if selector in simple_tags:
+                                        console.print(f"      Selector '{selector}' for item {original_item_index + 1} is too generic (tag only). Invalid.", style="yellow")
+                                        is_valid_selector = False
+                                    else:
+                                        is_valid_selector = True # Passed both checks
                             except Exception as e:
                                 # Catch potential errors from invalid selector syntax
                                 console.print(
