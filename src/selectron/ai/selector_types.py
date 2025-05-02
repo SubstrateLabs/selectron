@@ -48,6 +48,9 @@ class SiblingsResult(BaseModel):
 class ExtractionResult(BaseModel):
     extracted_text: Optional[str] = Field(None)
     extracted_attribute_value: Optional[str] = Field(None)
+    markdown_content: Optional[str] = Field(
+        None, description="Markdown representation of the extracted element's content."
+    )
     error: Optional[str] = Field(None)
 
 

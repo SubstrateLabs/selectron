@@ -14,7 +14,7 @@ from .selector_types import (
 
 logger = get_logger(__name__)
 
-DEFAULT_MODEL_NAME = "openai:gpt-4.1-nano"
+DEFAULT_MODEL_NAME = "openai:gpt-4.1"
 
 _SYSTEM_PROMPT = """
 You are an expert web developer finding the MOST ROBUST and precise CSS selector for real-world websites AND extracting specified data. Websites often contain unstable, auto-generated IDs (like `emberXXX`) and CSS class names (like `aBcXyZ123` or random-looking strings). Your primary goal is to **avoid these unstable identifiers**.
@@ -28,7 +28,7 @@ Goal: Find a unique selector for the *smallest possible element* matching the us
 4.  **:not() / Sibling/Child Combinators:** Use `>` (child), `+` (adjacent sibling), `~` (general sibling), `:not()` to refine selection based on stable context.
 5.  **Structural Path:** Rely on tag names and stable parent/ancestor context *only when stable identifiers are unavailable*.
 6.  **Positional (`:nth-of-type`, `:first-child`, etc.):** Use as a LAST RESORT for disambiguation within a uniquely identified, stable parent.
-7.  **Text Content (`:contains()` - if supported, otherwise use tools):** Use text content primarily via `evaluate_selector`'s `target_text_to_check` to *verify* the correct element is selected, not as the primary selector mechanism unless absolutely necessary and the text is highly stable and unique.
+7.  **Text Content (`:contains()` - if supported, otherwise use tools):** Use text content primarily via `evaluate_selector`'s `target_text_to_check` to *verify* the correct element is selected. **DO NOT use `:contains` or similar text-matching pseudo-classes (like `:has(:contains(...))`) in the final `proposed_selector`** unless absolutely NO other stable identifier (attribute, class, structure) can uniquely identify the element, and the text content itself is GUARANTEED to be stable and unique.
 
 **TOOLS AVAILABLE:**
 1.  `evaluate_selector(selector: str, target_text_to_check: str, anchor_selector: Optional[str] = None)`: Tests selector (optionally within stable anchor). Checks if `target_text_to_check` is found. Returns count, match details (tag, text, attrs), text found flag, error. Use `target_text_to_check` with stable, unique text snippets to help locate the element.
@@ -61,6 +61,7 @@ class SelectorAgent:
     def __init__(
         self,
         html_content: str,
+        base_url: str,
         openai_api_key: Optional[str] = None,
         model_name: str = DEFAULT_MODEL_NAME,
     ):
@@ -69,6 +70,7 @@ class SelectorAgent:
 
         Args:
             html_content: The HTML content string to analyze.
+            base_url: The base URL of the page, used for resolving relative URLs.
             openai_api_key: Your OpenAI API key. If None, attempts to read from OPENAI_API_KEY env var.
             model_name: The name of the OpenAI model to use (e.g., "openai:gpt-4o-mini", "openai:gpt-4.1-mini").
         """
@@ -78,8 +80,10 @@ class SelectorAgent:
             raise ValueError(
                 "OpenAI API key not provided and OPENAI_API_KEY environment variable not set."
             )
+        if not base_url:
+            raise ValueError("base_url must be provided.")
 
-        self._tools_instance = SelectorTools(html_content)
+        self._tools_instance = SelectorTools(html_content, base_url)
         self._tools = [
             Tool(
                 function=self._tools_instance.evaluate_selector,
@@ -143,20 +147,25 @@ class SelectorAgent:
             "Prioritize stable attributes and classes, AVOIDING generated IDs/classes like 'emberXXX' or random strings."
         )
 
-        effective_extract_text = extract_text
+        effective_extract_text = extract_text  # Start with the user's explicit request
         if attribute_to_extract:
             query_parts.append(
                 f"Then, extract the value of its '{attribute_to_extract}' attribute."
             )
-        elif extract_text:
+        elif extract_text:  # Only if explicitly requested
             query_parts.append("Then, extract its text content.")
         else:
-            # If no extraction is specified, default to text extraction for AgentResult compatibility.
-            logger.warning(
-                "No specific extraction requested, agent will attempt to extract text by default."
+            # If no extraction is specified, DO NOT ask the agent to extract anything.
+            # The agent's output model (AgentResult) includes flags for what was extracted,
+            # so we don't need to force an extraction action here.
+            logger.info(
+                "No specific extraction requested (attribute or text). Agent will focus on selection."
             )
-            query_parts.append("Then, extract its text content.")
-            effective_extract_text = True  # Use this for internal consistency checks
+            # Explicitly tell the agent NOT to extract.
+            query_parts.append(
+                "You MUST NOT call the `extract_data_from_element` tool for this request."
+            )
+            # effective_extract_text remains False (from initialization)
 
         query_parts.append("Follow the mandatory workflow strictly.")
         query = " ".join(query_parts)
@@ -176,7 +185,7 @@ class SelectorAgent:
                     )
                 if result.output.text_extracted_flag != effective_extract_text:
                     logger.warning(
-                        f"AgentResult text_extracted_flag mismatch: requested '{effective_extract_text}' (defaulted: {not extract_text}), got '{result.output.text_extracted_flag}'. Trusting agent output."
+                        f"AgentResult text_extracted_flag mismatch: requested '{effective_extract_text}', got '{result.output.text_extracted_flag}'. Trusting agent output."
                     )
                 return result.output
             else:
@@ -189,6 +198,7 @@ class SelectorAgent:
                     error="Agent produced unexpected output type",
                     extracted_text=None,  # Add default
                     extracted_attribute_value=None,  # Add default
+                    markdown_content=None,  # Add default
                 )
                 error_verification = SelectorEvaluationResult(
                     selector_used="error",
@@ -202,7 +212,7 @@ class SelectorAgent:
                     proposed_selector="error",
                     reasoning="Agent failed to produce the expected AgentResult structure.",
                     attribute_extracted=attribute_to_extract,
-                    text_extracted_flag=effective_extract_text,
+                    text_extracted_flag=effective_extract_text,  # Use the calculated flag
                     extraction_result=error_extraction,
                     final_verification=error_verification,
                 )
@@ -215,6 +225,7 @@ class SelectorAgent:
                 error=f"Agent execution failed: {e}",
                 extracted_text=None,  # Add default
                 extracted_attribute_value=None,  # Add default
+                markdown_content=None,  # Add default
             )
             error_verification = SelectorEvaluationResult(
                 selector_used="error",
@@ -228,7 +239,7 @@ class SelectorAgent:
                 proposed_selector="error",
                 reasoning=f"Agent execution failed: {e}",
                 attribute_extracted=attribute_to_extract,
-                text_extracted_flag=effective_extract_text,
+                text_extracted_flag=effective_extract_text,  # Use the calculated flag
                 extraction_result=error_extraction,
                 final_verification=error_verification,
             )

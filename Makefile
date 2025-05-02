@@ -20,7 +20,7 @@ install:
 	uv pip install -e ".[dev]"
 
 test:
-	uv run pytest
+	uv run pytest -s
 
 clean:
 	rm -rf .ruff_cache

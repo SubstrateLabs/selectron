@@ -1,7 +1,10 @@
+import copy
 import traceback
 from typing import Optional
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup, Tag
+from markdownify import markdownify
 
 from selectron.ai.selector_types import (
     ChildDetail,
@@ -20,9 +23,10 @@ logger = get_logger(__name__)
 class SelectorTools:
     """Internal class holding the BeautifulSoup instance and tool methods."""
 
-    def __init__(self, html_content: str):
+    def __init__(self, html_content: str, base_url: str):
         self.soup = BeautifulSoup(html_content, "html.parser")
-        logger.info("HTML structure parsed for SelectorTools.")
+        self.base_url = base_url
+        logger.info(f"HTML structure parsed for SelectorTools. Base URL: {self.base_url}")
 
     async def evaluate_selector(
         self, selector: str, target_text_to_check: str, anchor_selector: Optional[str] = None
@@ -383,6 +387,7 @@ class SelectorTools:
                 error="No extraction specified",
                 extracted_text=None,
                 extracted_attribute_value=None,
+                markdown_content=None,
             )
 
         base_element: BeautifulSoup | Tag | None = self.soup
@@ -394,7 +399,10 @@ class SelectorTools:
                 error_msg = f"Anchor Selector Syntax Error: {type(e).__name__}: {e}"
                 logger.warning(f"{log_prefix}: {error_msg}")
                 return ExtractionResult(
-                    error=error_msg, extracted_text=None, extracted_attribute_value=None
+                    error=error_msg,
+                    extracted_text=None,
+                    extracted_attribute_value=None,
+                    markdown_content=None,
                 )
 
             if len(possible_anchors) == 0:
@@ -403,13 +411,19 @@ class SelectorTools:
                 )
                 logger.warning(f"{log_prefix}: {error_msg}")
                 return ExtractionResult(
-                    error=error_msg, extracted_text=None, extracted_attribute_value=None
+                    error=error_msg,
+                    extracted_text=None,
+                    extracted_attribute_value=None,
+                    markdown_content=None,
                 )
             if len(possible_anchors) > 1:
                 error_msg = f"Anchor Error: Anchor selector '{anchor_selector}' is not unique (found {len(possible_anchors)})."
                 logger.warning(f"{log_prefix}: {error_msg}")
                 return ExtractionResult(
-                    error=error_msg, extracted_text=None, extracted_attribute_value=None
+                    error=error_msg,
+                    extracted_text=None,
+                    extracted_attribute_value=None,
+                    markdown_content=None,
                 )
             base_element = possible_anchors[0]
 
@@ -421,19 +435,54 @@ class SelectorTools:
                 error_msg = "Extraction Error: Selector did not match any element or matched non-Tag within the specified context."
                 logger.warning(f"{log_prefix}: {error_msg}")
                 return ExtractionResult(
-                    error=error_msg, extracted_text=None, extracted_attribute_value=None
+                    error=error_msg,
+                    extracted_text=None,
+                    extracted_attribute_value=None,
+                    markdown_content=None,
                 )
 
             extracted_text_val: Optional[str] = None
             extracted_attr_val: Optional[str] = None
+            markdown_content_val: Optional[str] = None
 
             if extract_text:
-                extracted_text_val = element.get_text(strip=True)
+                extracted_text_val = element.get_text(separator=" ", strip=True)
                 logger.info(
                     f"{log_prefix}: Extracted text: '{extracted_text_val[:100]}...'"
                     if extracted_text_val
                     else "(No text extracted)"
                 )
+                # --- Pre-process links for markdown --- #
+                element_copy = copy.copy(element)
+                links_processed_count = 0
+                for link_tag in element_copy.find_all("a", href=True):
+                    # --- Ensure it's a Tag before accessing attributes --- #
+                    if not isinstance(link_tag, Tag):
+                        continue
+                    original_href = link_tag.get("href")  # Use .get() for safety
+                    # Only process strings and if base_url exists
+                    if isinstance(original_href, str) and self.base_url:
+                        absolute_href = urljoin(self.base_url, original_href)
+                        if absolute_href != original_href:
+                            link_tag["href"] = (
+                                absolute_href  # Modify the href on the copy (safe now due to isinstance check)
+                            )
+                            links_processed_count += 1
+                if links_processed_count > 0:
+                    logger.debug(
+                        f"{log_prefix}: Absolutified {links_processed_count} href(s) in element copy before markdown conversion."
+                    )
+                # --- End Pre-process --- #
+
+                try:
+                    # Use the modified copy for markdown conversion
+                    markdown_content_val = markdownify(str(element_copy), base_url=self.base_url)
+                    logger.info(
+                        f"{log_prefix}: Generated markdown content (first 100 chars): '{markdown_content_val[:100]}...'"
+                    )
+                except Exception as md_err:
+                    logger.warning(f"{log_prefix}: Failed to generate markdown content: {md_err}")
+                    markdown_content_val = f"Error generating markdown: {md_err}"
 
             if attribute_to_extract:
                 attr_value = element.get(attribute_to_extract)
@@ -445,6 +494,22 @@ class SelectorTools:
                     logger.info(
                         f"{log_prefix}: Extracted attribute '{attribute_to_extract}': '{extracted_attr_val}'"
                     )
+                    # Absolutify URL if applicable
+                    if (
+                        attribute_to_extract in ["href", "src"]
+                        and extracted_attr_val
+                        and self.base_url
+                    ):
+                        original_val = extracted_attr_val
+                        extracted_attr_val = urljoin(self.base_url, extracted_attr_val)
+                        if original_val != extracted_attr_val:
+                            logger.info(
+                                f"{log_prefix}: Absolutified URL from '{original_val}' to '{extracted_attr_val}' using base '{self.base_url}'"
+                            )
+                        else:
+                            logger.debug(
+                                f"{log_prefix}: URL '{original_val}' was already absolute."
+                            )
                 else:
                     logger.warning(
                         f"{log_prefix}: Attribute '{attribute_to_extract}' not found on the element."
@@ -454,6 +519,7 @@ class SelectorTools:
             return ExtractionResult(
                 extracted_text=extracted_text_val,
                 extracted_attribute_value=extracted_attr_val,
+                markdown_content=markdown_content_val,
                 error=None,
             )
 
@@ -465,5 +531,6 @@ class SelectorTools:
             return ExtractionResult(
                 error=error_for_agent,
                 extracted_text=None,
-                extracted_attribute_value=None,  # Pass traceback to agent
+                extracted_attribute_value=None,
+                markdown_content=None,
             )
