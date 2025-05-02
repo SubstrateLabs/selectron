@@ -5,10 +5,10 @@ import signal
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-import openai
+import imagehash
 import websockets
 from PIL import Image
 from rich.console import Console
@@ -37,96 +37,20 @@ logging.getLogger("websockets").setLevel(logging.INFO)
 console = Console()
 
 MARKDOWN_STRATEGY = MarkdownStrategy.DOCLING
-# Flag to enable/disable OpenAI cleanup
-enable_openai_cleanup = True
-# Initialize OpenAI client (use Async client now)
-openai_async_client: Optional[openai.AsyncOpenAI] = None
-if enable_openai_cleanup:
+# Store tuples of (Image, hash) to allow deduplication
+url_screenshot_data: Dict[str, List[Tuple[Image.Image, imagehash.ImageHash]]] = defaultdict(list)
+
+
+# --- Helper for Hashing ---
+def compute_perceptual_hash(img: Image.Image) -> Optional[imagehash.ImageHash]:
+    """Computes the average perceptual hash (aHash) of an image."""
     try:
-        # Use AsyncOpenAI
-        openai_async_client = openai.AsyncOpenAI()
-        # Perform a simple test call to check credentials (sync method still okay for init check)
-        openai_async_client.models.list()
-        logger.info("Async OpenAI client initialized successfully.")
+        # aHash is generally fast and good for this type of deduplication
+        img_hash = imagehash.average_hash(img)
+        return img_hash
     except Exception as e:
-        logger.error(
-            f"Failed to initialize Async OpenAI client: {e}. Disabling cleanup.", exc_info=True
-        )
-        enable_openai_cleanup = False
-        openai_async_client = None
-
-# Global dictionary to store screenshots per URL for simple vertical stacking
-url_screenshot_data: Dict[str, List[Image.Image]] = defaultdict(list)
-# Global state for debounced OpenAI cleanup
-url_latest_markdown: Dict[str, str] = {}
-deferred_openai_cleanup_timers: Dict[str, asyncio.TimerHandle] = {}
-deferred_openai_cleanup_tasks: Dict[str, asyncio.Task[Any]] = {}
-OPENAI_DEBOUNCE_DELAY = 2.5  # Seconds to wait after last update before calling OpenAI
-
-
-async def cleanup_markdown_with_openai(markdown_text: str) -> str:
-    """Uses GPT-4o Mini (async) to clean up markdown, removing extraneous content."""
-    if not enable_openai_cleanup or not openai_async_client:  # Check async client
-        logger.warning(
-            "OpenAI cleanup is disabled or async client failed to initialize. Returning original markdown."
-        )
-        return markdown_text
-
-    if not markdown_text.strip():
-        logger.debug("Skipping OpenAI cleanup for empty markdown.")
-        return markdown_text
-
-    prompt = f"""
-    Review the following markdown content extracted from a web page.
-    Identify and REMOVE any extraneous material: noisy JSON, UI elements, promotional material, anything that is not the main content of the page.
-    Retain ONLY the core main content of the page.
-    Ensure the output is still valid markdown.
-    Do NOT add any commentary, preamble, or explanation; just return the cleaned markdown content.
-
-    Markdown to clean:
-    ```markdown
-    {markdown_text}
-    ```
-    """
-
-    try:
-        logger.info("Sending markdown to OpenAI for cleanup...")
-        # Use the async client directly
-        response = await openai_async_client.chat.completions.create(
-            model="gpt-4.1-nano",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant that cleans markdown text.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,  # Low temperature for more deterministic output
-        )
-
-        cleaned_content = response.choices[0].message.content
-        if cleaned_content:
-            logger.info(
-                f"Successfully cleaned markdown with OpenAI. Original length: {len(markdown_text)}, Cleaned length: {len(cleaned_content)}"
-            )
-            # Basic check to remove potential ```markdown fences if the model added them
-            if cleaned_content.strip().startswith("```markdown"):
-                cleaned_content = cleaned_content.strip()[len("```markdown") :].strip()
-            if cleaned_content.strip().endswith("```"):
-                cleaned_content = cleaned_content.strip()[: -len("```")].strip()
-            return cleaned_content.strip()
-        else:
-            logger.warning("OpenAI returned empty content. Returning original markdown.")
-            return markdown_text
-
-    except openai.APIError as e:
-        logger.error(f"OpenAI API error during cleanup: {e}", exc_info=True)
-    except Exception as e:
-        logger.error(f"Unexpected error during OpenAI cleanup: {e}", exc_info=True)
-
-    # Return original text if any error occurs
-    logger.warning("OpenAI cleanup failed. Returning original markdown.")
-    return markdown_text
+        logger.error(f"Failed to compute image hash: {e}", exc_info=True)
+        return None
 
 
 async def handle_polling_change(event: TabChangeEvent):
@@ -417,37 +341,21 @@ async def save_sample_data(
     image: Optional[Image.Image],
     scroll_y: Optional[int],
 ) -> None:
-    """Saves HTML, metadata, schedules markdown cleanup, and manages screenshot stacking.
-    Accumulates screenshots in memory for simple stacking.
-    Organizes samples into: samples/<host>/<slugified_url>.<ext>
-    """
-    global \
-        url_screenshot_data, \
-        url_latest_markdown, \
-        deferred_openai_cleanup_timers, \
-        deferred_openai_cleanup_tasks
+    """Saves HTML, metadata, manages screenshot stacking with deduplication, and saves raw markdown."""
     try:
         parsed_url = urlparse(url)
-        host = parsed_url.netloc
-        if not host:
-            logger.warning(f"Could not parse host from URL: {url}, using 'unknown_host'")
-            host = "unknown_host"
+        host = parsed_url.netloc.split(":")[0] if parsed_url.netloc else "unknown_host"
+        # --- Path Slug Logic ---
+        path = parsed_url.path.strip("/")
+        path_slug = slugify_url(path) if path else "_root_"  # Slugify only the path
+        target_dir = Path("samples") / host / path_slug  # Subdirectory is the path slug
+        target_dir.mkdir(parents=True, exist_ok=True)  # Ensure the final directory exists
 
-        # Remove port if present
-        host = host.split(":")[0]
-
-        slug = slugify_url(url)
-        if not slug:
-            logger.warning(f"Could not generate slug for URL: {url}, using 'default_slug'")
-            slug = "default_slug"
-
-        base_dir = Path("samples") / host
-        base_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
-
-        html_path = base_dir / f"{slug}.html"
-        json_path = base_dir / f"{slug}.json"
-        image_path = base_dir / f"{slug}.jpg"  # Saving as JPEG
-        # md_path = base_dir / f"{slug}.md" # No longer saved directly here
+        # Filenames use the path slug
+        html_path = target_dir / f"{path_slug}.html"
+        json_path = target_dir / f"{path_slug}.json"
+        image_path = target_dir / f"{path_slug}.jpg"
+        # md_path calculation moved to cleanup handler
 
         # Save HTML
         with open(html_path, "w", encoding="utf-8") as f:
@@ -482,80 +390,114 @@ async def save_sample_data(
             logger.error(f"Failed to serialize or save metadata for {url}: {json_e}", exc_info=True)
             console.print(f"    [red]Error:[/red] Failed saving metadata JSON for {url}: {json_e}")
 
-        # --- Handle Markdown ---
+        # --- Handle Markdown --- -> Save Raw Markdown Directly
         try:
             # 1. Extract original markdown
             original_md_content = extract_markdown(html, strategy=MARKDOWN_STRATEGY)
-            # 2. Store it as the latest version for this URL
-            url_latest_markdown[url] = original_md_content
-            logger.debug(f"Stored latest markdown (len {len(original_md_content)}) for {url}.")
-
-            # 3. Schedule debounced OpenAI cleanup (if enabled)
-            if enable_openai_cleanup:
-                # Cancel existing timer for this URL
-                if url in deferred_openai_cleanup_timers:
-                    deferred_openai_cleanup_timers[url].cancel()
-                    logger.debug(f"Cancelled existing OpenAI debounce timer for {url}.")
-
-                # Schedule the trigger function
-                loop = asyncio.get_running_loop()
-                logger.debug(f"Scheduling OpenAI cleanup for {url} in {OPENAI_DEBOUNCE_DELAY}s.")
-                new_timer = loop.call_later(
-                    OPENAI_DEBOUNCE_DELAY, lambda: asyncio.create_task(trigger_openai_cleanup(url))
+            # 2. Determine save path
+            try:
+                parsed_url_for_md = urlparse(url)
+                host_for_md = (
+                    parsed_url_for_md.netloc.split(":")[0]
+                    if parsed_url_for_md.netloc
+                    else "unknown_host"
                 )
-                deferred_openai_cleanup_timers[url] = new_timer
+                path_for_md = parsed_url_for_md.path.strip("/")
+                path_slug_for_md = slugify_url(path_for_md) if path_for_md else "_root_"
+                target_dir_for_md = Path("samples") / host_for_md / path_slug_for_md
+                target_dir_for_md.mkdir(parents=True, exist_ok=True)
+                md_path = target_dir_for_md / f"{path_slug_for_md}.md"
+            except Exception as path_e:
+                logger.error(
+                    f"Error determining markdown save path for {url}: {path_e}", exc_info=True
+                )
+                md_path = None  # Indicate path failure
+
+            # 3. Save the original markdown if path is valid
+            if md_path:
+                with open(md_path, "w", encoding="utf-8") as f:
+                    f.write(original_md_content)
+                logger.info(
+                    f"Saved original markdown (len {len(original_md_content)}) to {md_path}"
+                )
             else:
-                # If cleanup disabled, maybe save original markdown immediately?
-                # Let's stick to the plan: done callback handles final save.
-                # Log that original will eventually be saved by placeholder mechanism if needed.
-                logger.debug("OpenAI cleanup disabled. Final markdown save will use original.")
-                # To ensure original is saved if cleanup is off, we could potentially
-                # schedule a dummy task/callback that just saves url_latest_markdown[url].
-                # For now, relying on cleanup_markdown_with_openai returning original if disabled.
+                logger.error(f"Could not save markdown for {url} due to path error.")
 
         except Exception as md_e:
             logger.error(
-                f"Failed to extract or schedule markdown processing for {url}: {md_e}",
+                f"Failed to extract or save raw markdown for {url}: {md_e}",
                 exc_info=True,
             )
             # Don't save markdown if extraction failed
 
-        # Accumulate and Stack Screenshot
+        # Accumulate and Stack Screenshot (with Deduplication)
         if image is not None:
-            logger.debug(f"Adding screenshot for {url} (scrollY {scroll_y}) to stack list.")
-            # Append only the image
-            url_screenshot_data[url].append(image)
-
-            # No need to sort anymore
-            # url_screenshot_data[url].sort(key=lambda item: item[1])
-
-            # Attempt to stack all images collected for this URL so far
-            current_images = url_screenshot_data[url]
-            console.print(
-                f"    [blue]Attempting to stack {len(current_images)} images for {url}...[/blue]"
-            )
-            # Pass the list of images directly
-            stitched_image = stitch_vertical(current_images)
-
-            if stitched_image:
-                stitched_image.save(image_path, "JPEG", quality=85)  # Save stacked image
-                logger.info(
-                    f"Saved stacked screenshot (size {stitched_image.size}) to {image_path}"
-                )
-                console.print(
-                    f"    [green]Success:[/green] Saved stacked screenshot to {image_path}"
+            new_hash = compute_perceptual_hash(image)
+            if not new_hash:
+                logger.warning(
+                    f"Could not compute hash for new image ({url}). Skipping append/stack."
                 )
             else:
-                logger.warning(f"Stacking failed for {url}. Screenshot not saved.")
-                console.print(
-                    f"    [yellow]Warning:[/yellow] Stacking failed, screenshot not saved for {url}."
-                )
-        # Removed the elif for scroll_y is None, as we just append if image exists
+                logger.debug(f"New image for {url} (scrollY {scroll_y}) hash: {new_hash}")
+                # Get the hash of the last image added for this URL, if any
+                last_hash: Optional[imagehash.ImageHash] = None
+                if url_screenshot_data[url]:
+                    last_hash = url_screenshot_data[url][-1][1]
+
+                # Define a threshold for hash difference (hamming distance)
+                # 0 means identical, small numbers mean very similar.
+                # Adjust this threshold based on testing.
+                HASH_DIFF_THRESHOLD = 1
+
+                should_append = True
+                if last_hash is not None:
+                    hash_diff = new_hash - last_hash
+                    if hash_diff <= HASH_DIFF_THRESHOLD:
+                        logger.info(
+                            f"Skipping duplicate image for {url}. Hash diff: {hash_diff} <= {HASH_DIFF_THRESHOLD}"
+                        )
+                        should_append = False
+                    else:
+                        logger.debug(
+                            f"Image for {url} is different enough (hash diff: {hash_diff}). Appending."
+                        )
+
+                if should_append:
+                    # Append the image and its hash
+                    url_screenshot_data[url].append((image, new_hash))
+                    logger.debug(
+                        f"Appended new unique image for {url}. Total images: {len(url_screenshot_data[url])}"
+                    )
+
+                    # No need to sort anymore
+
+                    # Attempt to stack all *unique* images collected for this URL so far
+                    current_images = [
+                        img for img, _h in url_screenshot_data[url]
+                    ]  # Extract images from tuples
+                    console.print(
+                        f"    [blue]Attempting to stack {len(current_images)} unique images for {url}...[/blue]"
+                    )
+                    stitched_image = stitch_vertical(current_images)
+
+                    if stitched_image:
+                        stitched_image.save(image_path, "JPEG", quality=85)  # Save stacked image
+                        logger.info(
+                            f"Saved stacked screenshot (size {stitched_image.size}) to {image_path}"
+                        )
+                        console.print(
+                            f"    [green]Success:[/green] Saved stacked screenshot to {image_path}"
+                        )
+                    else:
+                        logger.warning(f"Stacking failed for {url}. Screenshot not saved.")
+                        console.print(
+                            f"    [yellow]Warning:[/yellow] Stacking failed, screenshot not saved for {url}."
+                        )
         else:
             logger.info(f"No image provided for {url} in this call. No screenshot saved/stacked.")
 
         console.print(
-            f"    [green]Success:[/green] Saved sample data to {base_dir / slug}.[html|json|jpg|md]"
+            f"    [green]Success:[/green] Saved sample data to {target_dir / path_slug}.[html|json|jpg|md]"
         )
 
     except OSError as e:
@@ -564,83 +506,6 @@ async def save_sample_data(
     except Exception as e:
         logger.error(f"Unexpected error saving sample data for {url}: {e}", exc_info=True)
         console.print(f"    [red]Error:[/red] Failed saving sample data for {url}: {e}")
-
-
-async def handle_openai_cleanup_completion(url: str, task: asyncio.Task):
-    """Callback executed when the OpenAI cleanup task finishes."""
-    global deferred_openai_cleanup_tasks
-    logger.debug(f"OpenAI task completed for URL: {url}")
-
-    try:
-        cleaned_markdown = await task  # Get result or raise exception
-
-        # --- Determine file path ---
-        # (This duplicates some logic from save_sample_data, maybe refactor later)
-        try:
-            parsed_url = urlparse(url)
-            host = parsed_url.netloc.split(":")[0] if parsed_url.netloc else "unknown_host"
-            slug = slugify_url(url) or "default_slug"
-            base_dir = Path("samples") / host
-            md_path = base_dir / f"{slug}.md"
-            base_dir.mkdir(parents=True, exist_ok=True)
-        except Exception as path_e:
-            logger.error(f"Error determining markdown save path for {url}: {path_e}", exc_info=True)
-            # Cannot save if path fails
-            if url in deferred_openai_cleanup_tasks:
-                del deferred_openai_cleanup_tasks[url]
-            return
-        # --- Save the final markdown ---
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(cleaned_markdown)
-        logger.info(f"Saved final (cleaned or original) markdown to {md_path}")
-        console.print(f"    [green]Success:[/green] Saved final markdown for {url}")
-
-    except asyncio.CancelledError:
-        logger.warning(f"OpenAI cleanup task for {url} was cancelled.")
-    except Exception as e:
-        logger.error(f"OpenAI cleanup task for {url} failed: {e}", exc_info=True)
-        # Optionally save the *original* markdown here on failure?
-        # Current logic in cleanup_markdown_with_openai returns original on failure, so it's already saved.
-        console.print(
-            f"    [red]Error:[/red] OpenAI cleanup failed for {url}. Original markdown likely saved."
-        )
-    finally:
-        # Remove task from tracking dict regardless of outcome
-        if url in deferred_openai_cleanup_tasks:
-            del deferred_openai_cleanup_tasks[url]
-
-
-async def trigger_openai_cleanup(url: str):
-    """Retrieves latest markdown and starts the background cleanup task."""
-    global url_latest_markdown, deferred_openai_cleanup_tasks, deferred_openai_cleanup_timers
-    logger.info(f"Debounce timer expired for {url}. Triggering OpenAI cleanup.")
-
-    # Clear the timer handle now that it has fired
-    if url in deferred_openai_cleanup_timers:
-        del deferred_openai_cleanup_timers[url]
-
-    latest_markdown = url_latest_markdown.get(url)
-    if not latest_markdown or not latest_markdown.strip():
-        logger.info(f"No markdown content found for {url} at cleanup trigger time. Skipping.")
-        return
-
-    # Cancel any previously running cleanup task for this URL
-    if url in deferred_openai_cleanup_tasks:
-        old_task = deferred_openai_cleanup_tasks[url]
-        if not old_task.done():
-            logger.debug(f"Cancelling previous OpenAI task for {url}.")
-            old_task.cancel()
-            # We don't necessarily need to wait for cancellation here
-
-    # Start the new cleanup task in the background
-    logger.debug(f"Starting background OpenAI task for {url}...")
-    cleanup_task = asyncio.create_task(cleanup_markdown_with_openai(latest_markdown))
-    deferred_openai_cleanup_tasks[url] = cleanup_task
-
-    # Add the completion callback
-    cleanup_task.add_done_callback(
-        lambda t: asyncio.create_task(handle_openai_cleanup_completion(url, t))
-    )
 
 
 async def main():
