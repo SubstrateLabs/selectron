@@ -58,6 +58,7 @@ class SelectorTools:
                     matches=[],
                     target_text_found_in_any_match=False,
                     size_validation_error=None,
+                    feedback_message=None,
                 )
 
             if len(possible_anchors) == 0:
@@ -73,6 +74,7 @@ class SelectorTools:
                     matches=[],
                     target_text_found_in_any_match=False,
                     size_validation_error=None,
+                    feedback_message=None,
                 )
             if len(possible_anchors) > 1:
                 error_msg = f"Anchor Error: Anchor selector '{anchor_selector}' is not unique (found {len(possible_anchors)})."
@@ -85,6 +87,7 @@ class SelectorTools:
                     matches=[],
                     target_text_found_in_any_match=False,
                     size_validation_error=None,
+                    feedback_message=None,
                 )
             base_element = possible_anchors[0]
             logger.debug(f"{log_prefix}: Anchor found successfully.")
@@ -135,6 +138,46 @@ class SelectorTools:
                     logger.warning(f"{log_prefix}: {size_validation_error_msg}")
             # --- End size validation --- #
 
+            # --- Generate feedback if selector is not unique --- #
+            feedback = None
+            if count > 1:
+                feedback_parts = [f"Selector matched {count} elements."]
+                # Analyze differences in the detailed matches
+                texts = {m.text_content for m in match_details if m.text_content}
+                if len(texts) > 1:
+                    feedback_parts.append(
+                        f"Differing text includes: {list(texts)[:3]}..."
+                    )  # Show first 3
+
+                all_attrs = set()
+                common_attrs = {**match_details[0].attributes} if match_details else {}
+                for m in match_details:
+                    all_attrs.update(m.attributes.keys())
+                    common_attrs.update(m.attributes)
+
+                # Simple diff: which attributes are sometimes missing?
+                missing_sometimes = set()
+                for attr_key in common_attrs.keys():
+                    if not all(attr_key in m.attributes for m in match_details):
+                        missing_sometimes.add(attr_key)
+                if missing_sometimes:
+                    feedback_parts.append(f"Some lack attributes like: {list(missing_sometimes)}.")
+
+                # Diff values for common specific attrs
+                for key in ["id", "class", "href", "title", "aria-label"]:
+                    if key in common_attrs:
+                        values = {
+                            m.attributes.get(key) for m in match_details if m.attributes.get(key)
+                        }
+                        if len(values) > 1:
+                            feedback_parts.append(
+                                f"Differing '{key}' values include: {list(values)[:3]}..."
+                            )
+
+                feedback = " ".join(feedback_parts)
+                logger.info(f"{log_prefix}: Generated feedback for non-unique selector: {feedback}")
+            # --- End feedback generation --- #
+
             result = SelectorEvaluationResult(
                 selector_used=selector,
                 anchor_selector_used=anchor_selector,
@@ -143,6 +186,7 @@ class SelectorTools:
                 target_text_found_in_any_match=text_found_flag,
                 error=None,
                 size_validation_error=size_validation_error_msg,
+                feedback_message=feedback,  # Assign feedback
             )
             logger.info(
                 f"{log_prefix}: Result: Count={result.element_count}, TextFound={result.target_text_found_in_any_match}, MatchesDetailed={len(result.matches)}"
@@ -168,6 +212,7 @@ class SelectorTools:
                 matches=[],
                 target_text_found_in_any_match=False,
                 size_validation_error=None,
+                feedback_message=None,
             )
 
     async def get_children_tags(

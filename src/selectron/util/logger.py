@@ -33,7 +33,7 @@ def get_logger(name: str) -> logging.Logger:
             LOG_FILE, mode="w", encoding="utf-8"
         )  # Use write mode to clear on start
         _file_handler.setFormatter(log_formatter)
-        _file_handler.setLevel(logging.DEBUG)  # Log everything to file
+        _file_handler.setLevel(logging.INFO)  # Log INFO and above to file
         root_logger.addHandler(_file_handler)
 
         # Set library levels (optional, but good practice)

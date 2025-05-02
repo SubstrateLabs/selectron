@@ -19,6 +19,9 @@ class SelectorEvaluationResult(BaseModel):
     size_validation_error: Optional[str] = Field(
         None, description="Error message if element size validation fails, otherwise None."
     )
+    feedback_message: Optional[str] = Field(
+        None, description="Feedback for the agent if the selector was not unique or had issues."
+    )
 
 
 class ChildDetail(BaseModel):
@@ -69,3 +72,10 @@ class AgentResult(BaseModel):
     text_extracted_flag: bool = Field(False)
     extraction_result: ExtractionResult = Field(...)
     final_verification: SelectorEvaluationResult = Field(...)
+
+
+class SelectorProposal(BaseModel):
+    """Simplified result containing only the proposed selector and reasoning."""
+
+    proposed_selector: str = Field(...)
+    reasoning: str = Field(...)

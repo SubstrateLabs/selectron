@@ -22,6 +22,7 @@ InteractionTabUpdateCallback = Callable[
 ContentFetchedCallback = Callable[
     [TabReference, Optional[Image.Image], Optional[int], Optional[str]], Awaitable[None]
 ]  # Called after interaction + fetch (with fresh HTML, screenshot, scrollY, and DOM string)
+RehighlightCallback = Callable[[], Awaitable[None]]
 
 logger = get_logger(__name__)
 
@@ -36,16 +37,19 @@ class TabInteractionHandler:
         tab: ChromeTab,
         interaction_callback: InteractionTabUpdateCallback,
         content_fetched_callback: ContentFetchedCallback,
+        rehighlight_callback: RehighlightCallback,
     ):
         self.tab = tab
         self.tab_id = tab.id
         self.ws_url = tab.webSocketDebuggerUrl
         self.interaction_callback = interaction_callback
         self.content_fetched_callback = content_fetched_callback
+        self.rehighlight_callback = rehighlight_callback
 
         self._monitor_task: Optional[asyncio.Task] = None
         self._debounce_timer: Optional[asyncio.TimerHandle] = None
         self._fetch_task: Optional[asyncio.Task] = None
+        self._rehighlight_debounce_timer: Optional[asyncio.TimerHandle] = None
         self._is_running = False
         self._last_interaction_scroll_y: Optional[int] = None  # Store last scrollY here
 
@@ -84,6 +88,11 @@ class TabInteractionHandler:
         if self._debounce_timer:
             self._debounce_timer.cancel()
             self._debounce_timer = None
+
+        # Cancel rehighlight timer
+        if self._rehighlight_debounce_timer:
+            self._rehighlight_debounce_timer.cancel()
+            self._rehighlight_debounce_timer = None
 
         # Cancel fetch task
         if self._fetch_task and not self._fetch_task.done():
@@ -139,6 +148,7 @@ class TabInteractionHandler:
                     if isinstance(scroll_y, int):
                         self._last_interaction_scroll_y = scroll_y
                         logger.debug(f"Tab {self.tab_id} scroll detected, scrollY: {scroll_y}")
+                        self._handle_scroll_event()  # Trigger rehighlight debounce
                 elif event.get("type") == "click":
                     # Reset scrollY on click? Or keep the last known one?
                     # Let's keep the last known one for now, might be relevant if click triggers fetch
@@ -212,6 +222,29 @@ class TabInteractionHandler:
             DEBOUNCE_DELAY_SECONDS,
             lambda: asyncio.create_task(self._trigger_debounced_fetch()),
         )
+
+    def _handle_scroll_event(self):  # New method
+        """Handles scroll event by resetting the rehighlight debounce timer."""
+        # Cancel existing rehighlight timer, if any
+        if self._rehighlight_debounce_timer:
+            self._rehighlight_debounce_timer.cancel()
+
+        # Schedule the rehighlight callback
+        loop = asyncio.get_running_loop()
+        debounce_delay = 0.25  # Shorter debounce for rehighlighting
+        self._rehighlight_debounce_timer = loop.call_later(
+            debounce_delay,
+            lambda: asyncio.create_task(self._invoke_rehighlight_callback()),
+        )
+
+    async def _invoke_rehighlight_callback(self):
+        """Wrapper to log and invoke the rehighlight callback."""
+        try:
+            await self.rehighlight_callback()
+        except Exception as e:
+            logger.error(
+                f"Tab {self.tab_id}: Error invoking rehighlight callback: {e}", exc_info=True
+            )
 
     async def _trigger_debounced_fetch(self):
         """Callback executed after the debounce delay. Starts the HTML fetch task."""

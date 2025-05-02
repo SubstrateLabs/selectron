@@ -46,7 +46,7 @@ class CdpBrowserExecutor(BrowserExecutor):
                     # Enable Runtime domain immediately after internal connection
                     # Use self._internal_ws directly here as self._ws might return the (None) provided_ws
                     await send_cdp_command(self._internal_ws, "Runtime.enable")
-                    logger.info(f"(Internal Connect) Connected successfully to {self.ws_url}")
+                    logger.debug(f"(Internal Connect) Connected successfully to {self.ws_url}")
                 except (
                     websockets.exceptions.WebSocketException,
                     OSError,

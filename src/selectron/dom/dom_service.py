@@ -82,6 +82,7 @@ class DomService:
         args = {
             "viewportExpansion": viewport_expansion,
             "debugMode": debug_mode,
+            "doHighlightElements": False,
         }
 
         try:

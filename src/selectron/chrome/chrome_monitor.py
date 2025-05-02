@@ -9,18 +9,19 @@ from typing import (
     Optional,
     Set,
     Tuple,
-    Union,
 )
 
 from selectron.chrome.chrome_cdp import ChromeTab, get_tabs
 from selectron.chrome.diff_tabs import diff_tabs
-from selectron.chrome.tab_interaction_handler import (
+from selectron.util.logger import get_logger
+
+from .tab_interaction_handler import (
+    DEBOUNCE_DELAY_SECONDS,
     ContentFetchedCallback,
     InteractionTabUpdateCallback,
     TabInteractionHandler,
 )
-from selectron.chrome.types import TabReference
-from selectron.util.logger import get_logger
+from .types import TabReference
 
 logger = get_logger(__name__)
 
@@ -32,21 +33,29 @@ class TabChangeEvent(NamedTuple):
     current_tabs: List[ChromeTab]
 
 
-PollingTabChangeCallback = Union[
-    Callable[[TabChangeEvent], None],
-    Callable[[TabChangeEvent], Awaitable[None]],
-]
+# Type aliases
+PollingTabChangeCallback = Callable[[TabChangeEvent], Awaitable[None]]
+RehighlightCallback = Callable[[], Awaitable[None]]
 
 
 class ChromeMonitor:
     """watches Chrome for tab changes (new, closed, navigated) via polling and interactions."""
 
-    def __init__(self, check_interval: float = 2.0):
+    def __init__(
+        self,
+        rehighlight_callback: RehighlightCallback,
+        check_interval: float = 2.0,
+        interaction_debounce: float = DEBOUNCE_DELAY_SECONDS,
+    ):
         """
         Args:
+            rehighlight_callback: Callback for rehighlighting
             check_interval: How often to check for tab changes via polling, in seconds
+            interaction_debounce: The debounce delay for interaction signals, in seconds
         """
+        self.rehighlight_callback = rehighlight_callback
         self.check_interval = check_interval
+        self.interaction_debounce = interaction_debounce
         self.previous_tab_refs: Set[TabReference] = set()
         self.last_tabs_check = 0
         self._monitoring = False
@@ -191,6 +200,7 @@ class ChromeMonitor:
             tab=tab,  # Pass the full ChromeTab object
             interaction_callback=self._on_interaction_update_callback,
             content_fetched_callback=self._on_content_fetched_callback,
+            rehighlight_callback=self.rehighlight_callback,
         )
         self._interaction_handlers[tab_id] = handler
         await handler.start()
