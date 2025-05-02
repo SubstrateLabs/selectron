@@ -16,6 +16,8 @@ from rich.pretty import pretty_repr
 from term_image.exceptions import InvalidSizeError
 from term_image.image import AutoImage
 
+from selectron.browser_use.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES
+
 # Import DomService and CdpBrowserExecutor
 from selectron.browser_use.dom_service import DomService
 from selectron.chrome.cdp_executor import CdpBrowserExecutor
@@ -28,7 +30,7 @@ from selectron.chrome.chrome_cdp import (
 from selectron.chrome.chrome_monitor import ChromeMonitor, TabChangeEvent
 from selectron.chrome.connect import ensure_chrome_connection
 from selectron.chrome.types import TabReference
-from selectron.util.extract_markdown import MarkdownStrategy, extract_markdown
+from selectron.util.extract_markdown import extract_markdown
 from selectron.util.extract_metadata import HtmlMetadata, extract_metadata
 from selectron.util.logger import get_logger
 from selectron.util.slugify_url import slugify_url
@@ -39,7 +41,6 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("websockets").setLevel(logging.INFO)
 console = Console()
 
-MARKDOWN_STRATEGY = MarkdownStrategy.DOCLING
 # Store tuples of (Image, hash) to allow deduplication
 url_screenshot_data: Dict[str, List[Tuple[Image.Image, imagehash.ImageHash]]] = defaultdict(list)
 
@@ -118,7 +119,7 @@ async def handle_content_fetched(
         )
     else:
         console.print(
-            f"    [yellow]Warning:[/yellow] DOM representation was not fetched for {ref.url}."
+            f"    [yellow]Warning:[/yellow] DOM representation was not fetched for {ref.url} after interaction."
         )
 
     if not ref.html:
@@ -312,7 +313,10 @@ async def process_new_tab(tab: ChromeTab):
                 # Get DOM state (disable highlighting for initial capture)
                 dom_state = await dom_service.get_clickable_elements(highlight_elements=False)
                 if dom_state and dom_state.element_tree:
-                    dom_string = dom_state.element_tree.clickable_elements_to_string()
+                    # Generate DOM string WITH attributes
+                    dom_string = dom_state.element_tree.clickable_elements_to_string(
+                        include_attributes=DOM_STRING_INCLUDE_ATTRIBUTES
+                    )
                     console.print(
                         f"    [green]Success:[/green] Fetched and serialized DOM for {final_url} (Length: {len(dom_string)})"
                     )
@@ -453,7 +457,7 @@ async def save_sample_data(
         # --- Handle Markdown --- -> Save Raw Markdown Directly
         try:
             # 1. Extract original markdown
-            original_md_content = extract_markdown(html, strategy=MARKDOWN_STRATEGY)
+            original_md_content = extract_markdown(html)
             # 2. Determine save path
             try:
                 parsed_url_for_md = urlparse(url)

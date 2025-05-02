@@ -170,37 +170,44 @@ class DOMElementNode(DOMBaseNode):
 
                     text = node.get_all_text_till_next_clickable_element()
                     attributes_html_str = ""
-                    if include_attributes:
-                        attributes_to_include = {
-                            key: str(value)
-                            for key, value in node.attributes.items()
-                            if key in include_attributes
-                        }
+                    attributes_to_include = {}  # Initialize empty dict
 
-                        # Easy LLM optimizations
+                    # Populate attributes_to_include based on the include_attributes list
+                    if include_attributes:
+                        for attr_name in include_attributes:
+                            if attr_name in node.attributes:
+                                attributes_to_include[attr_name] = str(node.attributes[attr_name])
+
+                        # Easy LLM optimizations (apply AFTER selecting attributes)
                         # if tag == role attribute, don't include it
                         if node.tag_name == attributes_to_include.get("role"):
                             del attributes_to_include["role"]
 
                         # if aria-label == text of the node, don't include it
-                        if (
-                            attributes_to_include.get("aria-label")
-                            and attributes_to_include.get("aria-label", "").strip() == text.strip()
-                        ):
+                        # Strip both for comparison
+                        aria_label_val = attributes_to_include.get("aria-label", "").strip()
+                        text_val = text.strip()
+                        # Check if aria_label_val is non-empty before comparison
+                        if aria_label_val and aria_label_val == text_val:
                             del attributes_to_include["aria-label"]
 
                         # if placeholder == text of the node, don't include it
-                        if (
-                            attributes_to_include.get("placeholder")
-                            and attributes_to_include.get("placeholder", "").strip() == text.strip()
-                        ):
+                        # Strip both for comparison
+                        placeholder_val = attributes_to_include.get("placeholder", "").strip()
+                        # Check if placeholder_val is non-empty before comparison
+                        if placeholder_val and placeholder_val == text_val:
                             del attributes_to_include["placeholder"]
 
-                        if attributes_to_include:
-                            # Format as key1='value1' key2='value2'
-                            attributes_html_str = " ".join(
-                                f"{key}='{value}'" for key, value in attributes_to_include.items()
-                            )
+                    # Format the final selected attributes
+                    if attributes_to_include:
+                        # Properly escape quotes within attribute values for safe inclusion
+                        # Build parts separately to avoid Python < 3.12 f-string quote limitations
+                        attr_parts = []
+                        for key, value in attributes_to_include.items():
+                            # Escape single quotes within the value
+                            escaped_value = value.replace("'", "\\'")
+                            attr_parts.append(f"{key}='{escaped_value}'")
+                        attributes_html_str = " ".join(attr_parts)
 
                     # Build the line
                     if node.is_new:
@@ -213,16 +220,28 @@ class DOMElementNode(DOMBaseNode):
                     if attributes_html_str:
                         line += f" {attributes_html_str}"
 
+                    # Simplified logic for adding text/closing tag
                     if text:
-                        # Add space before >text only if there were NO attributes added before
-                        if not attributes_html_str:
-                            line += " "
-                        line += f">{text}"
-                    # Add space before /> only if neither attributes NOR text were added
-                    elif not attributes_html_str:
-                        line += " "
+                        # Add space only if attributes were present
+                        if attributes_html_str:
+                            line += f" >{text} />"
+                        else:
+                            line += f">{text} />"  # No space needed if no attributes
+                    else:
+                        # Add space only if attributes were present
+                        if attributes_html_str:
+                            line += " />"
+                        else:
+                            # No space needed if no attributes
+                            # Ensure self-closing tags have a space before />, e.g. <img /> not <img/>
+                            # Though technically not required by HTML5, it's common practice.
+                            # However, for conciseness here, maybe omit it? Let's omit it for now.
+                            # line += " />"
+                            # Let's stick to the original logic: add space if *neither* attrs nor text
+                            line += (
+                                " />"  # Reverting to add space for consistency with previous code
+                            )
 
-                    line += " />"  # 1 token
                     formatted_text.append(line)
 
                 # Process children regardless

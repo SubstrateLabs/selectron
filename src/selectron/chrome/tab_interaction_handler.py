@@ -4,6 +4,7 @@ from typing import Awaitable, Callable, List, Optional
 import websockets
 from PIL import Image
 
+from selectron.browser_use.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES
 from selectron.browser_use.dom_service import DomService
 from selectron.chrome.cdp_executor import CdpBrowserExecutor
 from selectron.chrome.chrome_cdp import (
@@ -295,7 +296,10 @@ class TabInteractionHandler:
                     dom_state = await dom_service.get_clickable_elements(highlight_elements=False)
                     # Serialize the DOM tree
                     if dom_state and dom_state.element_tree:
-                        dom_string = dom_state.element_tree.clickable_elements_to_string()
+                        # Generate DOM string WITH attributes
+                        dom_string = dom_state.element_tree.clickable_elements_to_string(
+                            include_attributes=DOM_STRING_INCLUDE_ATTRIBUTES
+                        )
                         logger.debug(
                             f"Successfully fetched and serialized DOM (len {len(dom_string)}) for {self.tab_id}"
                         )

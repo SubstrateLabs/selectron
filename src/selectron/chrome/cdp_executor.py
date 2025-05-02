@@ -82,7 +82,9 @@ class CdpBrowserExecutor(BrowserExecutor):
 
         # Log connection status before checks
         ws_status = "None" if active_ws is None else active_ws.state
-        logger.debug(f"[_send_command] Method: {method}. Checking WebSocket status. Provided: {self._provided_ws is not None}. Internal: {self._internal_ws is not None}. Active status: {ws_status}")
+        logger.debug(
+            f"[_send_command] Method: {method}. Checking WebSocket status. Provided: {self._provided_ws is not None}. Internal: {self._internal_ws is not None}. Active status: {ws_status}"
+        )
 
         if active_ws is None:
             # If no connection provided, attempt internal connection
@@ -131,14 +133,18 @@ class CdpBrowserExecutor(BrowserExecutor):
             )
             eval_result = await self._send_command("Runtime.evaluate", params)
             # Log raw result immediately after call
-            logger.debug(f"[evaluate/arg] Raw eval_result from _send_command: {str(eval_result)[:500]}...")
+            logger.debug(
+                f"[evaluate/arg] Raw eval_result from _send_command: {str(eval_result)[:500]}..."
+            )
 
         else:
             # No arguments, use simple evaluate
             params = {"expression": expression, "awaitPromise": True, "returnByValue": True}
             eval_result = await self._send_command("Runtime.evaluate", params)
             # Log raw result immediately after call
-            logger.debug(f"[evaluate/no_arg] Raw eval_result from _send_command: {str(eval_result)[:500]}...")
+            logger.debug(
+                f"[evaluate/no_arg] Raw eval_result from _send_command: {str(eval_result)[:500]}..."
+            )
 
         # Process result (common logic for both cases)
         if eval_result and "result" in eval_result:
@@ -146,7 +152,9 @@ class CdpBrowserExecutor(BrowserExecutor):
             if result_data.get("type") != "undefined":
                 return result_data.get("value")
             else:
-                logger.debug("[evaluate] JS result type is undefined, returning None.") # Log if undefined
+                logger.debug(
+                    "[evaluate] JS result type is undefined, returning None."
+                )  # Log if undefined
                 return None  # Represent undefined JS result as None
         elif eval_result and "exceptionDetails" in eval_result:
             exception_details = eval_result["exceptionDetails"]

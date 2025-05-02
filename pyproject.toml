@@ -21,7 +21,6 @@ classifiers = [
 dependencies = [
     "beautifulsoup4>=4.13.4",
     "bs4>=0.0.2",
-    "docling>=2.31.0",
     "httpx>=0.28.1",
     "imagehash>=4.3.2",
     "lxml>=5.4.0",
