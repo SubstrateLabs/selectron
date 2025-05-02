@@ -5,13 +5,15 @@ from pathlib import Path
 from typing import List, Optional
 
 import openai
+from bs4 import BeautifulSoup, Comment
 from pydantic import BaseModel, Field
 from rich.console import Console
 from rich.pretty import pretty_repr
 
 # --- Model Constants ---
-IMAGE_ANALYSIS_MODEL = "gpt-4.1"
-MARKDOWN_MAPPING_MODEL = "gpt-4.1"
+IMAGE_ANALYSIS_MODEL = "gpt-4.1-mini"
+MARKDOWN_MAPPING_MODEL = "gpt-4.1-mini"
+SELECTOR_MAPPING_MODEL = "gpt-4.1-mini"
 
 # --- Pydantic Models ---
 
@@ -32,6 +34,10 @@ class ProposedContentRegion(BaseModel):
         None,
         description="Key-value pairs of metadata extracted from the markdown content (e.g., 'author', 'date', 'likes').",
     )
+    css_selector: Optional[str] = Field(
+        None,
+        description="The CSS selector for the main container element of this region, if found.",
+    )
 
 
 class ExtractionProposal(BaseModel):
@@ -48,6 +54,13 @@ class MarkdownMappingResponse(BaseModel):
     metadata_list: List[Optional[dict[str, str]]] = Field(
         ...,
         description="A list of dictionaries, each containing extracted metadata corresponding to an item in the input list. The order MUST be maintained. Use null or an empty dict if no metadata is found.",
+    )
+
+
+class SelectorMappingResponse(BaseModel):
+    css_selectors: List[Optional[str]] = Field(
+        ...,
+        description="A list of CSS selector strings. Each selector corresponds to an item in the input list, maintaining the original order. Use null if no suitable selector is found.",
     )
 
 
@@ -128,7 +141,6 @@ async def propose_extractions(image_path: Path) -> Optional[ExtractionProposal]:
                 }
             ],
             response_format=ExtractionProposal,
-            max_tokens=1024,
         )
 
         initial_proposal = response.choices[0].message.parsed
@@ -234,7 +246,6 @@ Maintain the exact order from the input regions in both lists. Prioritize accura
             model=MARKDOWN_MAPPING_MODEL,
             messages=[{"role": "user", "content": markdown_mapping_prompt}],
             response_format=MarkdownMappingResponse,
-            max_tokens=2048,  # Increased token limit for markdown context
         )
 
         markdown_mapping = mapping_response.choices[0].message.parsed
@@ -272,6 +283,235 @@ Maintain the exact order from the input regions in both lists. Prioritize accura
         console.print(
             "[bold green]Success:[/bold green] Successfully mapped and merged markdown content and metadata."
         )
+
+        # --- Step 3: HTML Selector Mapping ---
+        html_path = image_path.with_suffix(".html")
+        html_content = None
+        if html_path.exists():
+            console.print(f"Attempting to read corresponding HTML file: {html_path}", style="dim")
+            try:
+                with open(html_path, "r", encoding="utf-8") as f:
+                    html_content = f.read()
+                console.print("Successfully read HTML file.", style="dim")
+            except Exception as e:
+                console.print(
+                    f"[bold yellow]Warning:[/bold yellow] Failed to read HTML file {html_path}: {e}. Proceeding without CSS selectors."
+                )
+                html_content = None
+        else:
+            console.print(
+                f"[bold yellow]Warning:[/bold yellow] HTML file not found at {html_path}. Skipping selector mapping."
+            )
+            # Return the proposal as enriched by step 2
+            return initial_proposal
+
+        if not html_content:
+            return initial_proposal
+
+        # --- Clean HTML before sending ---
+        console.print("Cleaning HTML content...", style="dim")
+        try:
+            soup = BeautifulSoup(html_content, "lxml")
+            # Remove script and style tags
+            for tag in soup(["script", "style", "svg"]):  # Also removing SVG for now
+                tag.decompose()
+            # Remove comments
+            for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
+                comment.extract()
+            # Get cleaned HTML (consider .prettify() if whitespace is needed, but stripped is smaller)
+            cleaned_html_content = str(soup)
+            original_len = len(html_content)
+            cleaned_len = len(cleaned_html_content)
+            console.print(
+                f"HTML reduced from {original_len} to {cleaned_len} characters ({100 * cleaned_len / original_len:.1f}%).",
+                style="dim",
+            )
+        except Exception as e:
+            console.print(
+                f"[bold yellow]Warning:[/bold yellow] Failed to clean HTML: {e}. Using original HTML."
+            )
+            cleaned_html_content = html_content  # Fallback to original if cleaning fails
+
+        # --- Step 3: Chunked CSS Selector Mapping ---
+        console.print("Starting chunked CSS selector mapping...", style="dim")
+
+        # Settings for chunking
+        # Estimate based on ~3-4 chars/token. Target < 30k tokens for GPT-4.1 TPM limit.
+        # Let's aim for ~100k chars per chunk + prompt buffer.
+        TARGET_CHUNK_SIZE_CHARS = 100000
+        html_chunks = [
+            cleaned_html_content[i : i + TARGET_CHUNK_SIZE_CHARS]
+            for i in range(0, len(cleaned_html_content), TARGET_CHUNK_SIZE_CHARS)
+        ]
+        console.print(f"Split cleaned HTML into {len(html_chunks)} chunks.", style="dim")
+
+        # Track which item indices still need selectors
+        remaining_indices = set(range(num_items))
+        found_selectors: dict[int, str] = {}
+
+        for chunk_index, html_chunk in enumerate(html_chunks):
+            if not remaining_indices:
+                console.print("All selectors found, stopping chunk iteration.", style="dim")
+                break
+
+            current_indices_list = sorted(remaining_indices)
+            console.print(
+                f"  Processing chunk {chunk_index + 1}/{len(html_chunks)} for {len(current_indices_list)} remaining items...",
+                style="dim",
+            )
+
+            # Prepare descriptions for the items we're looking for in *this* chunk
+            region_descriptions_for_chunk_prompt = []
+            original_index_map = {}
+            for i, original_index in enumerate(current_indices_list):
+                item = initial_proposal.items[original_index]
+                region_descriptions_for_chunk_prompt.append(
+                    f"{i + 1}. (Original Index: {original_index + 1}) Description: {item.region_description}\n   Observed Content: {item.observed_content_summary}"
+                )
+                original_index_map[i] = (
+                    original_index  # Map response index back to original item index
+                )
+
+            descriptions_text_chunk = "\n\n".join(region_descriptions_for_chunk_prompt)
+            num_regions_in_chunk = len(current_indices_list)
+
+            # Construct the prompt for this chunk
+            selector_mapping_prompt = f"""You are an expert web developer tasked with finding robust CSS selectors.
+
+The *current chunk* of the webpage's HTML content is below:
+--- HTML CHUNK START ---
+{html_chunk}
+--- HTML CHUNK END ---
+
+Your task is to find selectors *only for the following {num_regions_in_chunk} regions* IF their main container element appears to be primarily located *within this specific HTML chunk*:
+--- REGIONS TO FIND IN THIS CHUNK ({num_regions_in_chunk} total) ---
+{descriptions_text_chunk}
+--- END REGIONS ---
+
+Instructions for EACH region above:
+1.  Determine if its main container element is likely present in the provided HTML CHUNK.
+2.  If present, provide the *single best CSS selector* for that region's container.
+3.  **Selector Quality Guidelines (Strictly follow):**
+    *   **Prioritize:** Unique IDs (`#element-id`), stable `data-*` attributes (`[data-testid="..."], [data-cy="..."]`), or specific, meaningful class combinations (`.class-a.class-b`).
+    *   **Avoid:** Overly generic tags (`div`, `span`, `a`) unless they have specific, unique attributes.
+    *   **Avoid:** Highly brittle positional selectors (`:nth-child`, `:nth-of-type`) *unless absolutely necessary* for lists where items lack unique identifiers.
+    *   **Avoid:** Relying solely on text content (`:contains(...)`) if structural selectors are available.
+    *   The selector MUST be specific enough to target the intended container for the described region.
+4.  If a region's main content does NOT appear to be in this chunk, or you cannot find a selector meeting the quality guidelines, use `null` for that region.
+
+Respond with a JSON object adhering precisely to the `SelectorMappingResponse` schema. The object must contain one key:
+*   `css_selectors`: A list containing exactly {num_regions_in_chunk} strings or nulls. The order MUST correspond EXACTLY to the order of the regions listed above (1 to {num_regions_in_chunk}).
+
+Provide ONLY the selector strings or nulls in the list, no explanations.
+"""
+
+            try:
+                # Use the original SelectorMappingResponse, but expect length == num_regions_in_chunk
+                selector_response = await client.beta.chat.completions.parse(
+                    model=SELECTOR_MAPPING_MODEL,
+                    messages=[{"role": "user", "content": selector_mapping_prompt}],
+                    response_format=SelectorMappingResponse,
+                )
+
+                chunk_mapping = selector_response.choices[0].message.parsed
+                if not chunk_mapping or chunk_mapping.css_selectors is None:
+                    console.print(
+                        f"    [bold yellow]Warning:[/bold yellow] Received invalid content for chunk {chunk_index + 1}. Skipping chunk."
+                    )
+                    continue
+
+                if len(chunk_mapping.css_selectors) != num_regions_in_chunk:
+                    console.print(
+                        f"    [bold yellow]Warning:[/bold yellow] Mismatch in expected ({num_regions_in_chunk}) vs received ({len(chunk_mapping.css_selectors)}) selectors for chunk {chunk_index + 1}. Skipping chunk."
+                    )
+                    continue
+
+                # Process results for this chunk
+                newly_found_count = 0
+                for i, selector in enumerate(chunk_mapping.css_selectors):
+                    original_item_index = original_index_map.get(i)
+                    if original_item_index is None:
+                        continue  # Should not happen
+
+                    # Only process if we still need this index
+                    if original_item_index in remaining_indices:
+                        is_valid_selector = False
+                        if selector and selector.strip() and selector.lower() != "null":
+                            selector = selector.strip()
+                            # --- Basic Validation ---
+                            try:
+                                # Check if selector finds at least one element in the *whole* cleaned soup
+                                # Using soup object created during initial cleaning
+                                found_element = soup.select_one(selector)
+                                if found_element:
+                                    is_valid_selector = True
+                                else:
+                                    console.print(
+                                        f"      Selector '{selector}' for item {original_item_index + 1} returned by LLM but found 0 elements in HTML. Invalid for this chunk.",
+                                        style="yellow",
+                                    )
+                            except Exception as e:
+                                # Catch potential errors from invalid selector syntax
+                                console.print(
+                                    f"      Selector '{selector}' for item {original_item_index + 1} caused validation error: {e}. Invalid.",
+                                    style="red",
+                                )
+                        # --- End Validation ---
+
+                    if is_valid_selector:
+                        # Explicit check to satisfy type checker
+                        if selector is not None:
+                            found_selectors[original_item_index] = selector
+                            initial_proposal.items[original_item_index].css_selector = selector
+                            remaining_indices.remove(original_item_index)
+                            newly_found_count += 1
+                            console.print(
+                                f"      Found and validated selector for original item {original_item_index + 1}: {selector}",
+                                style="cyan",
+                            )
+                    # else: If selector was null or invalid, do nothing, leave item in remaining_indices
+
+                console.print(
+                    f"    Processed chunk {chunk_index + 1}. Found {newly_found_count} new valid selectors.",
+                    style="dim",
+                )
+
+            except openai.APIConnectionError as e:
+                console.print(
+                    f"    [bold red]Error (Chunk {chunk_index + 1}):[/bold red] Failed to connect: {e}"
+                )
+            except openai.RateLimitError as e:
+                console.print(
+                    f"    [bold red]Error (Chunk {chunk_index + 1}):[/bold red] Rate limit exceeded: {e}"
+                )
+                console.print("    Slowing down... adding extra delay.")
+                await asyncio.sleep(10)  # Longer delay if rate limited
+            except openai.APIStatusError as e:
+                console.print(
+                    f"    [bold red]Error (Chunk {chunk_index + 1}):[/bold red] Status {e.status_code}: {e.response}"
+                )
+            except Exception as e:
+                console.print(
+                    f"    [bold red]Error (Chunk {chunk_index + 1}):[/bold red] Unexpected error: {e}"
+                )
+
+            # Add a delay between chunk requests
+            await asyncio.sleep(2)  # Adjust delay as needed
+
+        console.print(
+            f"Finished chunked mapping. Found selectors for {len(found_selectors)}/{num_items} items.",
+            style="dim",
+        )
+        if remaining_indices:
+            console.print(
+                f"[bold yellow]Warning:[/bold yellow] Could not find selectors for items (original indices): {sorted(remaining_indices)}",
+                style="yellow",
+            )
+
+        # Assign null to any remaining items explicitly (though they should be None by default)
+        for index in remaining_indices:
+            initial_proposal.items[index].css_selector = None
+
         return initial_proposal
 
     except openai.APIConnectionError as e:
