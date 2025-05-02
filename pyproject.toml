@@ -19,9 +19,15 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dependencies = [
+    "bs4>=0.0.2",
     "httpx>=0.28.1",
+    "lxml>=5.4.0",
+    "pillow>=10.4.0",
     "psutil>=7.0.0",
+    "pydantic>=2.11.4",
+    "python-dateutil>=2.9.0.post0",
     "rich>=14.0.0",
+    "websockets>=15.0.1",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +40,7 @@ dev = [
     "pytest-httpx>=0.24.0",
     "ruff>=0.3.0",
     "pyright>=1.1.350",
+    "term-image>=0.7.2"
 ]
 
 [project.urls]

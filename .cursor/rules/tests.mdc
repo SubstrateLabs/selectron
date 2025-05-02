@@ -1,0 +1,6 @@
+---
+description: 
+globs: test_*.py
+alwaysApply: false
+---
+Don't worry about fixing pytest import issues (these are false positives from the linting environment)

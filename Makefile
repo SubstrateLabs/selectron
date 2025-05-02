@@ -1,5 +1,12 @@
 .PHONY: format lint typecheck test install clean
 
+sample:
+	uv run scripts/sample.py
+
+# ================================
+# housekeeping
+# ================================
+
 format:
 	ruff format . && ruff check --fix .
 
