@@ -67,6 +67,7 @@ class CliApp(App[None]):
     # Attributes for log file watching
     _log_file_path: Path
     _last_log_position: int
+    _active_tab_ref: Optional[TabReference] = None
 
     def __init__(self):
         super().__init__()
@@ -216,6 +217,7 @@ class CliApp(App[None]):
         if event.value:  # Only log if there's text
             logger.info(f"User Input Logged: {event.value}")
             event.input.clear()  # Clear the input after logging
+            self.run_worker(self._highlight_active_tab_body(), exclusive=False)
         else:
             logger.debug(
                 "Log input submitted but was empty."
@@ -296,6 +298,7 @@ class CliApp(App[None]):
     ):
         """Callback triggered after interaction + debounce + content fetch."""
         logger.info(f"Interaction: Content Fetched: Tab {ref.id} ({ref.url}) ScrollY: {scroll_y}")
+        self._active_tab_ref = ref
 
         # Log if DOM string was fetched
         if dom_string:
@@ -491,6 +494,44 @@ class CliApp(App[None]):
             err_msg = f"An unexpected error occurred while opening log file: {e}"
             logger.error(err_msg, exc_info=True)
             # self.notify(err_msg, title="Error Opening Log", severity="error")
+
+    async def _highlight_active_tab_body(self) -> None:
+        """Highlights the body of the currently tracked active tab."""
+        if not self._active_tab_ref or not self._active_tab_ref.ws_url:
+            logger.warning("Cannot highlight: No active tab reference or websocket URL.")
+            return
+
+        ws_url = self._active_tab_ref.ws_url
+        url = self._active_tab_ref.url
+        tab_id = self._active_tab_ref.id
+        logger.info(f"Attempting to highlight body of tab {tab_id} ({url}) via {ws_url}")
+
+        js_code = """
+        (function() {
+            const body = document.body;
+            if (!body) return 'No body element found.';
+            const originalStyle = body.style.outline;
+            body.style.outline = '3px solid red';
+            setTimeout(() => {
+                // Check if style is still ours before removing
+                if (body.style.outline === '3px solid red') {
+                    body.style.outline = originalStyle;
+                }
+            }, 1000); // Remove after 1 second
+            return 'Body highlighted red temporarily.';
+        })();
+        """
+
+        try:
+            # Use CdpBrowserExecutor to handle connection and execution
+            # No need for async with if we let it manage the connection
+            executor = CdpBrowserExecutor(ws_url, url)
+            result = await executor.evaluate(js_code)
+            logger.info(f"Highlight JS execution result for tab {tab_id}: {result}")
+        except websockets.exceptions.WebSocketException as e:
+            logger.error(f"Highlight failed for tab {tab_id}: WebSocket error - {e}")
+        except Exception as e:
+            logger.error(f"Highlight failed for tab {tab_id}: Unexpected error - {e}", exc_info=True)
 
 
 if __name__ == "__main__":
