@@ -1,1 +1,2 @@
-- better folder structure for samples
+- allow selecting attributes
+- allow generating python
