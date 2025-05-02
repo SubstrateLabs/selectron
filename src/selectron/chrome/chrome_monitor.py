@@ -12,9 +12,14 @@ from typing import (
     Union,
 )
 
-from selectron.chrome.chrome_cdp import get_tabs
+from selectron.chrome.chrome_cdp import ChromeTab, get_tabs
 from selectron.chrome.diff_tabs import diff_tabs
-from selectron.chrome.types import ChromeTab, TabReference
+from selectron.chrome.tab_interaction_handler import (
+    ContentFetchedCallback,
+    InteractionTabUpdateCallback,
+    TabInteractionHandler,
+)
+from selectron.chrome.types import TabReference
 from selectron.util.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,30 +39,38 @@ PollingTabChangeCallback = Union[
 
 
 class ChromeMonitor:
-    """watches Chrome for tab changes (new, closed, navigated) via polling."""
+    """watches Chrome for tab changes (new, closed, navigated) via polling and interactions."""
 
     def __init__(self, check_interval: float = 2.0):
         """
         Args:
-            check_interval: How often to check for tab changes, in seconds
+            check_interval: How often to check for tab changes via polling, in seconds
         """
         self.check_interval = check_interval
         self.previous_tab_refs: Set[TabReference] = set()
         self.last_tabs_check = 0
         self._monitoring = False
         self._on_polling_change_callback: Optional[PollingTabChangeCallback] = None
-        self._monitor_task = None
+        self._on_interaction_update_callback: Optional[InteractionTabUpdateCallback] = None
+        self._on_content_fetched_callback: Optional[ContentFetchedCallback] = None
+        self._monitor_task: Optional[asyncio.Task] = None
+
+        self._interaction_handlers: Dict[str, TabInteractionHandler] = {}
 
     async def start_monitoring(
         self,
         on_polling_change_callback: PollingTabChangeCallback,
+        on_interaction_update_callback: InteractionTabUpdateCallback,
+        on_content_fetched_callback: ContentFetchedCallback,
     ) -> bool:
         """
-        Start monitoring tabs for changes asynchronously via polling.
+        Start monitoring tabs for changes asynchronously via polling and interactions.
         This method initializes the monitoring process and should only be called once.
 
         Args:
             on_polling_change_callback: Callback for new/closed/navigated tabs detected by polling.
+            on_interaction_update_callback: Callback for immediate interaction signal.
+            on_content_fetched_callback: Callback after interaction + debounced content fetch.
 
         Returns:
             bool: True if monitoring started successfully
@@ -67,34 +80,54 @@ class ChromeMonitor:
             return False
 
         self._on_polling_change_callback = on_polling_change_callback
+        self._on_interaction_update_callback = on_interaction_update_callback
+        self._on_content_fetched_callback = on_content_fetched_callback
 
-        logger.info("Performing initial tab check...")
-        try:
-            initial_cdp_tabs: List[ChromeTab] = await get_tabs()
-            filtered_initial_tabs = [
-                tab
-                for tab in initial_cdp_tabs
-                if tab.webSocketDebuggerUrl
-                and (tab.url.startswith("http://") or tab.url.startswith("https://"))
-            ]
-            self.previous_tab_refs = {
-                TabReference(
-                    id=tab.id, url=tab.url, title=tab.title, ws_url=tab.webSocketDebuggerUrl
-                )
-                for tab in filtered_initial_tabs
-                if tab.id and tab.url
-            }
-            logger.info(
-                f"Initial tab check complete. Found {len(self.previous_tab_refs)} relevant tabs."
-            )
-        except Exception as e:
-            logger.error(f"Error during initial tab check: {e}", exc_info=True)
-            self.previous_tab_refs = set()
+        logger.info("Performing initial tab setup and starting interaction monitors...")
+        await self._initialize_tabs_and_monitors()
 
         self._monitoring = True
         self._monitor_task = asyncio.create_task(self._monitor_loop())
-        logger.info("Chrome tab monitoring started.")
+        logger.info("Chrome tab polling and interaction monitoring started.")
         return True
+
+    async def _initialize_tabs_and_monitors(self):
+        """Gets current tabs, updates state, and starts interaction monitors."""
+        try:
+            logger.debug("Stopping any lingering interaction handlers before init...")
+            await self._stop_all_interaction_monitors()
+
+            initial_cdp_tabs: List[ChromeTab] = await get_tabs()
+            filtered_tabs = [
+                tab
+                for tab in initial_cdp_tabs
+                if tab.webSocketDebuggerUrl
+                and tab.id
+                and tab.url
+                and (tab.url.startswith("http://") or tab.url.startswith("https://"))
+            ]
+
+            new_tab_refs = set()
+            for tab in filtered_tabs:
+                tab_ref = TabReference(
+                    id=tab.id,
+                    url=tab.url,
+                    title=tab.title,
+                    html=None,
+                    ws_url=tab.webSocketDebuggerUrl,
+                )
+                new_tab_refs.add(tab_ref)
+                await self._start_interaction_monitor(tab)
+
+            self.previous_tab_refs = new_tab_refs
+            logger.info(
+                f"Initial setup complete. Found {len(self.previous_tab_refs)} relevant tabs and started monitors."
+            )
+
+        except Exception as e:
+            logger.error(f"Error during initial tab/monitor setup: {e}", exc_info=True)
+            self.previous_tab_refs = set()
+            await self._stop_all_interaction_monitors()
 
     async def stop_monitoring(self) -> None:
         """Stop monitoring tabs for changes (async version)."""
@@ -103,6 +136,9 @@ class ChromeMonitor:
             return
 
         self._monitoring = False
+
+        logger.debug("Stopping interaction handlers...")
+        await self._stop_all_interaction_monitors()
 
         if self._monitor_task and not self._monitor_task.done():
             logger.debug("Stopping main polling task...")
@@ -119,9 +155,95 @@ class ChromeMonitor:
 
         self.previous_tab_refs = set()
         self._on_polling_change_callback = None
+        self._on_interaction_update_callback = None
+        self._on_content_fetched_callback = None
         self._monitor_task = None
 
         logger.info("Chrome tab monitoring stopped.")
+
+    # --- Interaction Monitoring Logic --- #
+    async def _start_interaction_monitor(self, tab: ChromeTab):
+        """Creates and starts a TabInteractionHandler for a single tab."""
+        tab_id = tab.id
+        ws_url = tab.webSocketDebuggerUrl
+
+        # Extra safety checks
+        if not tab_id:
+            logger.warning(f"Cannot start interaction monitor: Tab is missing an ID. Data: {tab}")
+            return
+        if not ws_url:
+            logger.warning(
+                f"Cannot start interaction monitor for tab {tab_id}: missing WebSocket URL."
+            )
+            return
+        if not self._on_interaction_update_callback:
+            logger.error(
+                f"Cannot start interaction handler for tab {tab_id}: interaction callback not set."
+            )
+            return
+        if not self._on_content_fetched_callback:
+            logger.error(
+                f"Cannot start interaction handler for tab {tab_id}: content fetched callback not set."
+            )
+            return
+
+        # Check if already running
+        if tab_id in self._interaction_handlers:
+            # logger.debug(f"Interaction handler already running for tab {tab_id}, skipping start.")
+            return
+
+        # Create and start handler
+        logger.debug(f"Starting interaction monitor for tab {tab_id} ({tab.url[:50]}...)")
+        handler = TabInteractionHandler(
+            tab=tab,  # Pass the full ChromeTab object
+            interaction_callback=self._on_interaction_update_callback,
+            content_fetched_callback=self._on_content_fetched_callback,
+        )
+        self._interaction_handlers[tab_id] = handler
+        await handler.start()
+
+    async def _stop_interaction_monitor(self, tab_id: str):
+        """Stops the interaction handler and cleans up resources for a single tab."""
+        handler = self._interaction_handlers.pop(tab_id, None)
+        if handler:
+            logger.debug(f"Stopping interaction monitor for tab {tab_id}")
+            await handler.stop()
+
+    async def _stop_all_interaction_monitors(self):
+        """Stops all active TabInteractionHandler instances."""
+        if not self._interaction_handlers:
+            return
+
+        num_handlers = len(self._interaction_handlers)
+        logger.info(f"Stopping all {num_handlers} interaction handlers...")
+
+        # Create stop tasks for all handlers
+        # Use list comprehension for clarity
+        stop_tasks = [handler.stop() for handler in self._interaction_handlers.values()]
+
+        # Wait for all stop tasks to complete (with a timeout)
+        if stop_tasks:
+            # Use asyncio.gather for potentially better performance and exception handling
+            results = await asyncio.gather(*stop_tasks, return_exceptions=True)
+            # Log any errors that occurred during stopping
+            for i, result in enumerate(results):
+                if isinstance(result, Exception):
+                    # Attempt to get the corresponding handler/tab_id for better logging
+                    try:
+                        handler_id = list(self._interaction_handlers.keys())[i]
+                        logger.warning(
+                            f"Error stopping interaction handler for tab {handler_id}: {result}"
+                        )
+                    except IndexError:
+                        logger.warning(
+                            f"Error stopping an interaction handler (index {i}): {result}"
+                        )
+        else:
+            logger.debug("No active interaction handlers to stop.")
+
+        # Clear the dictionary regardless of stop success/failure
+        self._interaction_handlers.clear()
+        logger.debug(f"All ({num_handlers}) interaction handlers stopped and cleared.")
 
     async def _monitor_loop(self) -> None:
         """Main polling loop."""
@@ -132,7 +254,7 @@ class ChromeMonitor:
                 if not self._monitoring:
                     break
 
-                changed_tabs_event = self.process_tab_changes(current_cdp_tabs)
+                changed_tabs_event = await self.process_tab_changes(current_cdp_tabs)
 
                 if self._on_polling_change_callback and changed_tabs_event:
                     if asyncio.iscoroutinefunction(self._on_polling_change_callback):
@@ -149,11 +271,14 @@ class ChromeMonitor:
 
         logger.info("Exiting ChromeTabs _monitor_loop.")
 
-    def process_tab_changes(self, current_cdp_tabs: List[ChromeTab]) -> Optional[TabChangeEvent]:
+    async def process_tab_changes(
+        self, current_cdp_tabs: List[ChromeTab]
+    ) -> Optional[TabChangeEvent]:
         """
-        Process changes based on polled tabs.
-        Compares current tabs with previous state and returns changes.
+        Process changes based on polled tabs and manage interaction monitors.
+        Compares current tabs with previous state, starts/stops monitors, and returns changes.
         Ignores tabs with non-http(s) schemes or missing WebSocket URLs.
+        NOTE: Does NOT fetch HTML here. Fetching is triggered by interaction handlers.
 
         Args:
             current_cdp_tabs: List of current ChromeTab objects from get_tabs()
@@ -175,44 +300,124 @@ class ChromeMonitor:
         }
         current_polled_tabs_map: Dict[str, ChromeTab] = {tab.id: tab for tab in filtered_tabs}
 
+        # --- Identify Changes & Manage Interaction Monitors --- #
         added_tabs, removed_refs, navigated_pairs = diff_tabs(
             current_polled_tabs_map, current_tab_refs_map
         )
 
+        # --- Prepare data for the event and update internal state --- #
         updated_refs = set(self.previous_tab_refs)
 
-        closed_ids = {ref.id for ref in removed_refs}
+        # Process Added Tabs
+        for tab in added_tabs:
+            # Start interaction monitor
+            # logger.debug(f"Polling: Starting monitor for new tab {tab.id}") # DEBUG
+            await self._start_interaction_monitor(tab)
+            # Add ref with None HTML
+            if tab.id and tab.url and tab.webSocketDebuggerUrl:
+                updated_refs.add(
+                    TabReference(
+                        id=tab.id,
+                        url=tab.url,
+                        title=tab.title,
+                        ws_url=tab.webSocketDebuggerUrl,
+                        html=None,
+                    )
+                )
+
+        # Process Removed Tabs
+        closed_ids = set()
+        for ref in removed_refs:
+            # logger.debug(f"Polling: Stopping monitor for closed tab {ref.id}") # DEBUG
+            await self._stop_interaction_monitor(ref.id)
+            closed_ids.add(ref.id)
+        # Remove refs from state
         updated_refs = {ref for ref in updated_refs if ref.id not in closed_ids}
 
+        # Process Navigated Tabs
+        navigated_ids_to_update = set()
+        for new_tab, _ in navigated_pairs:
+            tab_id = new_tab.id
+            # logger.debug(f"Polling: Handling navigation for tab {tab_id} to {new_tab.url}") # DEBUG
+            # 1. Stop interaction monitor for old context
+            await self._stop_interaction_monitor(tab_id)
+
+            # 2. Update internal state immediately (placeholder HTML)
+            navigated_ids_to_update.add(tab_id)
+            # Add new ref (will remove the old one below)
+            if new_tab.id and new_tab.url and new_tab.webSocketDebuggerUrl:
+                updated_refs.add(
+                    TabReference(
+                        id=new_tab.id,
+                        url=new_tab.url,
+                        title=new_tab.title,
+                        ws_url=new_tab.webSocketDebuggerUrl,
+                        html=None,  # Mark HTML as stale/None
+                    )
+                )
+
+            # 3. Start interaction monitor for new context (maybe add small delay?)
+            # await asyncio.sleep(0.1) # Optional small delay
+            await self._start_interaction_monitor(new_tab)
+
+        # Remove old refs for navigated tabs
+        updated_refs = {
+            ref
+            for ref in updated_refs
+            if ref.id not in navigated_ids_to_update
+            or ref.id in {pair[0].id for pair in navigated_pairs}
+        }  # Keep the newly added ref
+        # Simplified logic: Directly construct the updated set based on current state after changes
+        current_refs_after_changes = set()
+        current_polled_tab_ids = {t.id for t in filtered_tabs}
+        for ref in self.previous_tab_refs:
+            if ref.id in current_polled_tab_ids:
+                # Check if it navigated
+                navigated_match = next(
+                    (pair for pair in navigated_pairs if pair[1].id == ref.id), None
+                )
+                if navigated_match:
+                    # Add the *new* tab reference for navigated tabs
+                    new_nav_tab = navigated_match[0]
+                    if new_nav_tab.id and new_nav_tab.url and new_nav_tab.webSocketDebuggerUrl:
+                        current_refs_after_changes.add(
+                            TabReference(
+                                id=new_nav_tab.id,
+                                url=new_nav_tab.url,
+                                title=new_nav_tab.title,
+                                ws_url=new_nav_tab.webSocketDebuggerUrl,
+                                html=None,
+                            )
+                        )
+                else:
+                    # Keep existing reference if not closed or navigated
+                    current_refs_after_changes.add(ref)
+        # Add references for newly added tabs
         for tab in added_tabs:
-            updated_refs.add(
-                TabReference(
-                    id=tab.id, url=tab.url, title=tab.title, ws_url=tab.webSocketDebuggerUrl
+            if tab.id and tab.url and tab.webSocketDebuggerUrl:
+                current_refs_after_changes.add(
+                    TabReference(
+                        id=tab.id,
+                        url=tab.url,
+                        title=tab.title,
+                        ws_url=tab.webSocketDebuggerUrl,
+                        html=None,
+                    )
                 )
-            )
 
-        navigated_ids_to_update = {pair[0].id for pair in navigated_pairs}
-        updated_refs = {ref for ref in updated_refs if ref.id not in navigated_ids_to_update}
-        for new_tab, _old_ref in navigated_pairs:
-            updated_refs.add(
-                TabReference(
-                    id=new_tab.id,
-                    url=new_tab.url,
-                    title=new_tab.title,
-                    ws_url=new_tab.webSocketDebuggerUrl,
-                )
-            )
+        # Atomically update the main state
+        self.previous_tab_refs = current_refs_after_changes
 
-        self.previous_tab_refs = updated_refs
-
+        # --- Construct and return event --- #
         polling_detected_changes = bool(added_tabs or removed_refs or navigated_pairs)
 
         if polling_detected_changes:
+            # logger.debug(f"Polling changes detected: +{len(added_tabs)} / -{len(removed_refs)} / ~{len(navigated_pairs)}") # DEBUG
             return TabChangeEvent(
-                new_tabs=added_tabs,
-                closed_tabs=list(removed_refs),
-                navigated_tabs=navigated_pairs,
-                current_tabs=filtered_tabs,
+                new_tabs=added_tabs,  # Report ChromeTab objects for new tabs
+                closed_tabs=list(removed_refs),  # Report TabReference objects for closed tabs
+                navigated_tabs=navigated_pairs,  # Report (ChromeTab, TabReference) pairs
+                current_tabs=filtered_tabs,  # Report current filtered ChromeTab list
             )
         else:
             return None

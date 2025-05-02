@@ -20,8 +20,11 @@ classifiers = [
 ]
 dependencies = [
     "bs4>=0.0.2",
+    "docling>=2.31.0",
     "httpx>=0.28.1",
     "lxml>=5.4.0",
+    "markdownify>=1.1.0",
+    "openai>=1.76.2",
     "pillow>=10.4.0",
     "psutil>=7.0.0",
     "pydantic>=2.11.4",

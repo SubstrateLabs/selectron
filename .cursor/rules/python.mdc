@@ -5,8 +5,8 @@ alwaysApply: false
 ---
 # Writing modern Python: style guide
 
-Always catch granular exceptions if specific ones are expected.
-Do not escape " when beginning or ending docstrings fstrings or strings (and please don't add excessive comments or docstrings)
+## General rules
+- Prefer using Pydantic models to dataclasses or TypedDicts
 
 ## For-else statements
 

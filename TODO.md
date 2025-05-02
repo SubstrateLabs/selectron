@@ -1,0 +1,2 @@
+- image stitching
+- better folder structure for samples

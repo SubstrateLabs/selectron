@@ -1,6 +1,6 @@
+import urllib.parse
 from datetime import datetime
 from typing import Any, Dict, List, Optional
-import urllib.parse
 
 from bs4 import BeautifulSoup, Tag
 from pydantic import BaseModel, HttpUrl, field_validator
@@ -659,12 +659,18 @@ def extract_metadata(html_content: str, url: Optional[str] = None) -> HtmlMetada
             favicon_url = urllib.parse.urljoin(origin, "/favicon.ico")
             metadata["favicon"] = favicon_url
             logger.debug(f"Using URL-derived fallback favicon: {metadata['favicon']}")
-        elif metadata.get("favicon") and isinstance(metadata["favicon"], str) and metadata["favicon"].startswith("/"):
-             # Ensure relative favicons found earlier are made absolute
+        elif (
+            metadata.get("favicon")
+            and isinstance(metadata["favicon"], str)
+            and metadata["favicon"].startswith("/")
+        ):
+            # Ensure relative favicons found earlier are made absolute
             absolute_favicon = urllib.parse.urljoin(origin, metadata["favicon"])
             if absolute_favicon != metadata["favicon"]:
-                 logger.debug(f"Converting relative favicon {metadata['favicon']} to absolute {absolute_favicon}")
-                 metadata["favicon"] = absolute_favicon
+                logger.debug(
+                    f"Converting relative favicon {metadata['favicon']} to absolute {absolute_favicon}"
+                )
+                metadata["favicon"] = absolute_favicon
 
     # Validate and return using Pydantic model
     validated_metadata = HtmlMetadata(**metadata)

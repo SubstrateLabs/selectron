@@ -4,7 +4,7 @@ import binascii
 import json
 import re
 from io import BytesIO
-from typing import List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 import httpx
 import websockets
@@ -43,7 +43,7 @@ async def get_cdp_websocket_url(port: int = 9222) -> Optional[str]:
         return None
 
 
-async def _send_cdp_command(
+async def send_cdp_command(
     ws,
     method: str,
     params: Optional[dict] = None,
@@ -167,7 +167,7 @@ async def get_active_tab_html() -> Optional[str]:
     try:
         async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
             # 1. Get targets (pages/tabs)
-            targets_result = await _send_cdp_command(ws, "Target.getTargets")
+            targets_result = await send_cdp_command(ws, "Target.getTargets")
             if not targets_result or "targetInfos" not in targets_result:
                 logger.error("Failed to get targets from Chrome.")
                 return None
@@ -187,7 +187,7 @@ async def get_active_tab_html() -> Optional[str]:
             logger.info(f"Found active page target: ID={target_id}, URL={target_url}")
 
             # 2. Attach to the target
-            attach_result = await _send_cdp_command(
+            attach_result = await send_cdp_command(
                 ws, "Target.attachToTarget", {"targetId": target_id, "flatten": True}
             )
             if not attach_result or "sessionId" not in attach_result:
@@ -198,12 +198,12 @@ async def get_active_tab_html() -> Optional[str]:
 
             # 3. Execute script to get outerHTML
             script = "document.documentElement.outerHTML"
-            eval_result = await _send_cdp_command(
+            eval_result = await send_cdp_command(
                 ws, "Runtime.evaluate", {"expression": script}, session_id=session_id
             )
 
             # Detach is important, do it even if eval fails
-            detach_result = await _send_cdp_command(
+            detach_result = await send_cdp_command(
                 ws, "Target.detachFromTarget", {"sessionId": session_id}
             )
             if (
@@ -238,8 +238,86 @@ async def get_active_tab_html() -> Optional[str]:
         return None
 
 
-async def get_tab_html(ws_url: str) -> Optional[str]:
-    """Connects to a specific tab's debugger WebSocket URL and retrieves its HTML."""
+async def wait_for_page_load(ws, timeout: float = 15.0) -> bool:
+    """Checks readyState and waits for Page.loadEventFired if necessary."""
+    try:
+        # 1. Check current readyState first for quick exit
+        eval_result = await send_cdp_command(
+            ws, "Runtime.evaluate", {"expression": "document.readyState", "returnByValue": True}
+        )
+        # Use returnByValue: True to ensure we get the string value directly
+        if eval_result is None:
+            logger.warning("Failed to get document.readyState.")
+            # Decide how to proceed: treat as not loaded or return False?
+            # Let's assume we should try waiting for the load event anyway.
+            pass  # Fall through to waiting logic
+        elif eval_result.get("result", {}).get("value") == "complete":
+            logger.debug("Page already in 'complete' readyState.")
+            return True  # Already loaded
+
+        logger.debug(
+            f"Page readyState is '{eval_result.get('result', {}).get('value') if eval_result else 'unknown'}', waiting for Page.loadEventFired..."
+        )
+
+        # 2. Enable Page domain events
+        enable_result = await send_cdp_command(ws, "Page.enable")
+        if enable_result is None:  # Check if enable command itself failed
+            logger.error("Failed to enable Page domain events.")
+            return False
+
+        # 3. Wait for the load event
+        start_time = asyncio.get_event_loop().time()
+        while True:
+            # Check for overall timeout
+            if asyncio.get_event_loop().time() - start_time > timeout:
+                logger.warning(f"Timeout waiting for Page.loadEventFired after {timeout}s.")
+                await send_cdp_command(ws, "Page.disable")  # Attempt disable
+                return False  # Indicate timeout/failure
+
+            try:
+                # Wait for *any* message, with a short timeout to allow checking the overall loop timeout
+                message = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                response = json.loads(message)
+
+                # Is it the event we are waiting for?
+                if response.get("method") == "Page.loadEventFired":
+                    logger.debug("Received Page.loadEventFired event.")
+                    await send_cdp_command(ws, "Page.disable")  # Disable after success
+                    return True  # Success
+
+                # Ignore other messages (command responses, other events)
+                # logger.debug(f"Ignoring message while waiting for load: {response.get('method') or response.get('id')}")
+
+            except asyncio.TimeoutError:
+                # Timeout on ws.recv() is normal, just continue loop to check overall timeout
+                continue
+            except json.JSONDecodeError:
+                logger.warning("Failed to decode message while waiting for load event.")
+                continue  # Try receiving next message
+            except websockets.exceptions.ConnectionClosed:
+                logger.error("WebSocket closed while waiting for load event.")
+                # No need to disable Page domain, connection is gone
+                return False  # Connection lost
+            except Exception as inner_e:
+                logger.error(f"Error processing message while waiting for load: {inner_e}")
+                # Attempt disable on other errors
+                await send_cdp_command(ws, "Page.disable")
+                return False
+
+    except Exception as e:
+        logger.error(f"Error in _wait_for_page_load: {e}", exc_info=True)
+        # Attempt to disable Page domain in case of outer error, ignore failure
+        try:
+            await send_cdp_command(ws, "Page.disable")
+        except Exception:
+            pass
+        return False
+
+
+async def get_tab_html(ws_url: str, settle_delay_s: float = 0.0) -> Optional[str]:
+    """Connects to a specific tab's debugger WebSocket URL and retrieves its HTML,
+    waiting for the page load event first.
+    """
     if not ws_url:
         logger.error("get_tab_html called with empty ws_url.")
         return None
@@ -247,9 +325,22 @@ async def get_tab_html(ws_url: str) -> Optional[str]:
     try:
         # Connect directly to the tab's debugger URL
         async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
+            # Wait for page load event
+            loaded = await wait_for_page_load(ws)
+            if not loaded:
+                logger.warning(
+                    f"Page load event not detected/timed out for {ws_url}, proceeding to get HTML anyway..."
+                )
+                # Decide whether to return None or proceed. Let's proceed.
+
+            # Optional settle delay after load
+            if settle_delay_s > 0:
+                logger.debug(f"Waiting for settle delay: {settle_delay_s}s after load wait.")
+                await asyncio.sleep(settle_delay_s)
+
             # Execute script to get outerHTML - no need to attach/detach with direct connection
             script = "document.documentElement.outerHTML"
-            eval_result = await _send_cdp_command(ws, "Runtime.evaluate", {"expression": script})
+            eval_result = await send_cdp_command(ws, "Runtime.evaluate", {"expression": script})
 
             if not eval_result or "result" not in eval_result:
                 logger.error(f"Failed to evaluate script in tab with ws_url: {ws_url}.")
@@ -285,59 +376,89 @@ async def capture_tab_screenshot(
     ws_url: str,
     format: str = "png",
     quality: Optional[int] = None,
+    settle_delay_s: float = 0.0,
+    ws_connection: Optional[Any] = None,
 ) -> Optional[Image.Image]:
-    """Connects to a specific tab's debugger WebSocket URL and captures a screenshot.
+    """Connects to a specific tab's debugger WebSocket URL (or uses provided connection)
+    and captures a screenshot, waiting for the page load event first.
 
     Args:
-        ws_url: The WebSocket debugger URL for the target tab.
+        ws_url: The WebSocket debugger URL (used only if ws_connection is None).
         format: Image format (png, jpeg, webp). Defaults to png.
-        quality: Compression quality (0-100) for jpeg/webp. Defaults to None (png lossless/jpeg 90).
+        quality: Compression quality (0-100) for jpeg/webp. Defaults to None.
+        settle_delay_s: Delay in seconds after waiting for the page load event.
+        ws_connection: An optional existing WebSocket connection to use.
 
     Returns:
         A PIL Image object, or None if failed.
     """
-    if not ws_url:
-        logger.error("capture_tab_screenshot called with empty ws_url.")
+    if not ws_url and not ws_connection:
+        logger.error("capture_tab_screenshot called with neither ws_url nor ws_connection.")
+        return None
+    if ws_connection and ws_connection.state == websockets.protocol.State.CLOSED:
+        logger.error("capture_tab_screenshot called with a closed ws_connection.")
         return None
 
-    if format not in ["png", "jpeg", "webp"]:
-        logger.error(f"Invalid screenshot format: {format}. Use png, jpeg, or webp.")
-        return None
+    # Internal function to handle the core logic using a connection
+    async def _do_capture(ws: Any) -> Optional[Image.Image]:
+        try:
+            # Wait for page load event (only makes sense if we didn't just connect)
+            # If ws_connection is passed, assume caller handles load state? Maybe skip wait?
+            # For now, let's keep the wait, but it might be redundant if handler waited.
+            loaded = await wait_for_page_load(ws)
+            if not loaded:
+                logger.warning(
+                    "Page load event not detected/timed out, proceeding to screenshot anyway..."
+                )
 
-    try:
-        # Connect directly to the tab's debugger URL
-        async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
-            # Capture Screenshot - no need to attach/detach with direct connection
+            if settle_delay_s > 0:
+                logger.debug(f"Waiting for settle delay: {settle_delay_s}s after load wait.")
+                await asyncio.sleep(settle_delay_s)
+
             screenshot_params: dict[str, str | int] = {"format": format}
             if format == "jpeg" or format == "webp":
-                # Provide a default quality if None is specified for lossy formats
                 screenshot_params["quality"] = quality if quality is not None else 90
 
-            capture_result = await _send_cdp_command(
-                ws, "Page.captureScreenshot", screenshot_params
-            )
+            capture_result = await send_cdp_command(ws, "Page.captureScreenshot", screenshot_params)
 
             if not capture_result or "data" not in capture_result:
-                logger.error(f"Failed to capture screenshot for tab {ws_url}.")
+                logger.error("Failed to capture screenshot via connection.")
                 return None
 
-            # Decode and create PIL Image
             image_data_base64 = capture_result["data"]
             try:
                 image_data = base64.b64decode(image_data_base64)
             except (TypeError, binascii.Error) as e:
-                logger.error(f"Failed to decode base64 image data for {ws_url}: {e}")
+                logger.error(f"Failed to decode base64 image data: {e}")
                 return None
 
             try:
                 image = Image.open(BytesIO(image_data))
                 logger.info(
-                    f"Successfully captured screenshot for {ws_url} (format: {format}, size: {image.size})."
+                    f"Successfully captured screenshot (format: {format}, size: {image.size})."
                 )
                 return image
             except Exception as e:
-                logger.error(f"Failed to create PIL Image from screenshot data for {ws_url}: {e}")
+                logger.error(f"Failed to create PIL Image from screenshot data: {e}")
                 return None
+        except Exception as e:
+            logger.error(f"Error during screenshot capture logic: {e}", exc_info=True)
+            return None
+
+    # Use provided connection or create a new one
+    try:
+        if ws_connection:
+            logger.debug("Using provided WebSocket connection for screenshot.")
+            # Directly use the provided connection without context manager
+            return await _do_capture(ws_connection)
+        else:
+            # Establish a new connection using async with
+            logger.debug("Establishing new WebSocket connection for screenshot.")
+            if not ws_url:
+                logger.error("ws_url is required when ws_connection is not provided.")
+                return None  # Should be caught earlier, but safety check
+            async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws_new:
+                return await _do_capture(ws_new)
 
     except websockets.exceptions.InvalidURI:
         logger.error(f"Invalid WebSocket URI: {ws_url}")
@@ -347,7 +468,7 @@ async def capture_tab_screenshot(
         return None
     except Exception as e:
         logger.error(
-            f"An unexpected error occurred in capture_tab_screenshot for {ws_url}: {e}",
+            f"An unexpected error occurred in capture_tab_screenshot setup/connection for {ws_url}: {e}",
             exc_info=True,
         )
         return None
@@ -358,6 +479,7 @@ async def capture_active_tab_screenshot(
     filename: Optional[str] = None,
     format: str = "png",
     quality: Optional[int] = None,
+    settle_delay_s: float = 0.0,
 ) -> Optional[Image.Image]:
     """Connects to Chrome, finds the first active tab, and captures a screenshot.
 
@@ -366,6 +488,7 @@ async def capture_active_tab_screenshot(
         filename: Base name for the screenshot file (timestamp added if None).
         format: Image format (png, jpeg, webp). Defaults to png.
         quality: Compression quality (0-100) for jpeg. Defaults to None.
+        settle_delay_s: Delay in seconds after waiting for the page load event.
 
     Returns:
         A PIL Image object, or None if failed.
@@ -381,7 +504,7 @@ async def capture_active_tab_screenshot(
     try:
         async with websockets.connect(ws_url, max_size=20 * 1024 * 1024) as ws:
             # --- Reuse logic to find and attach to target --- #
-            targets_result = await _send_cdp_command(ws, "Target.getTargets")
+            targets_result = await send_cdp_command(ws, "Target.getTargets")
             if not targets_result or "targetInfos" not in targets_result:
                 logger.error("Failed to get targets from Chrome.")
                 return None
@@ -401,7 +524,7 @@ async def capture_active_tab_screenshot(
                 f"Found active page target for screenshot: ID={target_id}, URL={target_url}"
             )
 
-            attach_result = await _send_cdp_command(
+            attach_result = await send_cdp_command(
                 ws, "Target.attachToTarget", {"targetId": target_id, "flatten": True}
             )
             if not attach_result or "sessionId" not in attach_result:
@@ -412,16 +535,26 @@ async def capture_active_tab_screenshot(
             # --- End reuse --- #
 
             # 4. Capture Screenshot
+            loaded = await wait_for_page_load(ws)
+            if not loaded:
+                logger.warning(
+                    f"Page load event not detected/timed out for active tab {target_id}, proceeding anyway..."
+                )
+
+            if settle_delay_s > 0:
+                logger.debug(f"Waiting for settle delay: {settle_delay_s}s after load wait.")
+                await asyncio.sleep(settle_delay_s)
+
             screenshot_params: dict[str, str | int] = {"format": format}
             if format == "jpeg" and quality is not None:
                 screenshot_params["quality"] = max(0, min(100, quality))
 
-            capture_result = await _send_cdp_command(
+            capture_result = await send_cdp_command(
                 ws, "Page.captureScreenshot", screenshot_params, session_id=session_id
             )
 
             # Detach is important, do it even if capture fails
-            detach_result = await _send_cdp_command(
+            detach_result = await send_cdp_command(
                 ws, "Target.detachFromTarget", {"sessionId": session_id}
             )
             if (
@@ -468,17 +601,171 @@ async def capture_active_tab_screenshot(
         return None
 
 
-# Example usage (optional, for direct testing)
-if __name__ == "__main__":
+async def monitor_user_interactions(ws_url: str) -> AsyncGenerator[Dict[str, Any], None]:
+    """
+    Monitor clicks and scrolls in a tab using CDP and yield events.
 
-    async def run_test():
-        html = await get_active_tab_html()
-        if html:
-            print("\nSuccessfully retrieved HTML:")
-            print("=" * 30)
-            print(html[:500] + "..." if len(html) > 500 else html)  # Print first 500 chars
-            print("=" * 30)
-        else:
-            print("\nFailed to retrieve HTML.")
+    Connects to the tab's WebSocket, injects JS listeners, and listens
+    for console messages indicating user interaction.
 
-    asyncio.run(run_test())
+    Yields:
+        dict: Structured event data like {"type": "click", "data": {...}} or {"type": "scroll", "data": {...}}
+    """
+    connection = None  # Keep track of the connection to close it reliably
+    ws = None  # Initialize ws outside the try block
+    try:
+        logger.debug(
+            f"[monitor_user_interactions] Attempting WebSocket connection to: {ws_url}"
+        )  # DEBUG
+        # --- Connection Attempt w/ Retry ---
+        max_retries = 3
+        retry_delay = 0.5  # Initial delay in seconds
+        for attempt in range(max_retries):
+            try:
+                connection = await websockets.connect(
+                    ws_url,
+                    open_timeout=5.0,  # Timeout for each attempt
+                    close_timeout=5.0,
+                    max_size=20 * 1024 * 1024,
+                )
+                ws = connection  # Assign to ws if connection is successful
+                break  # Exit retry loop on success
+            except (
+                OSError,
+                websockets.exceptions.InvalidMessage,
+                asyncio.TimeoutError,
+            ) as conn_err:
+                logger.warning(
+                    f"ws connection attempt {attempt + 1}/{max_retries} failed for {ws_url}: {type(conn_err).__name__}",
+                    exc_info=False,
+                )
+                if attempt + 1 == max_retries:
+                    logger.error(
+                        f"Max retries reached for WebSocket connection to {ws_url}. Giving up."
+                    )
+                    return  # Exit generator if all retries fail
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+
+        # If loop finishes without connecting (shouldn't happen due to return above, but safety check)
+        if not ws:
+            logger.error(f"Failed to establish WebSocket connection after retries for {ws_url}.")
+            return
+
+        # === Step 1: Enable Runtime domain FIRST ===
+        await send_cdp_command(ws, "Runtime.enable")
+        # === Step 2: Enable dependent domains (Page, Log) ===
+        await send_cdp_command(ws, "Page.enable")
+        # === Step 3: Subscribe to consoleAPICalled event ===
+        # Inject JS listeners
+        js_code = """
+        (function() {
+            console.log('BROCC_DEBUG: Injecting listeners...'); // Debug log
+            // Use a closure to prevent polluting the global scope too much
+            let lastScrollTimestamp = 0;
+            let lastClickTimestamp = 0;
+            const DEBOUNCE_MS = 250; // Only log if events are spaced out
+
+            document.addEventListener('click', e => {
+                const now = Date.now();
+                if (now - lastClickTimestamp > DEBOUNCE_MS) {
+                    const clickData = {
+                        x: e.clientX,
+                        y: e.clientY,
+                        target: e.target ? e.target.tagName : 'unknown',
+                        timestamp: now
+                    };
+                    console.log('BROCC_CLICK_EVENT', JSON.stringify(clickData));
+                    lastClickTimestamp = now;
+                }
+            }, { capture: true, passive: true }); // Use capture phase, non-blocking
+
+            document.addEventListener('scroll', e => {
+                 const now = Date.now();
+                 if (now - lastScrollTimestamp > DEBOUNCE_MS) {
+                    const scrollData = {
+                        scrollX: window.scrollX,
+                        scrollY: window.scrollY,
+                        timestamp: now
+                    };
+                    console.log('BROCC_SCROLL_EVENT', JSON.stringify(scrollData));
+                    lastScrollTimestamp = now;
+                 }
+            }, { capture: true, passive: true }); // Use capture phase, non-blocking
+
+            console.log('BROCC_DEBUG: Listeners successfully installed.'); // Debug log
+            return "Interaction listeners installed.";
+        })();
+        """
+        _eval_result = await send_cdp_command(
+            ws,
+            "Runtime.evaluate",
+            {"expression": js_code, "awaitPromise": False, "returnByValue": True},
+        )
+        # Listen for console entries
+        while True:
+            response_raw = await ws.recv()
+            response = json.loads(response_raw)
+
+            if response.get("method") == "Runtime.consoleAPICalled":
+                call_type = response.get("params", {}).get("type")
+                args = response.get("params", {}).get("args", [])
+
+                # Check if it's a log message with our specific prefix
+                if call_type == "log" and len(args) >= 1:
+                    first_arg_value = args[0].get("value")
+
+                    # --- Handle BROCC_DEBUG messages ---
+                    if first_arg_value == "BROCC_DEBUG: Injecting listeners...":
+                        pass
+                        # logger.info(f"[{ws_url[-10:]}] JS Injection: Starting setup.")
+                    elif first_arg_value == "BROCC_DEBUG: Listeners successfully installed.":
+                        pass
+                        # logger.info(
+                        #     f"[{ws_url[-10:]}] JS Injection: Listeners confirmed installed."
+                        # )
+                    # --- Handle BROCC_CLICK_EVENT ---
+                    elif first_arg_value == "BROCC_CLICK_EVENT" and len(args) >= 2:
+                        try:
+                            click_data = json.loads(args[1].get("value", "{}"))
+                            # Ensure scrollY is included, default to 0 if not (though unlikely for click)
+                            click_data.setdefault("scrollY", 0)
+                            yield {"type": "click", "data": click_data}
+                        except json.JSONDecodeError:
+                            logger.warning("Failed to parse click event data from CDP console")
+                    # --- Handle BROCC_SCROLL_EVENT ---
+                    elif first_arg_value == "BROCC_SCROLL_EVENT" and len(args) >= 2:
+                        try:
+                            scroll_data = json.loads(args[1].get("value", "{}"))
+                            raw_scroll_y = scroll_data.get("scrollY")
+                            # Check if scrollY is a number (int or float)
+                            if isinstance(raw_scroll_y, (int, float)):
+                                # Convert to int and update the dict before yielding
+                                scroll_data["scrollY"] = int(raw_scroll_y)
+                                yield {"type": "scroll", "data": scroll_data}
+                            else:
+                                logger.warning(
+                                    f"Received invalid scroll data format (scrollY not a number): {scroll_data}"
+                                )
+                        except json.JSONDecodeError:
+                            logger.warning("Failed to parse scroll event data from CDP console")
+
+    except (
+        websockets.ConnectionClosedOK,
+        websockets.ConnectionClosedError,
+        websockets.ConnectionClosed,
+    ) as e:
+        # These are expected closures, log as info or debug
+        logger.info(f"ws connection closed for {ws_url}: {e}")
+    # Keep generic exception for unexpected errors during the loop
+    except Exception as e:
+        # Log errors happening *after* successful connection as ERROR
+        logger.error(
+            f"Error during interaction monitoring for {ws_url}: {type(e).__name__} - {e}",
+            exc_info=True,
+        )
+    finally:
+        # Check state before attempting to close
+        if connection and connection.state != websockets.protocol.State.CLOSED:
+            await connection.close()
+        # This generator stops yielding when an error occurs or connection closes.
