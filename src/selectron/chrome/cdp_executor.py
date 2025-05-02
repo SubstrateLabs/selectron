@@ -80,6 +80,10 @@ class CdpBrowserExecutor(BrowserExecutor):
         """Ensures connection (if managed internally) and sends a CDP command."""
         active_ws = self._ws  # Get the currently active connection (provided or internal)
 
+        # Log connection status before checks
+        ws_status = "None" if active_ws is None else active_ws.state
+        logger.debug(f"[_send_command] Method: {method}. Checking WebSocket status. Provided: {self._provided_ws is not None}. Internal: {self._internal_ws is not None}. Active status: {ws_status}")
+
         if active_ws is None:
             # If no connection provided, attempt internal connection
             if self._provided_ws is None:
