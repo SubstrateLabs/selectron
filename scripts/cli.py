@@ -756,40 +756,60 @@ class CliApp(App[None]):
                         exc_info=True,
                     )
 
-                # --- Conditional Highlight --- #
-                if (
-                    verification_result
-                    and verification_result.element_count == 1
-                    and not verification_result.error
-                    and not verification_result.size_validation_error
-                ):
-                    logger.info(
-                        f"CLI verification successful. Highlighting final unique selector: '{proposal.proposed_selector}' green..."
-                    )
-                    # Use fire and forget for the final highlight as well
+                # --- Conditional Highlight & State Management --- #
+                highlight_color = "lime"
+                verification_passed = False
+
+                if proposal.target_cardinality == "unique":
+                    if (
+                        verification_result
+                        and verification_result.element_count == 1
+                        and not verification_result.error
+                        and not verification_result.size_validation_error
+                    ):
+                        logger.info(
+                            f"CLI verification successful for UNIQUE target. Highlighting '{proposal.proposed_selector}' green..."
+                        )
+                        verification_passed = True
+                    elif verification_result:
+                        logger.warning(
+                            f"CLI verification failed for UNIQUE target (count={verification_result.element_count}, error='{verification_result.error}', size_error='{verification_result.size_validation_error}'). Not highlighting final."
+                        )
+                    else:
+                        logger.error("CLI verification step failed unexpectedly for UNIQUE target. Not highlighting final.")
+                elif proposal.target_cardinality == "multiple":
+                    if (
+                        verification_result
+                        and verification_result.element_count > 0 # Check for > 0 instead of == 1
+                        and not verification_result.error
+                        and not verification_result.size_validation_error # Still check size error if applicable? Maybe not for multiple.
+                    ):
+                        logger.info(
+                            f"CLI verification successful for MULTIPLE targets (count={verification_result.element_count}). Highlighting '{proposal.proposed_selector}' green..."
+                        )
+                        verification_passed = True
+                    elif verification_result:
+                        logger.warning(
+                            f"CLI verification failed for MULTIPLE targets (count={verification_result.element_count}, error='{verification_result.error}', size_error='{verification_result.size_validation_error}'). Not highlighting final."
+                        )
+                    else:
+                        logger.error("CLI verification step failed unexpectedly for MULTIPLE target. Not highlighting final.")
+                else:
+                    # Should not happen if pydantic validation works
+                    logger.error(f"Unknown target_cardinality: {proposal.target_cardinality}")
+
+                # --- Perform Highlight / Clear State --- #
+                if verification_passed:
                     asyncio.create_task(
                         self._highlight_elements_by_selector(
-                            proposal.proposed_selector, color="lime"
+                            proposal.proposed_selector, color=highlight_color
                         )
                     )
-                elif verification_result:
-                    logger.warning(
-                        f"CLI verification failed or selector not unique (count={verification_result.element_count}, error='{verification_result.error}', size_error='{verification_result.size_validation_error}'). Not highlighting final."
-                    )
-                    # --- Clear state if verification fails ---
-                    self._highlights_active = False
-                    self._last_highlight_selector = None
-                    self._last_highlight_color = None
-                    # --- End clear state ---
                 else:
-                    logger.error(
-                        "CLI verification step failed unexpectedly. Not highlighting final."
-                    )
-                    # --- Clear state if verification fails ---
+                    # Clear state if verification fails for either cardinality
                     self._highlights_active = False
                     self._last_highlight_selector = None
                     self._last_highlight_color = None
-                    # --- End clear state ---
 
             else:
                 logger.error(
@@ -990,3 +1010,4 @@ if __name__ == "__main__":
     get_logger("__main__")  # Initial call to setup file logging
     app = CliApp()
     app.run()
+

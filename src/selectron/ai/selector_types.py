@@ -79,3 +79,6 @@ class SelectorProposal(BaseModel):
 
     proposed_selector: str = Field(...)
     reasoning: str = Field(...)
+    target_cardinality: Literal["unique", "multiple"] = Field(
+        "unique", description="Indicates if the selector targets a single element or intentionally multiple elements."
+    )

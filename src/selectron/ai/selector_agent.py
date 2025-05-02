@@ -27,26 +27,26 @@ Then, extract the requested data (e.g., a specific attribute's value or the elem
 4.  `extract_data_from_element(selector: str, attribute_to_extract: Optional[str] = None, extract_text: bool = False, anchor_selector: Optional[str] = None)`: **Use this tool *AFTER* finding a unique, stable selector.** Extracts data (attribute value or text content) from the FIRST element matching the selector (optionally within stable anchor). Assumes the selector uniquely identifies the element.
 
 **CORE STRATEGY:**
-1.  **Understand Request:** Determine the target element based on the user's description (text, attributes, relations) and what specific data needs to be extracted (e.g., `href`, text). **Pay close attention to whether a specific item or its container is requested.**
+1.  **Understand Request:** Determine the target element(s) based on the user's description. **Crucially, check if the user asks for *multiple* items (e.g., using words like "all", "every", "list", "each").** Set the intended `target_cardinality` ("unique" or "multiple") based on this interpretation.
 2.  **Find Stable Unique Anchor:** Identify the closest, most specific, *stable* ancestor element (preferring meaningful `#id` or stable `[attribute]` selectors). Use `evaluate_selector` to confirm it's unique (`element_count == 1`). Record this `anchor_selector`. If no single unique stable anchor is found, proceed without one carefully, focusing on stable selectors relative to the document root.
-3.  **Explore Stable Path:** Use `get_children_tags` and `get_siblings` (with `anchor_selector` if found) to understand the structure leading to the target element. Focus on identifying *stable* classes, attributes, and text snippets along the path.
+3.  **Explore Stable Path:** Use `get_children_tags` and `get_siblings` (with `anchor_selector` if found) to understand the structure leading to the target element(s). Focus on identifying *stable* classes, attributes, and text snippets along the path or common to the group.
 4.  **Construct Candidate Selector:** Build a selector targeting the ***smallest possible and most specific element*** matching the description, prioritizing stable identifiers as listed above. **Avoid overly broad selectors like generic `div:has(...)` if a more specific container like `<article>` or a direct parent with stable attributes exists.** Explicitly AVOID generated-looking IDs and classes.
 5.  **Evaluate Candidate:** Use `evaluate_selector` (with `anchor_selector` if applicable) to test your candidate. **ALWAYS provide a `max_html_length` (e.g., 5000)** to check size. Use `target_text_to_check` with stable text content from the target or nearby unique elements to verify you're finding the *correct* element.
 6.  **Refine Selector:**
     *   Check the result from `evaluate_selector`:
         *   If `error` is present OR `size_validation_error` is present: The evaluation failed or the element is too large/selector too broad. Go back to Step 3 or 4 to find a better, more specific selector.
-        *   If `element_count == 1` and `size_validation_error` is `None` and verification confirms it's the correct element: You've found the unique, stable, and appropriately sized selector. Proceed to extraction (Step 7).
-        *   If `element_count > 1`: Not unique. Add specificity using *stable* identifiers (stable classes, attributes, structure, *then* position). Go back to Step 4 or 5.
+        *   If `element_count == 1` and `size_validation_error` is `None` and verification confirms it's the correct element: You've found the unique, stable, and appropriately sized selector. Proceed to propose output (Step 7).
+        *   If `element_count > 1`: Not unique.
+            *   If `target_cardinality` is "unique": Add specificity using *stable* identifiers. Go back to Step 4 or 5.
+            *   If `target_cardinality` is "multiple": This *might* be correct. Verify the matched elements seem appropriate for the request using `feedback_message`. If it looks like the right group, proceed to propose output (Step 7). If it seems too broad or incorrect, add specificity. Go back to Step 4 or 5.
         *   If `element_count == 0`: Wrong selector. Re-analyze stable features. Go back to Step 3 or 4.
-7.  **Extract Data:** Once the unique, stable, validated `proposed_selector` is confirmed, call `extract_data_from_element` with this selector (and `anchor_selector` if used). Specify `attribute_to_extract` (e.g., 'href') or `extract_text=True` based on the initial request.
-8.  **Final Verification & Output:** Call `evaluate_selector` one last time with the final `proposed_selector` and relevant `target_text_to_check` to get final verification details. Package the `proposed_selector`, `reasoning` (explaining stable selector choice *and* extraction), the extraction parameters (`attribute_extracted`, `text_extracted_flag`), the `ExtractionResult` from step 7, and the `SelectorEvaluationResult` from this step into the final `AgentResult` model.
+7.  **Propose Output:** Construct the `SelectorProposal` JSON object.
+    *   Include the final `proposed_selector`.
+    *   Include clear `reasoning`, explaining the choice based on stability and why it matches the user's target (unique or multiple).
+    *   Set the correct `target_cardinality` ("unique" or "multiple") based on your interpretation of the request.
 
-- If `evaluate_selector` returns `element_count > 1`, use `get_children_tags` or `get_siblings` on the non-unique selector to gather more context, then try `evaluate_selector` again with a refined selector.
-- If `evaluate_selector` returns `element_count > 1`, ANALYZE THE `feedback_message` field in the result. Use the information about element differences (text, attributes) provided in the feedback to refine the selector and try `evaluate_selector` again. If no feedback is present or it's insufficient, use `get_children_tags` or `get_siblings` for more context.
-- Only propose a selector in the final output (`proposed_selector` field of `SelectorProposal`) once `evaluate_selector` returns `element_count = 1` for it.
-- Explain your reasoning clearly in the `reasoning` field.
-- If, after using the tools and attempting refinements, you CANNOT find a selector for which `evaluate_selector` returns `element_count = 1`, you MUST output a `SelectorProposal` with `proposed_selector` set to the literal string "error".
-- Explain your reasoning clearly in the `reasoning` field, including why you failed if applicable.
+- If, after using the tools and attempting refinements, you CANNOT find a suitable selector (count=1 for "unique" cardinality, count>0 for "multiple" cardinality), you MUST output a `SelectorProposal` with `proposed_selector` set to the literal string "error".
+- Explain your reasoning clearly in the `reasoning` field, including the target cardinality and why you failed if applicable.
 """
 
 _DOM_CONTEXT_PROMPT_SECTION = """
