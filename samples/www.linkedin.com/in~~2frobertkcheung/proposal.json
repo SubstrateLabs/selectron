@@ -1,0 +1,211 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "region_description": "Profile header with user information",
+      "observed_content_summary": "Profile photo and main details for Rob Cheung, identified as Co-Founder at Substrate, located in Brooklyn, New York, United States. Includes a 'Contact info' link.",
+      "markdown_content": "# Rob Cheung\n\nCo-Founder ꩜Substrate\n\n- ꩜Substrate\n\n- 500+ connections\n\n- Send profile in a message\n- Save to PDF\n- Request a recommendation\n- Recommend\n- Unfollow\n- Remove Connection\n- Report / Block\n- About this profile\nAbout this profile",
+      "metadata": {
+        "name": "Rob Cheung",
+        "title": "Co-Founder",
+        "company": "Substrate",
+        "connections": "500+"
+      }
+    },
+    {
+      "id": 2,
+      "region_description": "Highlights section",
+      "observed_content_summary": "A section noting the viewer and Rob Cheung both work at Substrate and started at Substrate the same month. Includes a button labelled 'Ask about experience'.",
+      "markdown_content": "## HighlightsHighlights\n\n- You both work at Substrate You both work at Substrate Rob started at Substrate the same month as you Rob started at Substrate the same month as you\n- <!-- image -->\n    - Ask about experience",
+      "metadata": {
+        "section": "Highlights"
+      }
+    },
+    {
+      "id": 3,
+      "region_description": "Experience item 1: Co-Founder, Substrate",
+      "observed_content_summary": "Rob Cheung's experience as Co-Founder at Substrate. No detailed time or description visible.",
+      "markdown_content": "- Co-Founder, CEOCo-Founder, CEO\n\n\n \n\n꩜Substrate · Full-time꩜Substrate · Full-time\n\n\nSep 2023 - Present · 1 yr 9 mosSep 2023 to Present · 1 yr 9 mos",
+      "metadata": {
+        "position": "Co-Founder, CEO",
+        "company": "Substrate",
+        "employment_type": "Full-time",
+        "start_date": "Sep 2023",
+        "end_date": "Present",
+        "duration": "1 yr 9 mos"
+      }
+    },
+    {
+      "id": 4,
+      "region_description": "Experience item 2: Founder's Fellowship / Member, South Park Commons",
+      "observed_content_summary": "Rob Cheung is a Member and Founder's Fellow at South Park Commons, from February 2023 to Present (2 yrs 2 mos).",
+      "markdown_content": "- Founder Fellow // MemberFounder Fellow // Member\n\n\n \n\nSouth Park CommonsSouth Park Commons\n\n\nApr 2023 - Present · 2 yrs 2 mosApr 2023 to Present · 2 yrs 2 mos",
+      "metadata": {
+        "position": "Founder Fellow // Member",
+        "company": "South Park Commons",
+        "start_date": "Apr 2023",
+        "end_date": "Present",
+        "duration": "2 yrs 2 mos"
+      }
+    },
+    {
+      "id": 5,
+      "region_description": "Experience item 3: CTO, Strait.AI",
+      "observed_content_summary": "Rob Cheung is CTO at Strait.AI since 2023; tenure is less than a year.",
+      "markdown_content": "- CTOCTO\n\n\n \n\nSmalltalkSmalltalk\n\n\n2023 - 2023 · Less than a year2023 to 2023 · Less than a year",
+      "metadata": {
+        "position": "CTO",
+        "company": "Smalltalk",
+        "start_date": "2023",
+        "end_date": "2023",
+        "duration": "Less than a year"
+      }
+    },
+    {
+      "id": 6,
+      "region_description": "Experience item 4: Founding Engineer, Substack",
+      "observed_content_summary": "Rob Cheung was Founding Engineer at Substack (Full-time), 2019-2023 (4 yrs).",
+      "markdown_content": "- Founding EngineerFounding Engineer\n\n\n \n\nSubstack · Full-timeSubstack · Full-time\n\n\n2019 - 2023 · 4 yrs2019 to 2023 · 4 yrs",
+      "metadata": {
+        "position": "Founding Engineer",
+        "company": "Substack",
+        "employment_type": "Full-time",
+        "start_date": "2019",
+        "end_date": "2023",
+        "duration": "4 yrs"
+      }
+    },
+    {
+      "id": 7,
+      "region_description": "Experience item 5: Founding Engineer, Fin.",
+      "observed_content_summary": "Rob Cheung was Founding Engineer at Fin, April 2015 - Jan 2019 (Full-time, 3 yrs 9 mos).",
+      "markdown_content": "- Founding EngineerFounding Engineer\n\n\n \n\nFin Assistant. (2015 - 2019) · Full-timeFin Assistant. (2015 - 2019) · Full-time\n\n\n2015 - 2018 · 3 yrs2015 to 2018 · 3 yrs",
+      "metadata": {
+        "position": "Founding Engineer",
+        "company": "Fin Assistant.",
+        "employment_type": "Full-time",
+        "start_date": "2015",
+        "end_date": "2018",
+        "duration": "3 yrs"
+      }
+    },
+    {
+      "id": 9,
+      "region_description": "Education item 1: University of Illinois Urbana-Champaign",
+      "observed_content_summary": "Attended University of Illinois Urbana-Champaign, 2007-2010.",
+      "markdown_content": "- University of Illinois Urbana-ChampaignUniversity of Illinois Urbana-Champaign\n\n\n \n \n2010 - 20132010 - 2013",
+      "metadata": {
+        "school": "University of Illinois Urbana-Champaign",
+        "start_year": "2010",
+        "end_year": "2013"
+      }
+    },
+    {
+      "id": 10,
+      "region_description": "Education item 2: Illinois Mathematics and Science Academy",
+      "observed_content_summary": "Attended Illinois Mathematics and Science Academy.",
+      "markdown_content": "- Illinois Mathematics and Science AcademyIllinois Mathematics and Science Academy\n\n\n \n \n2007 - 20102007 - 2010",
+      "metadata": {
+        "school": "Illinois Mathematics and Science Academy",
+        "start_year": "2007",
+        "end_year": "2010"
+      }
+    },
+    {
+      "id": 11,
+      "region_description": "Skills section",
+      "observed_content_summary": "Skill listed: Android Development. Endorsed by Ron Shapiro and 2 others at Venmo. 5 endorsements mentioned.",
+      "markdown_content": "- Android Development Android Development\n    - Endorsed by Ron Shapiro (mutual connection) Endorsed by Ron Shapiro (mutual connection)\n    - Endorsed by 3 colleagues at Venmo Endorsed by 3 colleagues at Venmo\n    - 5 endorsements 5 endorsements\n    - Endorse",
+      "metadata": {
+        "skill": "Android Development",
+        "endorsements": "5",
+        "endorsed_by": "Ron Shapiro, 3 colleagues at Venmo"
+      }
+    },
+    {
+      "id": 13,
+      "region_description": "Interests: Companies subsection",
+      "observed_content_summary": "Shows interest in Illinois Mathematics and Science Academy (6,644 followers) and South Park Commons (2,950 followers, following).",
+      "markdown_content": "- Illinois Mathematics and Science Academy Illinois Mathematics and Science Academy 6,548 followers 6,548 followers\n- <!-- image -->\n    - Follow\n- South Park Commons South Park Commons 25,805 followers 25,805 followers\n- <!-- image -->\n    - Following",
+      "metadata": {
+        "company_1": "Illinois Mathematics and Science Academy",
+        "company_1_followers": "6,548",
+        "company_2": "South Park Commons",
+        "company_2_followers": "25,805"
+      }
+    },
+    {
+      "id": 15,
+      "region_description": "People you may know (sidebar) - Person 1",
+      "observed_content_summary": "Dan Giambaio, Engineering Manager at OpenAI (ex-Stripe). Option to Connect.",
+      "markdown_content": "- Dan Giambalvo Dan Giambalvo Engineering Manager, OpenAI (Seattle) | Ex-Stripe | Ex-Facebook | Ex-Microsoft Engineering Manager, OpenAI (Seattle) | Ex-Stripe | Ex-Facebook | Ex-Microsoft\n- <!-- image -->\n    - Connect",
+      "metadata": {
+        "name": "Dan Giambalvo",
+        "title": "Engineering Manager",
+        "company": "OpenAI"
+      }
+    },
+    {
+      "id": 16,
+      "region_description": "People you may know (sidebar) - Person 2",
+      "observed_content_summary": "Sheilaja U, Software Engineer at Stripe. Option to Connect.",
+      "markdown_content": "- Shaileja J. Shaileja J. Software Engineer Software Engineer\n- <!-- image -->\n    - Connect",
+      "metadata": {
+        "name": "Shaileja J.",
+        "title": "Software Engineer"
+      }
+    },
+    {
+      "id": 17,
+      "region_description": "People you may know (sidebar) - Person 3",
+      "observed_content_summary": "Charlie Gu, Software Engineer at Stripe. Option to Connect.",
+      "markdown_content": "- Charles OuGuo Charles OuGuo Software Engineer at Stripe Software Engineer at Stripe\n- <!-- image -->\n    - Connect",
+      "metadata": {
+        "name": "Charles OuGuo",
+        "title": "Software Engineer",
+        "company": "Stripe"
+      }
+    },
+    {
+      "id": 18,
+      "region_description": "People you may know (sidebar) - Person 4",
+      "observed_content_summary": "Angelica Schwartz, Software Engineer (large-scale recommendation). Option to Connect.",
+      "markdown_content": "- Angelica Schwartz Angelica Schwartz Software engineer | ange-schw.medium.com Software engineer | ange-schw.medium.com\n- <!-- image -->\n    - Connect",
+      "metadata": {
+        "name": "Angelica Schwartz",
+        "title": "Software engineer"
+      }
+    },
+    {
+      "id": 19,
+      "region_description": "People you may know (sidebar) - Person 5",
+      "observed_content_summary": "Randall Ma, Software Engineer at Stripe. Option to Connect.",
+      "markdown_content": "- Randall Ma Randall Ma Software Engineer at Stripe Software Engineer at Stripe\n- <!-- image -->\n    - Connect",
+      "metadata": {
+        "name": "Randall Ma",
+        "title": "Software Engineer",
+        "company": "Stripe"
+      }
+    },
+    {
+      "id": 21,
+      "region_description": "Sidebar feature: Generative AI company page card",
+      "observed_content_summary": "Card for Generative AI, with stats (159,000+ followers), option to follow, and 259+ connections.",
+      "markdown_content": "- Generative AI Generative AI Technology, Information and Internet Technology, Information and Internet 5,980,569 followers 5,980,569 followers\n- <!-- image -->\n    - 259 connections follow this page\n    - 259 connections follow this page\n    - Follow",
+      "metadata": {
+        "company": "Generative AI",
+        "followers": "5,980,569",
+        "connections_following": "259"
+      }
+    },
+    {
+      "id": 24,
+      "region_description": "Footer links section",
+      "observed_content_summary": "Multiple columns of links including About, Accessibility, Talent Solutions, Privacy & Terms, Ad Choices, Advertising, Sales Solutions, Small Business, etc. Also includes options for language and user support.",
+      "markdown_content": "- About\n- Accessibility\n- Talent Solutions\n- Professional Community Policies\n- Careers\n- Marketing Solutions\n- Privacy & Terms\n- Ad Choices\n- Advertising\n- Sales Solutions\n- Mobile\n- Small Business\n- Safety Center\n\n- Questions?\n                          \n                         Visit our Help Center.\n- Manage your account and privacy\n                          \n                         Go to your Settings.\n- Recommendation transparency\n                          \n                         Learn more about Recommended Content.\n\nLinkedIn Corporation © 2025",
+      "metadata": {
+        "copyright": "LinkedIn Corporation © 2025"
+      }
+    }
+  ]
+}
