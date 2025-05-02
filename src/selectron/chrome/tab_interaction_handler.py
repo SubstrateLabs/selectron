@@ -4,12 +4,13 @@ from typing import Awaitable, Callable, List, Optional
 import websockets
 from PIL import Image
 
+from selectron.browser_use.dom_service import DomService
+from selectron.chrome.cdp_executor import CdpBrowserExecutor
 from selectron.chrome.chrome_cdp import (
     ChromeTab,
     capture_tab_screenshot,
     get_tabs,
     monitor_user_interactions,
-    send_cdp_command,
 )
 from selectron.chrome.types import TabReference
 from selectron.util.logger import get_logger
@@ -18,8 +19,8 @@ InteractionTabUpdateCallback = Callable[
     [TabReference], Awaitable[None]
 ]  # Called immediately on interaction (no fresh HTML)
 ContentFetchedCallback = Callable[
-    [TabReference, Optional[Image.Image], Optional[int]], Awaitable[None]
-]  # Called after interaction + fetch (with fresh HTML, screenshot, and scrollY)
+    [TabReference, Optional[Image.Image], Optional[int], Optional[str]], Awaitable[None]
+]  # Called after interaction + fetch (with fresh HTML, screenshot, scrollY, and DOM string)
 
 logger = get_logger(__name__)
 
@@ -229,16 +230,14 @@ class TabInteractionHandler:
         self._fetch_task.add_done_callback(lambda _task: setattr(self, "_fetch_task", None))
 
     async def _fetch_and_process_tab_content(self):
-        """Fetches HTML and screenshot for the tab and calls the content_fetched_callback."""
+        """Fetches HTML, screenshot, and DOM for the tab and calls the content_fetched_callback."""
         html_content: Optional[str] = None
         screenshot_pil_image: Optional[Image.Image] = None
+        dom_string: Optional[str] = None  # Add variable for DOM string
         fetched_tab_ref: Optional[TabReference] = None
-        # We'll fetch the scrollY just before screenshotting now
         scroll_y_at_capture: Optional[int] = None
-        # scroll_y_at_interaction = self._last_interaction_scroll_y # No longer needed directly
-
-        # Keep ws connection open for multiple commands
         ws = None
+
         try:
             # Get the current tab info first
             current_tabs: List[ChromeTab] = await get_tabs()
@@ -251,65 +250,85 @@ class TabInteractionHandler:
                 return
             if not target_tab_obj.webSocketDebuggerUrl:
                 logger.warning(
-                    f"Tab {self.tab_id} has no websocket URL. Cannot fetch/screenshot. Aborting update."
+                    f"Tab {self.tab_id} has no websocket URL. Cannot fetch/screenshot/dom. Aborting update."
                 )
                 return
 
-            ws_url = target_tab_obj.webSocketDebuggerUrl  # Use the potentially updated ws_url
-
-            # --- Connect to WebSocket ---
-            # Need to manage the connection manually here to send multiple commands
-            ws = await websockets.connect(ws_url, max_size=20 * 1024 * 1024)
-
-            # --- Fetch HTML ---
-            # Assume get_tab_html manages its own connection or adapt it
-            # For simplicity, let's assume it works, or call _send_cdp_command directly
-            # html_content = await get_tab_html(ws_url=ws_url) # Original call
-            # Re-implement fetching HTML using the existing connection:
-            try:
-                logger.debug(f"Fetching HTML via existing ws for {self.tab_id}")
-                script = "document.documentElement.outerHTML"
-                eval_result = await send_cdp_command(ws, "Runtime.evaluate", {"expression": script})
-                if eval_result and eval_result.get("result", {}).get("type") == "string":
-                    html_content = eval_result["result"].get("value")
-                else:
-                    logger.warning(f"Failed to fetch HTML via ws for {self.tab_id}")
-            except Exception as html_e:
-                logger.error(
-                    f"Error fetching HTML via ws for {self.tab_id}: {html_e}", exc_info=True
-                )
-
-            current_url = target_tab_obj.url  # Get latest URL from tab object
+            ws_url = target_tab_obj.webSocketDebuggerUrl
+            current_url = target_tab_obj.url  # Get latest URL
             latest_title = target_tab_obj.title  # Get latest title
 
-            if not current_url or html_content is None:
-                logger.warning(
-                    f"Could not determine URL or fetch HTML for tab {self.tab_id} during fetch. Proceeding without HTML."
-                )
-                # Don't return, attempt screenshot anyway if possible
+            # --- Connect to WebSocket --- Need connection for multiple commands
+            logger.debug(f"Opening WebSocket connection for fetching content: {ws_url}")
+            ws = await websockets.connect(
+                ws_url, max_size=30 * 1024 * 1024, open_timeout=10, close_timeout=10
+            )
 
-            # --- Capture Screenshot (and get scrollY just before) ---
+            # --- Instantiate CDP Executor with existing connection --- #
+            # Use the executor to ensure Runtime.enable is called if needed
+            # No need for async with as we manage ws manually here
+            browser_executor = CdpBrowserExecutor(ws_url, current_url, ws_connection=ws)
+
+            # --- Fetch HTML --- #
             try:
-                # Get scrollY immediately before screenshot
-                scroll_script = "window.scrollY"
-                scroll_eval = await send_cdp_command(
-                    ws, "Runtime.evaluate", {"expression": scroll_script, "returnByValue": True}
+                logger.debug(f"Fetching HTML via executor for {self.tab_id}")
+                html_script = "document.documentElement.outerHTML"
+                html_content = await browser_executor.evaluate(html_script)
+                if html_content:
+                    logger.debug(
+                        f"Successfully fetched HTML (len {len(html_content)}) for {self.tab_id}"
+                    )
+                else:
+                    logger.warning(f"Failed to fetch HTML via executor for {self.tab_id}")
+            except Exception as html_e:
+                logger.error(
+                    f"Error fetching HTML via executor for {self.tab_id}: {html_e}", exc_info=True
                 )
-                if scroll_eval and scroll_eval.get("result", {}).get("type") == "number":
-                    scroll_y_at_capture = int(scroll_eval["result"]["value"])
+
+            # --- Fetch DOM State --- #
+            if html_content:  # Only try getting DOM if we have HTML
+                try:
+                    logger.debug(f"Fetching DOM state via executor for {self.tab_id}")
+                    # Create DomService instance
+                    dom_service = DomService(browser_executor)
+                    # Get DOM state (disable highlighting for automated capture)
+                    dom_state = await dom_service.get_clickable_elements(highlight_elements=False)
+                    # Serialize the DOM tree
+                    if dom_state and dom_state.element_tree:
+                        dom_string = dom_state.element_tree.clickable_elements_to_string()
+                        logger.debug(
+                            f"Successfully fetched and serialized DOM (len {len(dom_string)}) for {self.tab_id}"
+                        )
+                    else:
+                        logger.warning(
+                            f"get_clickable_elements returned empty state for {self.tab_id}"
+                        )
+                except Exception as dom_e:
+                    logger.error(
+                        f"Error fetching or serializing DOM for {self.tab_id}: {dom_e}",
+                        exc_info=True,
+                    )
+            else:
+                logger.warning(f"Skipping DOM fetch for {self.tab_id} because HTML fetch failed.")
+
+            # --- Capture Screenshot (and get scrollY just before) --- #
+            try:
+                # Get scrollY immediately before screenshot using the executor
+                scroll_script = "window.scrollY"
+                scroll_eval = await browser_executor.evaluate(scroll_script)
+                if isinstance(scroll_eval, (int, float)):
+                    scroll_y_at_capture = int(scroll_eval)
                     logger.debug(
                         f"Captured scrollY={scroll_y_at_capture} just before screenshot for {self.tab_id}"
                     )
                 else:
                     logger.warning(
-                        f"Could not get scrollY before screenshot for {self.tab_id}. Using last known: {self._last_interaction_scroll_y}"
+                        f"Could not get scrollY before screenshot for {self.tab_id}. Fallback: {self._last_interaction_scroll_y}"
                     )
                     scroll_y_at_capture = self._last_interaction_scroll_y  # Fallback
 
-                # Now capture screenshot using the same ws connection
-                screenshot_pil_image = await capture_tab_screenshot(
-                    ws_url=ws_url, ws_connection=ws
-                )  # Pass existing ws
+                # Capture screenshot using the *same ws connection* passed to cdp func
+                screenshot_pil_image = await capture_tab_screenshot(ws_url=ws_url, ws_connection=ws)
                 if screenshot_pil_image:
                     logger.debug(f"Successfully captured screenshot for {self.tab_id}")
                 else:
@@ -317,34 +336,32 @@ class TabInteractionHandler:
             except Exception as ss_e:
                 logger.error(f"Error capturing screenshot for {self.tab_id}: {ss_e}", exc_info=True)
 
-            # --- Create TabReference (even if HTML fetch failed) ---
-            # Ensure we have url and title from the target_tab_obj
+            # --- Create TabReference --- #
             if current_url and self.tab_id:
                 fetched_tab_ref = TabReference(
                     id=self.tab_id,
                     url=current_url,
-                    html=html_content,  # Pass potentially None HTML
+                    html=html_content,
                     title=latest_title,
-                    ws_url=ws_url,  # Include ws_url in the ref
+                    ws_url=ws_url,
                 )
             else:
                 logger.error(
                     f"Cannot create TabReference for {self.tab_id} due to missing ID or URL."
                 )
-                return  # Cannot proceed without id/url
+                return
 
-            # --- Call the callback with the reference, image, and the NEWLY CAPTURED scrollY ---
+            # --- Call the callback with reference, image, scrollY, and DOM string --- #
             if asyncio.iscoroutinefunction(self.content_fetched_callback):
                 asyncio.create_task(
                     self.content_fetched_callback(
-                        fetched_tab_ref, screenshot_pil_image, scroll_y_at_capture
+                        fetched_tab_ref, screenshot_pil_image, scroll_y_at_capture, dom_string
                     )
                 )
             else:
-                # Handle potential sync callback defensively
                 try:
                     result = self.content_fetched_callback(
-                        fetched_tab_ref, screenshot_pil_image, scroll_y_at_capture
+                        fetched_tab_ref, screenshot_pil_image, scroll_y_at_capture, dom_string
                     )
                     if asyncio.iscoroutine(result):
                         asyncio.create_task(result)
@@ -359,6 +376,6 @@ class TabInteractionHandler:
                 f"Error fetching/processing tab {self.tab_id} after interaction: {e}", exc_info=True
             )
         finally:
-            # Ensure WebSocket is closed if opened
             if ws and ws.state != websockets.protocol.State.CLOSED:
+                logger.debug(f"Closing WebSocket connection after fetching content: {ws_url}")
                 await ws.close()

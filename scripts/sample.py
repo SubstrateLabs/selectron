@@ -16,6 +16,9 @@ from rich.pretty import pretty_repr
 from term_image.exceptions import InvalidSizeError
 from term_image.image import AutoImage
 
+# Import DomService and CdpBrowserExecutor
+from selectron.browser_use.dom_service import DomService
+from selectron.chrome.cdp_executor import CdpBrowserExecutor
 from selectron.chrome.chrome_cdp import (
     ChromeTab,
     capture_tab_screenshot,
@@ -98,12 +101,25 @@ async def handle_interaction_update(ref: TabReference):
 
 
 async def handle_content_fetched(
-    ref: TabReference, image: Optional[Image.Image], scroll_y: Optional[int]
+    ref: TabReference,
+    image: Optional[Image.Image],
+    scroll_y: Optional[int],
+    dom_string: Optional[str],
 ):
     """Callback triggered after interaction + debounce + content fetch."""
     console.print(
         f"  [green]Interaction: Content Fetched:[/green] Tab {ref.id} ({ref.title} - {ref.url}) ScrollY: {scroll_y}"
     )
+
+    # Log if DOM string was fetched
+    if dom_string:
+        console.print(
+            f"    [blue]Info:[/blue] Fetched DOM representation (Length: {len(dom_string)})"
+        )
+    else:
+        console.print(
+            f"    [yellow]Warning:[/yellow] DOM representation was not fetched for {ref.url}."
+        )
 
     if not ref.html:
         console.print(
@@ -131,7 +147,12 @@ async def handle_content_fetched(
 
     if ref.html and metadata:
         await save_sample_data(
-            url=ref.url, html=ref.html, metadata=metadata, image=image, scroll_y=scroll_y
+            url=ref.url,
+            html=ref.html,
+            metadata=metadata,
+            image=image,
+            scroll_y=scroll_y,
+            dom_string=dom_string,
         )
     else:
         missing = []
@@ -183,6 +204,7 @@ async def process_new_tab(tab: ChromeTab):
     final_url: Optional[str] = tab.url  # Start with the initial URL
     final_title: Optional[str] = tab.title
     ws = None
+    dom_string: Optional[str] = None  # Initialize dom_string
 
     if not tab.webSocketDebuggerUrl:
         logger.warning(f"Tab {tab.id} missing websocket URL in process_new_tab, cannot process.")
@@ -202,6 +224,11 @@ async def process_new_tab(tab: ChromeTab):
             logger.warning(f"Page load timeout/failure for {tab.id}, proceeding anyway.")
         else:
             logger.debug(f"Page load confirmed for tab {tab.id}.")
+
+        # Add a small delay to let the page settle further
+        settle_delay = 1.0
+        logger.debug(f"Waiting {settle_delay}s for page {tab.id} to settle...")
+        await asyncio.sleep(settle_delay)
 
         # Get final URL after load/redirects
         try:
@@ -274,6 +301,36 @@ async def process_new_tab(tab: ChromeTab):
                     f"    [red]Error:[/red] Failed extracting metadata for {final_url}: {meta_e}"
                 )
 
+        # --- Fetch DOM State (using existing connection) --- #
+        if html and final_url:  # Only try if we have HTML and a URL
+            try:
+                logger.debug(f"Fetching DOM state via executor for {tab.id}")
+                # Use the existing ws connection with CdpBrowserExecutor
+                # IMPORTANT: Ensure Runtime.enable is implicitly called by executor
+                browser_executor = CdpBrowserExecutor(ws_url, final_url, ws_connection=ws)
+                dom_service = DomService(browser_executor)
+                # Get DOM state (disable highlighting for initial capture)
+                dom_state = await dom_service.get_clickable_elements(highlight_elements=False)
+                if dom_state and dom_state.element_tree:
+                    dom_string = dom_state.element_tree.clickable_elements_to_string()
+                    console.print(
+                        f"    [green]Success:[/green] Fetched and serialized DOM for {final_url} (Length: {len(dom_string)})"
+                    )
+                else:
+                    console.print(
+                        f"    [yellow]Warning:[/yellow] get_clickable_elements returned empty state for {final_url}"
+                    )
+            except Exception as dom_e:
+                logger.error(
+                    f"Error fetching or serializing DOM for {final_url}: {dom_e}",
+                    exc_info=True,
+                )
+                console.print(
+                    f"    [red]Error:[/red] Failed to fetch/serialize DOM for {final_url}: {dom_e}"
+                )
+        else:
+            logger.warning(f"Skipping DOM fetch for {tab.id} because HTML or final URL is missing.")
+
         # --- Capture Screenshot (using existing connection) ---
         try:
             screenshot_pil_image = await capture_tab_screenshot(ws_url=ws_url, ws_connection=ws)
@@ -314,11 +371,12 @@ async def process_new_tab(tab: ChromeTab):
 
     if html and metadata:
         await save_sample_data(
-            url=final_url,  # Use final URL
+            url=final_url,
             html=html,
             metadata=metadata,
             image=screenshot_pil_image,
             scroll_y=0,  # Initial load is always scrollY 0
+            dom_string=dom_string,
         )
     else:
         missing = []
@@ -340,8 +398,9 @@ async def save_sample_data(
     metadata: HtmlMetadata,
     image: Optional[Image.Image],
     scroll_y: Optional[int],
+    dom_string: Optional[str],
 ) -> None:
-    """Saves HTML, metadata, manages screenshot stacking with deduplication, and saves raw markdown."""
+    """Saves HTML, metadata, manages screenshot stacking with deduplication, saves raw markdown, and saves DOM string."""
     try:
         parsed_url = urlparse(url)
         host = parsed_url.netloc.split(":")[0] if parsed_url.netloc else "unknown_host"
@@ -355,7 +414,8 @@ async def save_sample_data(
         html_path = target_dir / f"{path_slug}.html"
         json_path = target_dir / f"{path_slug}.json"
         image_path = target_dir / f"{path_slug}.jpg"
-        # md_path calculation moved to cleanup handler
+        md_path = target_dir / f"{path_slug}.md"
+        dom_path = target_dir / f"{path_slug}.dom.txt"  # Path for DOM string
 
         # Save HTML
         with open(html_path, "w", encoding="utf-8") as f:
@@ -430,6 +490,20 @@ async def save_sample_data(
             )
             # Don't save markdown if extraction failed
 
+        # --- Save DOM String --- #
+        if dom_string is not None:
+            try:
+                with open(dom_path, "w", encoding="utf-8") as f:
+                    f.write(dom_string)
+                logger.info(f"Saved DOM string (len {len(dom_string)}) to {dom_path}")
+            except Exception as dom_save_e:
+                logger.error(f"Failed to save DOM string for {url}: {dom_save_e}", exc_info=True)
+                console.print(
+                    f"    [red]Error:[/red] Failed saving DOM string for {url}: {dom_save_e}"
+                )
+        else:
+            logger.debug(f"No DOM string provided for {url}. Skipping save.")
+
         # Accumulate and Stack Screenshot (with Deduplication)
         if image is not None:
             new_hash = compute_perceptual_hash(image)
@@ -497,7 +571,7 @@ async def save_sample_data(
             logger.info(f"No image provided for {url} in this call. No screenshot saved/stacked.")
 
         console.print(
-            f"    [green]Success:[/green] Saved sample data to {target_dir / path_slug}.[html|json|jpg|md]"
+            f"    [green]Success:[/green] Saved sample data to {target_dir / path_slug}.[html|json|jpg|md|dom.txt]"
         )
 
     except OSError as e:
