@@ -79,29 +79,13 @@ async def propose_extractions(image_path: Path) -> Optional[ExtractionProposal]:
         "\n1. `region_description`: A clear description of the region or list item."
         "\n2. `observed_content_summary`: A brief summary of the actual text or content observed within that region/item in the image."
         "\nDo NOT suggest CSS selectors or HTML element names. Focus ONLY on the visible content and structure."
-        "\nRespond ONLY with a JSON object conforming EXACTLY to the following structure:"
-        """
-        {
-          "items": [
-            {
-              "region_description": "...",
-              "observed_content_summary": "..."
-            },
-            ...
-          ]
-        }
-        """
-        "\nEnsure the top-level key is `items` and each object in the list has keys `region_description` and `observed_content_summary`."
+        "\nRespond using the structure defined by the provided Pydantic model."
     )
 
     console.print("Sending request to OpenAI... (This might take a moment)", style="dim")
     try:
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",  # Or "gpt-4o"
-            # Use response_model for structured output with Pydantic
-            # This feature might require instructor or similar libraries, or native support depending on openai lib version
-            # Assuming native support or instructor is patched
-            # response_model=ExtractionProposal, # Need instructor library for this: `pip install instructor`
+        response = await client.beta.chat.completions.parse(
+            model="gpt-4.1-mini",  # Or "gpt-4o"
             messages=[
                 {
                     "role": "user",
@@ -117,32 +101,18 @@ async def propose_extractions(image_path: Path) -> Optional[ExtractionProposal]:
                     ],
                 }
             ],
+            response_format=ExtractionProposal,  # Pass the Pydantic model directly
             max_tokens=1024,  # Adjust as needed
-            # Add temperature or other params if desired
-            response_format={"type": "json_object"},  # Request JSON output
         )
 
-        # Manually parse the JSON if not using response_model
-        import json
-
-        content = response.choices[0].message.content
-        if not content:
-            console.print("[bold red]Error:[/bold red] OpenAI returned empty content.")
+        # Access the parsed Pydantic object directly
+        proposal = response.choices[0].message.parsed
+        if not proposal:
+            console.print("[bold red]Error:[/bold red] OpenAI returned empty parsed content.")
             return None
 
-        try:
-            proposal_data = json.loads(content)
-            proposal = ExtractionProposal.model_validate(proposal_data)
-            console.print(
-                "[bold green]Success:[/bold green] Received and parsed proposal from OpenAI."
-            )
-            return proposal
-        except (json.JSONDecodeError, Exception) as parse_e:  # Catch Pydantic validation errors too
-            console.print(
-                f"[bold red]Error:[/bold red] Failed to parse OpenAI response as JSON or validate schema: {parse_e}"
-            )
-            console.print(f"Raw content:\n{content}", style="dim")
-            return None
+        console.print("[bold green]Success:[/bold green] Received and parsed proposal from OpenAI.")
+        return proposal
 
     except openai.APIConnectionError as e:
         console.print(f"[bold red]OpenAI Error:[/bold red] Failed to connect: {e}")
@@ -182,4 +152,3 @@ if __name__ == "__main__":
         console.print("[bold red]Error:[/bold red] OPENAI_API_KEY environment variable not set.")
     else:
         asyncio.run(main())
-    # asyncio.run(main()) # Temporarily run without key check for structure dev
