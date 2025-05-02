@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 # --- Configuration ---
 ENRICHMENT_MODEL = "gpt-4.1"
 MAX_DOM_CONTEXT_LEN = 8000
-AGENT_CONCURRENCY = 3
+AGENT_CONCURRENCY = 5
 
 # Use the linkedin sample for this implementation
 SAMPLE_HOST = "www.linkedin.com"
@@ -136,7 +136,48 @@ async def create_and_start_agent_tasks(
         agent_tasks.append((region_task, region_request))
         logger.debug(f"Started agent task for Region {item.id} selection.")
 
-    logger.info(f"Created and started {len(agent_tasks)} REGION SELECTION agent tasks.")
+        # --- Re-enable metadata request generation and task creation --- #
+        if item.metadata:
+            for key, value in item.metadata.items():
+                if not isinstance(value, str) or not value.strip():
+                    logger.debug(
+                        f"Skipping metadata key '{key}' for region {item.id} due to non-string or empty value."
+                    )
+                    continue
+
+                # Default parameters for metadata extraction (no enrichment)
+                attribute_to_extract: Optional[str] = None
+                extract_text: bool = True
+                verification_text = value[:150] + ("..." if len(value) > 150 else "")
+                target_description = f"The specific element representing '{key}' (value: '{verification_text}') within the region for '{item.region_description}'"
+                proposed_selector_hint: Optional[str] = None  # No hint generation
+
+                metadata_request = AgentRequest(
+                    target_description=target_description,
+                    verification_text=verification_text,
+                    attribute_to_extract=attribute_to_extract,
+                    extract_text=extract_text,
+                    request_type="metadata_extraction",
+                    region_id=item.id,
+                    metadata_key=key,
+                    proposed_selector_hint=proposed_selector_hint,
+                )
+
+                # Start the agent task for the metadata extraction request
+                metadata_task = asyncio.create_task(
+                    agent_instance.find_and_extract(
+                        target_description=metadata_request.target_description,
+                        attribute_to_extract=metadata_request.attribute_to_extract,
+                        extract_text=metadata_request.extract_text,
+                        verification_text=metadata_request.verification_text,
+                        # Pass proposed_selector_hint here if/when agent supports it
+                    )
+                )
+                agent_tasks.append((metadata_task, metadata_request))
+                logger.debug(f"Started agent task for Region {item.id}, Key '{key}'.")
+        # --- End metadata processing --- #
+
+    logger.info(f"Created and started {len(agent_tasks)} agent tasks (Regions & Metadata).")
     return agent_tasks
 
 
@@ -305,12 +346,30 @@ async def main():
             # Determine overall status - Refined Logic
             if verification_successful:
                 if original_request.request_type == "region_selection":
-                    # For regions, success now simply means verification ok, agent handled size internally
-                    success_count += 1
-                    print("  [bold green]Status: SUCCESS (Region Selected)[/bold green]")
-                # Add elif for metadata requests here if/when re-enabled
-                # elif original_request.request_type == "metadata_extraction": ...
-                else:  # Should not happen with current logic, but handle defensively
+                    # For regions, success means verification ok AND context extraction worked
+                    if result.extraction_result.extracted_html is not None:
+                        success_count += 1
+                        print(
+                            "  [bold green]Status: SUCCESS (Region Selected + Context Extracted)[/bold green]"
+                        )
+                    else:
+                        failure_count += 1
+                        print(
+                            "  [bold yellow]Status: PARTIAL (Region Selected, Context Extraction Failed)[/bold yellow]"
+                        )
+                elif original_request.request_type == "metadata_extraction":
+                    # For metadata, success means verification ok AND extraction didn't error
+                    # (even if value is None/empty, finding the element is the main goal)
+                    extraction_succeeded_or_not_applicable = not result.extraction_result.error
+                    if extraction_succeeded_or_not_applicable:
+                        success_count += 1
+                        print("  [bold green]Status: SUCCESS (Metadata Element Found)[/bold green]")
+                    else:
+                        failure_count += 1
+                        print(
+                            "  [bold yellow]Status: PARTIAL (Metadata Element Found, Extraction Error)[/bold yellow]"
+                        )
+                else:  # Should not happen
                     failure_count += 1
                     print(
                         f"  [bold red]Status: FAILED (Unknown request type: {original_request.request_type})[/bold red]"

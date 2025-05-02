@@ -5,8 +5,8 @@ from typing import Any, Optional
 import websockets
 from websockets.protocol import State
 
-from selectron.browser_use.dom_service import BrowserExecutor
 from selectron.chrome.chrome_cdp import send_cdp_command
+from selectron.dom.dom_service import BrowserExecutor
 from selectron.util.logger import get_logger
 
 logger = get_logger(__name__)

@@ -32,6 +32,8 @@ dependencies = [
     "pydantic>=2.11.4",
     "python-dateutil>=2.9.0.post0",
     "rich>=14.0.0",
+    "textual-dev>=1.7.0",
+    "textual>=3.2.0",
     "websockets>=15.0.1",
 ]
 
@@ -59,7 +61,7 @@ path = "src/selectron/__about__.py"
 [tool.hatch.build]
 include = [
   "src/**/*.py",
-  "src/selectron/browser_use/buildDomTree.js"
+  "src/selectron/dom/buildDomTree.js"
 ]
 exclude = [
   "tests/**"

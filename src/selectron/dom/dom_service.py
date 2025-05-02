@@ -39,27 +39,20 @@ class DomService:
         self.browser_executor = browser_executor
         # self.xpath_cache = {} # This cache seems unused, consider removing later?
 
-        self.js_code = (
-            resources.files("selectron.browser_use").joinpath("buildDomTree.js").read_text()
-        )
+        self.js_code = resources.files("selectron.dom").joinpath("buildDomTree.js").read_text()
 
-    # region - Clickable elements
-    @time_execution_async("--get_clickable_elements")
-    async def get_clickable_elements(
+    async def get_elements(
         self,
-        highlight_elements: bool = True,
         focus_element: int = -1,
-        viewport_expansion: int = 0,
+        # viewport_expansion: int = 0, # REMOVED - Always disable viewport check
     ) -> DOMState:
-        element_tree, selector_map = await self._build_dom_tree(
-            highlight_elements, focus_element, viewport_expansion
-        )
+        # Always use viewportExpansion=-1 to get the full DOM
+        viewport_expansion = -1
+        element_tree, selector_map = await self._build_dom_tree(focus_element, viewport_expansion)
         return DOMState(element_tree=element_tree, selector_map=selector_map)
 
-    @time_execution_async("--build_dom_tree")
     async def _build_dom_tree(
         self,
-        highlight_elements: bool,
         focus_element: int,
         viewport_expansion: int,
     ) -> tuple[DOMElementNode, SelectorMap]:
@@ -88,8 +81,6 @@ class DomService:
         #       relationship between the DOM elements.
         debug_mode = logger.getEffectiveLevel() == logging.DEBUG
         args = {
-            "doHighlightElements": highlight_elements,
-            "focusHighlightIndex": focus_element,
             "viewportExpansion": viewport_expansion,
             "debugMode": debug_mode,
         }

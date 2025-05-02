@@ -4,8 +4,6 @@ from typing import Awaitable, Callable, List, Optional
 import websockets
 from PIL import Image
 
-from selectron.browser_use.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES
-from selectron.browser_use.dom_service import DomService
 from selectron.chrome.cdp_executor import CdpBrowserExecutor
 from selectron.chrome.chrome_cdp import (
     ChromeTab,
@@ -14,6 +12,8 @@ from selectron.chrome.chrome_cdp import (
     monitor_user_interactions,
 )
 from selectron.chrome.types import TabReference
+from selectron.dom.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES
+from selectron.dom.dom_service import DomService
 from selectron.util.logger import get_logger
 
 InteractionTabUpdateCallback = Callable[
@@ -292,21 +292,26 @@ class TabInteractionHandler:
                     logger.debug(f"Fetching DOM state via executor for {self.tab_id}")
                     # Create DomService instance
                     dom_service = DomService(browser_executor)
-                    # Get DOM state (disable highlighting for automated capture)
-                    dom_state = await dom_service.get_clickable_elements(highlight_elements=False)
+                    # Get DOM state
+                    logger.debug(f"Attempting dom_service.get_elements for {self.tab_id}")
+                    dom_state = await dom_service.get_elements()
+                    logger.debug(
+                        f"Result of get_elements for {self.tab_id}: {'Exists' if dom_state else 'None'}, Tree: {'Exists' if dom_state and dom_state.element_tree else 'None'}"
+                    )
                     # Serialize the DOM tree
                     if dom_state and dom_state.element_tree:
                         # Generate DOM string WITH attributes
-                        dom_string = dom_state.element_tree.clickable_elements_to_string(
+                        logger.debug(
+                            f"Attempting element_tree.elements_to_string for {self.tab_id}"
+                        )
+                        dom_string = dom_state.element_tree.elements_to_string(
                             include_attributes=DOM_STRING_INCLUDE_ATTRIBUTES
                         )
                         logger.debug(
-                            f"Successfully fetched and serialized DOM (len {len(dom_string)}) for {self.tab_id}"
+                            f"Successfully fetched and serialized DOM (len {len(dom_string) if dom_string else 'N/A'}) for {self.tab_id}"
                         )
                     else:
-                        logger.warning(
-                            f"get_clickable_elements returned empty state for {self.tab_id}"
-                        )
+                        logger.warning(f"get_elements returned empty state for {self.tab_id}")
                 except Exception as dom_e:
                     logger.error(
                         f"Error fetching or serializing DOM for {self.tab_id}: {dom_e}",
@@ -333,9 +338,7 @@ class TabInteractionHandler:
 
                 # Capture screenshot using the *same ws connection* passed to cdp func
                 screenshot_pil_image = await capture_tab_screenshot(ws_url=ws_url, ws_connection=ws)
-                if screenshot_pil_image:
-                    logger.debug(f"Successfully captured screenshot for {self.tab_id}")
-                else:
+                if not screenshot_pil_image:
                     logger.warning(f"Could not capture screenshot for {self.tab_id}.")
             except Exception as ss_e:
                 logger.error(f"Error capturing screenshot for {self.tab_id}: {ss_e}", exc_info=True)

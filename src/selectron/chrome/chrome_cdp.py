@@ -534,9 +534,6 @@ async def capture_tab_screenshot(
 
             try:
                 image = Image.open(BytesIO(image_data))
-                logger.info(
-                    f"Successfully captured screenshot (format: {format}, size: {image.size})."
-                )
                 return image
             except Exception as e:
                 logger.error(f"Failed to create PIL Image from screenshot data: {e}")
@@ -679,9 +676,6 @@ async def capture_active_tab_screenshot(
             # Convert bytes to PIL Image
             try:
                 image = Image.open(BytesIO(image_data))
-                logger.info(
-                    f"Successfully captured screenshot and created PIL Image (format: {format}, size: {image.size})."
-                )
                 return image
             except Exception as e:
                 logger.error(f"Failed to create PIL Image from screenshot data: {e}")

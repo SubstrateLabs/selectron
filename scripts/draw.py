@@ -7,9 +7,6 @@ from typing import Optional
 import websockets
 from PIL import Image
 from rich.console import Console
-from rich.pretty import pretty_repr
-from term_image.exceptions import InvalidSizeError
-from term_image.image import AutoImage
 
 from selectron.chrome.cdp_executor import CdpBrowserExecutor
 from selectron.chrome.chrome_cdp import (
@@ -41,12 +38,7 @@ console = Console()
 
 async def handle_polling_change(event: TabChangeEvent):
     """Callback function for tab changes detected ONLY by polling."""
-    console.print(
-        f"\n[bold blue]Polling Event:[/bold blue] New: {len(event.new_tabs)}, Closed: {len(event.closed_tabs)}, Navigated: {len(event.navigated_tabs)}"
-    )
-
     tasks = []
-
     for new_tab in event.new_tabs:
         if new_tab.webSocketDebuggerUrl:
             console.print(
@@ -77,10 +69,7 @@ async def handle_polling_change(event: TabChangeEvent):
 
 
 async def handle_interaction_update(ref: TabReference):
-    """Callback triggered immediately on user interaction (click/scroll)."""
-    console.print(
-        f"  [magenta]Interaction:[/magenta] User action detected in tab {ref.id} ({ref.title} - {ref.url})"
-    )
+    pass
 
 
 async def handle_content_fetched(
@@ -106,26 +95,18 @@ async def handle_content_fetched(
         console.print(
             f"    [yellow]Warning:[/yellow] HTML not fetched for {ref.url}, skipping metadata/save."
         )
-        if image:
-            _display_screenshot(image, ref.title or "Unknown Title")
         return
 
     metadata: Optional[HtmlMetadata] = None
     try:
         metadata = extract_metadata(ref.html, url=ref.url)
-        console.print(f"    [green]Success:[/green] Extracted Metadata for {ref.title}")
-        logger.info(
-            f"Extracted metadata for {ref.url}: {pretty_repr(metadata, indent_size=2, max_length=20)}"
-        )
     except Exception as e:
         logger.error(
             f"Error extracting metadata for {ref.url} after interaction: {e}", exc_info=True
         )
         console.print(f"    [red]Error:[/red] Failed extracting metadata for {ref.url}: {e}")
 
-    if image:
-        _display_screenshot(image, ref.title or "Unknown Title")
-    else:
+    if not image:
         console.print(f"    [yellow]Warning:[/yellow] No screenshot captured for {ref.url}.")
 
     if ref.html and metadata:
@@ -150,34 +131,10 @@ async def handle_content_fetched(
         )
 
 
-def _display_screenshot(image: Image.Image, title: str):
-    console.print(
-        f"    [green]Success:[/green] Captured screenshot for {title}. Displaying cropped preview:"
-    )
-    try:
-        # Crop image for terminal display (max height 600px)
-        width, height = image.size
-        crop_height = min(height, 600)
-        cropped_image = image.crop((0, 0, width, crop_height))
-
-        # Use the cropped image for terminal display
-        term_img = AutoImage(cropped_image, width=80)
-        term_img.draw()
-    except InvalidSizeError:
-        console.print(
-            "    [yellow]Warning:[/yellow] Cropped screenshot is still too large to display in the terminal."
-        )
-    except Exception as draw_e:
-        logger.error(f"Error drawing screenshot: {draw_e}", exc_info=True)
-        console.print(f"    [red]Error:[/red] Failed to display screenshot: {draw_e}")
-
-
 async def process_new_tab(tab: ChromeTab):
     """Fetches HTML, metadata, screenshot for a NEW or NAVIGATED tab and saves samples.
     Connects via WebSocket, waits for load, gets final URL, then fetches content.
     """
-    logger.info(f"Processing tab {tab.id}: {tab.title} ({tab.url})")
-    console.print(f"    [cyan]Processing Tab:[/cyan] {tab.title} ({tab.url})")
     html: Optional[str] = None
     metadata: Optional[HtmlMetadata] = None
     screenshot_pil_image: Optional[Image.Image] = None
@@ -210,8 +167,6 @@ async def process_new_tab(tab: ChromeTab):
         final_url, final_title = await get_final_url_and_title(
             ws, tab.url, tab.title or "Unknown", tab_id_for_logging=tab.id
         )
-        logger.info(f"Tab {tab.id} final URL: {final_url}, Title: {final_title}")
-
         if final_url:
             html = await get_html_via_ws(ws, final_url)
         else:
@@ -221,10 +176,6 @@ async def process_new_tab(tab: ChromeTab):
         if html and final_url and final_title:
             try:
                 metadata = extract_metadata(html, url=final_url)
-                console.print(f"    [green]Success:[/green] Extracted Metadata for {final_title}")
-                logger.info(
-                    f"Extracted metadata for {final_url}: {pretty_repr(metadata, indent_size=2, max_length=20)}"
-                )
             except Exception as meta_e:
                 logger.error(f"Error extracting metadata for {final_url}: {meta_e}", exc_info=True)
                 console.print(
@@ -249,17 +200,14 @@ async def process_new_tab(tab: ChromeTab):
                 logger.debug(f"Fetching DOM state via executor for {tab.id}")
                 browser_executor = CdpBrowserExecutor(ws_url, final_url, ws_connection=ws)
                 dom_service = DomService(browser_executor)
-                dom_state = await dom_service.get_clickable_elements(highlight_elements=False)
+                dom_state = await dom_service.get_elements()
                 if dom_state and dom_state.element_tree:
-                    dom_string = dom_state.element_tree.clickable_elements_to_string(
+                    dom_string = dom_state.element_tree.elements_to_string(
                         include_attributes=DOM_STRING_INCLUDE_ATTRIBUTES
-                    )
-                    console.print(
-                        f"    [green]Success:[/green] Fetched and serialized DOM for {final_url} (Length: {len(dom_string)})"
                     )
                 else:
                     console.print(
-                        f"    [yellow]Warning:[/yellow] get_clickable_elements returned empty state for {final_url}"
+                        f"    [yellow]Warning:[/yellow] get_elements returned empty state for {final_url}"
                     )
                     dom_string = None
             except Exception as dom_e:
@@ -277,13 +225,6 @@ async def process_new_tab(tab: ChromeTab):
         if final_url and final_title:
             try:
                 screenshot_pil_image = await capture_tab_screenshot(ws_url=ws_url, ws_connection=ws)
-                if screenshot_pil_image:
-                    _display_screenshot(screenshot_pil_image, final_title)
-                else:
-                    console.print(
-                        f"    [yellow]Warning:[/yellow] Could not capture screenshot for {final_url}."
-                    )
-                    screenshot_pil_image = None
             except Exception as ss_e:
                 logger.error(f"Error capturing screenshot for {final_url}: {ss_e}", exc_info=True)
                 console.print(
@@ -310,13 +251,30 @@ async def process_new_tab(tab: ChromeTab):
             except Exception as close_e:
                 logger.warning(f"Error closing WebSocket for {tab.id}: {close_e}")
 
-    if not final_url:
-        logger.error(
-            f"Cannot save data for tab {tab.id} because final URL could not be determined."
-        )
-        return
+    # --- Logging Summary ---
+    fetched_summary = []
+    if html:
+        fetched_summary.append("HTML")
+    if dom_string:
+        fetched_summary.append("DOM")
+    if screenshot_pil_image:
+        fetched_summary.append("Screenshot")
 
-    if html and metadata:
+    log_url_for_summary = final_url if final_url else tab.url
+    log_title_for_summary = final_title if final_title else tab.title
+
+    if final_url:
+        status_color = "green" if html and metadata else "yellow"
+        console.print(
+            f"  [{status_color}]Navigation: Content Processed:[/{status_color}] Tab {tab.id} ({log_title_for_summary} - {log_url_for_summary}) Fetched: {', '.join(fetched_summary) if fetched_summary else 'None'}"
+        )
+    else:
+        console.print(
+            f"  [red]Navigation: Processing Failed:[/red] Tab {tab.id} ({tab.url}) - Could not determine final URL/Title."
+        )
+
+    # --- Save Data ---
+    if html and metadata and final_url:
         await save_sample_data(
             url=final_url,
             html=html,
@@ -330,11 +288,12 @@ async def process_new_tab(tab: ChromeTab):
             missing.append("HTML")
         if not metadata:
             missing.append("Metadata")
-        if not screenshot_pil_image:
-            missing.append("Image")
-        logger.warning(f"Skipping save for {final_url} due to missing data: {', '.join(missing)}")
-        console.print(
-            f"    [yellow]Warning:[/yellow] Skipping save for {final_url} due to missing: {', '.join(missing)}."
+        if not final_url:
+            missing.append("Final URL")
+
+        log_url_for_warning = final_url if final_url else tab.url
+        logger.warning(
+            f"Skipping save for {log_url_for_warning} due to missing data: {', '.join(missing)}"
         )
 
 
@@ -343,20 +302,24 @@ async def main():
         console.print("[bold red]Failed to establish Chrome connection. Exiting.[/bold red]")
         sys.exit(1)
 
-    monitor = ChromeMonitor(check_interval=1.5)  # Create monitor instance
-    shutdown_event = asyncio.Event()  # Event to signal shutdown
+    monitor = ChromeMonitor(check_interval=1.5)
+    shutdown_event = asyncio.Event()
 
     def signal_handler(sig, frame):
-        console.print(f"\n[bold yellow]Received signal {sig}, initiating shutdown...[/bold yellow]")
+        print()  # Add a newline after ^C
         shutdown_event.set()
 
-    # Register signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    console.print("[bold green]Starting Chrome Monitor... Press Ctrl+C to exit.[/bold green]")
+    wait_task = None
+    monitor = None  # Initialize monitor to None
+
     try:
-        # Start monitoring in the background, passing all three callbacks
+        console.print("[cyan]Starting Chrome monitor...[/cyan]")
+        # Initialize monitor here
+        monitor = ChromeMonitor(check_interval=1.5)
+        # Pass callbacks to start_monitoring
         monitor_started = await monitor.start_monitoring(
             on_polling_change_callback=handle_polling_change,
             on_interaction_update_callback=handle_interaction_update,
@@ -365,19 +328,66 @@ async def main():
 
         if not monitor_started:
             console.print("[bold red]Failed to start monitor. Exiting.[/bold red]")
-            return
+            return  # No need for sys.exit if returning from main
 
-        # Wait indefinitely until shutdown signal
-        await shutdown_event.wait()
+        console.print("[green]Monitor started successfully.[/green]")
+
+        # Create only the shutdown wait task
+        wait_task = asyncio.create_task(shutdown_event.wait(), name="ShutdownWaiter")
+
+        # Wait for the shutdown signal
+        await wait_task
+
+        # Check results of completed tasks for errors (only wait_task in this case)
+        try:
+            wait_task.result()  # Raise exception if task failed
+        except asyncio.CancelledError:
+            logger.info(f"Task {wait_task.get_name()} was cancelled gracefully.")
+        except Exception as e:
+            logger.error(f"Task {wait_task.get_name()} failed unexpectedly: {e}", exc_info=True)
+            console.print(f"[red]Error in {wait_task.get_name()}: {e}[/red]")
+            # Ensure shutdown if a task fails unexpectedly
+            shutdown_event.set()
 
     except Exception as e:
-        logger.error(f"An unexpected error occurred in main: {e}", exc_info=True)
+        logger.error(f"An unexpected error occurred in main setup/wait: {e}", exc_info=True)
         console.print(f"[bold red]An unexpected error occurred: {e}[/bold red]")
+        shutdown_event.set()  # Ensure shutdown on main error
     finally:
-        console.print("\n[bold yellow]Stopping Chrome Monitor...[/bold yellow]")
-        await monitor.stop_monitoring()
-        console.print("[bold green]Monitor stopped. Exiting.[/bold green]")
+        console.print("[cyan]Shutting down...[/cyan]")
+        # Ensure event is set if not already (e.g., loop exited normally but signal wasn't caught)
+        if not shutdown_event.is_set():
+            logger.info("Shutdown event not set, setting it now in finally block.")
+            shutdown_event.set()
+
+        # Cancel any remaining pending tasks (should only be wait_task if it was cancelled)
+        tasks_to_cancel = []
+        if wait_task and not wait_task.done():
+            tasks_to_cancel.append(wait_task)
+
+        if tasks_to_cancel:
+            logger.info(f"Cancelling {len(tasks_to_cancel)} pending tasks...")
+            for task in tasks_to_cancel:
+                task.cancel()
+
+            # Gather cancelled tasks to allow cleanup
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+            logger.info("Gathered cancelled pending tasks.")
+        else:
+            logger.info("No pending tasks needed cancellation.")
+
+        # Stop the monitor
+        if monitor:  # Ensure monitor object was successfully created
+            console.print("[cyan]Stopping Chrome monitor (if running)...[/cyan]")
+            await monitor.stop_monitoring()  # stop_monitoring handles internal checks
+            console.print("[green]Monitor stop process completed.[/green]")
+        else:
+            logger.info("Monitor object was not initialized, skipping stop.")
+
+        console.print("[bold green]Shutdown complete.[/bold green]")
 
 
 if __name__ == "__main__":
+    # Consider adding basic logging setup here if needed earlier
+    # logging.basicConfig(level=logging.DEBUG) # Example
     asyncio.run(main())

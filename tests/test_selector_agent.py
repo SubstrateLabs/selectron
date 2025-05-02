@@ -255,7 +255,7 @@ async def test_agent_extracts_tweet_text():
 
     # --- Assert ---
     print("\n--- Extracted Markdown Content ---")
-    print(result.extraction_result.markdown_content)
+    print(result.extraction_result.extracted_markdown)
     print("------------------------------------\n")
 
     assert result.final_verification.element_count == 1, "Verification failed: Element not unique"
@@ -277,11 +277,11 @@ async def test_agent_extracts_tweet_text():
     )
 
     # Check markdown content
-    assert result.extraction_result.markdown_content is not None, (
+    assert result.extraction_result.extracted_markdown is not None, (
         "Extraction failed: markdown_content is None"
     )
     # Normalize whitespace for markdown comparison too
-    extracted_md_normalized = " ".join(result.extraction_result.markdown_content.split())
+    extracted_md_normalized = " ".join(result.extraction_result.extracted_markdown.split())
     expected_md_normalized = " ".join(expected_markdown.split())
     assert extracted_md_normalized == expected_md_normalized, (
         f"Extraction failed: Incorrect markdown content.\nExpected: {expected_md_normalized}\nGot: {extracted_md_normalized}"

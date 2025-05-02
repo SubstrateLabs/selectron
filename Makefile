@@ -3,6 +3,9 @@
 sample:
 	uv run scripts/sample.py
 
+draw:
+	uv run scripts/draw.py
+
 # ================================
 # housekeeping
 # ================================

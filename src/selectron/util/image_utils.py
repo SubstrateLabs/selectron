@@ -48,8 +48,6 @@ def stitch_vertical(images: List[Image.Image], bg_color=(255, 255, 255)) -> Opti
         logger.warning("Cannot stitch images with zero width or calculated height.")
         return None
 
-    logger.info(f"Creating stitched canvas: {max_width}x{total_height}")
-
     # Create the canvas
     first_image_mode = images[0].mode if images else "RGB"
     if "A" in first_image_mode:

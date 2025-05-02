@@ -83,12 +83,10 @@ class ChromeMonitor:
         self._on_interaction_update_callback = on_interaction_update_callback
         self._on_content_fetched_callback = on_content_fetched_callback
 
-        logger.info("Performing initial tab setup and starting interaction monitors...")
         await self._initialize_tabs_and_monitors()
 
         self._monitoring = True
         self._monitor_task = asyncio.create_task(self._monitor_loop())
-        logger.info("Chrome tab polling and interaction monitoring started.")
         return True
 
     async def _initialize_tabs_and_monitors(self):
@@ -120,9 +118,6 @@ class ChromeMonitor:
                 await self._start_interaction_monitor(tab)
 
             self.previous_tab_refs = new_tab_refs
-            logger.info(
-                f"Initial setup complete. Found {len(self.previous_tab_refs)} relevant tabs and started monitors."
-            )
 
         except Exception as e:
             logger.error(f"Error during initial tab/monitor setup: {e}", exc_info=True)
@@ -158,8 +153,6 @@ class ChromeMonitor:
         self._on_interaction_update_callback = None
         self._on_content_fetched_callback = None
         self._monitor_task = None
-
-        logger.info("Chrome tab monitoring stopped.")
 
     # --- Interaction Monitoring Logic --- #
     async def _start_interaction_monitor(self, tab: ChromeTab):
@@ -215,7 +208,6 @@ class ChromeMonitor:
             return
 
         num_handlers = len(self._interaction_handlers)
-        logger.info(f"Stopping all {num_handlers} interaction handlers...")
 
         # Create stop tasks for all handlers
         # Use list comprehension for clarity
@@ -268,8 +260,6 @@ class ChromeMonitor:
             elapsed_time = time.monotonic() - start_time
             sleep_duration = max(0, self.check_interval - elapsed_time)
             await asyncio.sleep(sleep_duration)
-
-        logger.info("Exiting ChromeTabs _monitor_loop.")
 
     async def process_tab_changes(
         self, current_cdp_tabs: List[ChromeTab]

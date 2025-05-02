@@ -156,7 +156,7 @@ class DOMElementNode(DOMBaseNode):
         collect_text(self, 0)
         return "\n".join(text_parts).strip()
 
-    def clickable_elements_to_string(self, include_attributes: list[str] | None = None) -> str:
+    def elements_to_string(self, include_attributes: list[str] | None = None) -> str:
         """Convert the processed DOM content to HTML."""
         formatted_text = []
 

@@ -56,7 +56,6 @@ def _save_html(html: str, path: Path) -> None:
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(html)
-        logger.debug(f"Saved HTML to {path}")
     except OSError as e:
         logger.error(f"OS error saving HTML to {path}: {e}", exc_info=True)
     except Exception as e:
@@ -82,7 +81,6 @@ def _save_metadata_json(metadata: Optional[HtmlMetadata], path: Path, url_for_lo
 
         with open(path, "w", encoding="utf-8") as f:
             json.dump(metadata_dict, f, indent=2, ensure_ascii=False)
-        logger.debug(f"Saved metadata to {path}")
     except Exception as json_e:
         logger.error(
             f"Failed to serialize or save metadata for {url_for_logging} to {path}: {json_e}",
@@ -101,7 +99,6 @@ def _save_markdown(html: str, path: Path, url_for_logging: str) -> None:
         # 2. Save the original markdown
         with open(path, "w", encoding="utf-8") as f:
             f.write(original_md_content)
-        logger.info(f"Saved original markdown (len {len(original_md_content)}) to {path}")
     except ImportError:
         logger.error(
             f"Could not import extract_markdown. Skipping markdown save for {url_for_logging}."
@@ -120,7 +117,6 @@ def _save_dom_string(dom_string: Optional[str], path: Path, url_for_logging: str
         try:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(dom_string)
-            logger.info(f"Saved DOM string (len {len(dom_string)}) to {path}")
         except Exception as dom_save_e:
             logger.error(
                 f"Failed to save DOM string for {url_for_logging} to {path}: {dom_save_e}",
@@ -147,7 +143,6 @@ def _save_stacked_screenshot(image: Optional[Image.Image], path: Path, url: str)
         logger.warning(f"Could not compute hash for new image ({url}). Skipping append/stack.")
         return
 
-    logger.debug(f"New image for {url} hash: {new_hash}")
     # Get the hash of the last image added for this URL, if any
     last_hash: Optional[imagehash.ImageHash] = None
     if url_screenshot_data[url]:
@@ -160,31 +155,19 @@ def _save_stacked_screenshot(image: Optional[Image.Image], path: Path, url: str)
     if last_hash is not None:
         hash_diff = new_hash - last_hash
         if hash_diff <= HASH_DIFF_THRESHOLD:
-            logger.info(
-                f"Skipping duplicate image for {url}. Hash diff: {hash_diff} <= {HASH_DIFF_THRESHOLD}"
-            )
             should_append = False
-        else:
-            logger.debug(
-                f"Image for {url} is different enough (hash diff: {hash_diff}). Appending."
-            )
 
     if should_append:
         # Append the image and its hash
         url_screenshot_data[url].append((image, new_hash))
-        logger.debug(
-            f"Appended new unique image for {url}. Total images: {len(url_screenshot_data[url])}"
-        )
 
         # Attempt to stack all *unique* images collected for this URL so far
         current_images = [img for img, _h in url_screenshot_data[url]]  # Extract images from tuples
-        logger.info(f"Attempting to stack {len(current_images)} unique images for {url}...")
         try:
             stitched_image = stitch_vertical(current_images)
 
             if stitched_image:
                 stitched_image.save(path, "JPEG", quality=85)  # Save stacked image
-                logger.info(f"Saved stacked screenshot (size {stitched_image.size}) to {path}")
             else:
                 # stitch_vertical returns None on failure (e.g., incompatible widths)
                 logger.warning(
@@ -233,9 +216,6 @@ async def save_sample_data(
 
         # --- Handle Screenshot --- #
         _save_stacked_screenshot(image, image_path, url)
-
-        # Final confirmation message
-        logger.info(f"Saved sample data to {target_dir / path_slug}.[html|json|jpg|md|dom.txt]")
 
     except OSError as e:
         logger.error(f"OS error saving sample data for {url}: {e}", exc_info=True)
