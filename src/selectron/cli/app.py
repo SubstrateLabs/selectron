@@ -414,7 +414,6 @@ class SelectronApp(App[None]):
             tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
 
             async def evaluate_selector_wrapper(selector: str, target_text_to_check: str, **kwargs):
-                logger.debug(f"Agent calling evaluate_selector: '{selector}'")
                 result = await tools_instance.evaluate_selector(
                     selector=selector,
                     target_text_to_check=target_text_to_check,
@@ -430,7 +429,6 @@ class SelectronApp(App[None]):
                 return result
 
             async def get_children_tags_wrapper(selector: str, **kwargs):
-                logger.debug(f"Agent calling get_children_tags: '{selector}'")
                 result = await tools_instance.get_children_tags(selector=selector, **kwargs)
                 if result and result.parent_found and not result.error:
                     success = await self._highlighter.highlight(
@@ -441,7 +439,6 @@ class SelectronApp(App[None]):
                 return result
 
             async def get_siblings_wrapper(selector: str, **kwargs):
-                logger.debug(f"Agent calling get_siblings: '{selector}'")
                 result = await tools_instance.get_siblings(selector=selector, **kwargs)
                 if result and result.element_found and not result.error:
                     success = await self._highlighter.highlight(

@@ -3,12 +3,11 @@ Screen {
     layout: vertical;
 }
 
-/* Container for the RichLog */
+/* Container for the RichLog - often child of LogPanel */
 .log-container {
     /* Takes up all available vertical space */
     height: 1fr;
 }
-
 
 /* Style the input widget itself */
 #log-input {
@@ -20,23 +19,25 @@ Screen {
 
 /* Style the input bar container */
 .input-bar {
-    /* Pin to the bottom */
     dock: bottom;
-    /* Let height adjust to content */
     height: auto;
-    /* Add margin below to avoid footer overlap */
     margin-bottom: 1;
-    /* Ensure children are visible */
-    padding: 1;
+    padding-bottom: 1;
+    padding-left: 1;
     width: 100%;
     /* Vertical layout for row and input */
     layout: vertical;
+    background: $surface; /* Use surface color for background */
+    border-top: $foreground round;
 }
 
 /* Style for the submit button */
 #submit-button {
     min-width: 10;
+    background: $background;
     align: center middle;
+    color: $primary;
+    margin-bottom: 1;
 }
 
 /* Style for the input field */
@@ -48,5 +49,14 @@ Screen {
 .markdown-snippet {
     height: auto; /* Let height adjust to content */
     # border: round gray;
+}
+
+/* Style for the active tab URL label */
+#active-tab-url-label {
+    /* Make the URL stand out */
+    color: $primary;
+    margin-left: 1;
+    height: 1; /* Ensure consistent height */
+    align: center middle; /* Vertically center the text */
 }
 
