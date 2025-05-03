@@ -33,21 +33,6 @@ Screen {
     layout: vertical;
 }
 
-/* Style for the horizontal row containing label and button */
-.label-button-row {
-    height: auto;
-    width: 100%;
-    align: left middle;
-    margin-bottom: 1;
-}
-
-/* Style for the input label */
-.input-label {
-    margin-right: 1;
-    content-align: center middle;
-    width: auto;
-}
-
 /* Style for the submit button */
 #submit-button {
     min-width: 10;

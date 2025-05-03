@@ -42,6 +42,7 @@ from selectron.cli.home_panel import ChromeStatus, HomePanel
 from selectron.cli.log_panel import LogPanel
 from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
+from selectron.util.model_config import ModelConfig
 
 logger = get_logger(__name__)
 LOG_PATH = get_app_dir() / "selectron.log"
@@ -66,16 +67,13 @@ class SelectronApp(App[None]):
     _highlighter: ChromeHighlighter
     _last_proposed_selector: Optional[str] = None
     _chrome_monitor: Optional[ChromeMonitor] = None
-    _openai_key: Optional[str] = None
-    _anthropic_key: Optional[str] = None
 
-    def __init__(self, openai_key: Optional[str] = None, anthropic_key: Optional[str] = None):
+    def __init__(self, model_config: ModelConfig):
         super().__init__()
         self.title = "Selectron"
         self.shutdown_event = asyncio.Event()
         self._highlighter = ChromeHighlighter()
-        self._openai_key = openai_key
-        self._anthropic_key = anthropic_key
+        self._model_config = model_config
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -91,10 +89,8 @@ class SelectronApp(App[None]):
                 with TabPane("⣏ Parsed Data ⣹", id="table-tab"):
                     yield DataTable(id="data-table")
         with Container(classes="input-bar"):
-            with Horizontal(classes="label-button-row"):
-                yield Static("Select element(s)", classes="input-label")
-                yield Button("Start", id="submit-button")
-            yield Input(placeholder="Enter description or let AI propose...", id="prompt-input")
+            yield Button("Start AI selection", id="submit-button")
+            yield Input(placeholder="Enter prompt (or let AI propose...)", id="prompt-input")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -121,6 +117,10 @@ class SelectronApp(App[None]):
         self._active_tab_ref = tab_ref
         await self._clear_list_view()
         await self._clear_table_view()
+        try:
+            self.query_one("#prompt-input", Input).value = ""
+        except Exception as e:
+            logger.warning(f"Could not clear prompt input on navigation: {e}")
 
     async def _handle_content_fetched(
         self,
@@ -175,24 +175,21 @@ class SelectronApp(App[None]):
         except Exception as table_err:
             logger.error(f"Failed to update data table from monitor callback: {table_err}")
 
-        # vision-based initial description proposal using screenshot
         if screenshot:
             if self._vision_worker and self._vision_worker.is_running:
                 self._vision_worker.cancel()
 
             async def _do_vision_proposal():
                 try:
-                    proposal = await propose_selection(screenshot)
+                    proposal = await propose_selection(screenshot, self._model_config)
                     if isinstance(proposal, AutoProposal):
                         desc = proposal.proposed_description
-
                         def _update_input():
                             try:
                                 prompt_input = self.query_one("#prompt-input", Input)
                                 prompt_input.value = desc
                             except Exception as e:
                                 logger.error(f"Error updating input from vision proposal: {e}")
-
                         self.app.call_later(_update_input)
                 except Exception as e:
                     logger.error(f"Error during vision proposal: {e}", exc_info=True)
@@ -208,7 +205,6 @@ class SelectronApp(App[None]):
         home_panel = self.query_one(HomePanel)
         home_panel.status = "checking"
         await asyncio.sleep(0.1)
-
         new_status: ChromeStatus = "error"
         try:
             is_running = await chrome_launcher.is_chrome_process_running()
@@ -223,15 +219,8 @@ class SelectronApp(App[None]):
         except Exception as e:
             logger.error(f"Error checking Chrome status: {e}", exc_info=True)
             new_status = "error"
-
         home_panel.status = new_status
-        logger.info(f"Chrome status check result: {new_status}")
-
-        # --- Automatically connect if ready ---
         if new_status == "ready_to_connect":
-            logger.info("Chrome is ready, automatically attempting to connect monitor...")
-            # Use call_later to avoid potential blocking/re-entrancy issues
-            # if action_connect_monitor takes time or updates status itself.
             self.app.call_later(self.action_connect_monitor)
 
     async def action_launch_chrome(self) -> None:
@@ -247,7 +236,6 @@ class SelectronApp(App[None]):
         await self.action_check_chrome_status()
 
     async def action_restart_chrome(self) -> None:
-        logger.info("Action: Restarting Chrome...")
         home_panel = self.query_one(HomePanel)
         home_panel.status = "checking"
         success = await chrome_launcher.restart_chrome_with_debug_port()
@@ -259,21 +247,17 @@ class SelectronApp(App[None]):
         await self.action_check_chrome_status()
 
     async def action_connect_monitor(self) -> None:
-        logger.info("Action: Connecting monitor...")
         home_panel = self.query_one(HomePanel)
         home_panel.status = "connecting"
         await asyncio.sleep(0.1)
-
         if not self._chrome_monitor:
             logger.error("Monitor not initialized, cannot connect.")
             home_panel.status = "error"
             return
-
         if not await chrome_launcher.is_chrome_debug_port_active():
             logger.error("Debug port became inactive before monitor could start.")
             await self.action_check_chrome_status()
             return
-
         try:
             success = await self._chrome_monitor.start_monitoring(
                 on_polling_change_callback=self._handle_polling_change,
@@ -281,7 +265,6 @@ class SelectronApp(App[None]):
                 on_content_fetched_callback=self._handle_content_fetched,
             )
             if success:
-                logger.info("Chrome Monitor started successfully.")
                 home_panel.status = "connected"
             else:
                 logger.error("Failed to start Chrome Monitor.")
@@ -480,7 +463,7 @@ class SelectronApp(App[None]):
                 logger.warning(f"Proceeding without DOM string representation for tab {tab_ref.id}")
 
             agent = Agent(
-                "openai:gpt-4.1",
+                self._model_config.selector_agent_model,
                 output_type=SelectorProposal,
                 tools=wrapped_tools,
                 system_prompt=system_prompt,
@@ -539,8 +522,3 @@ class SelectronApp(App[None]):
         except Exception as e:
             logger.error(f"Failed to query or clear data table: {e}")
 
-
-if __name__ == "__main__":
-    get_logger("__main__")
-    app = SelectronApp()
-    app.run()

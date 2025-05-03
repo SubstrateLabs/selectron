@@ -2,13 +2,13 @@ import asyncio
 import io
 from typing import Optional
 
-import openai
 from PIL import Image
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, BinaryContent
 from pydantic_ai.exceptions import ModelHTTPError
 
 from selectron.util.logger import get_logger
+from selectron.util.model_config import ModelConfig
 from selectron.util.time_execution import time_execution_async
 
 from .types import AutoProposal
@@ -40,6 +40,7 @@ class _ProposalResponse(BaseModel):
 @time_execution_async("propose_selection")
 async def propose_selection(
     screenshot: Image.Image,
+    model_config: ModelConfig,
 ) -> Optional[AutoProposal]:
     """
     Analyzes a screenshot using PydanticAI with an OpenAI vision model
@@ -55,52 +56,30 @@ async def propose_selection(
         An AutoProposal object if successful, None otherwise.
     """
     try:
-        # 1. Encode image
         buffered = io.BytesIO()
         img_to_save = screenshot
-        # Ensure image is RGB for JPEG saving
         if img_to_save.mode == "RGBA":
             img_to_save = img_to_save.convert("RGB")
         img_to_save.save(buffered, format="JPEG", quality=85)
         image_bytes = buffered.getvalue()
-
-        # 2. Prepare agent input using BinaryContent
         agent_input = [
             PROPOSAL_PROMPT,
             BinaryContent(data=image_bytes, media_type="image/jpeg"),
         ]
-
-        # 3. Instantiate PydanticAI Agent and make the call
         agent = Agent[None, _ProposalResponse](
-            # Pass model name directly
-            model=DEFAULT_MODEL,  # TODO: openai/anthropic model
-            # Specify the expected structured output type
+            model=model_config.propose_selector_model,
             output_type=_ProposalResponse,
-            # Set max_tokens if needed (might be inferred or have defaults)
-            # max_tokens=500, # <-- Uncomment if needed and supported
-            # json_mode is implied by specifying output_type
         )
-
-        # Run the agent asynchronously
         result = await agent.run(agent_input)
-
         await asyncio.sleep(0)  # Yield control briefly
-
-        # 4. Access the validated output
         proposal_response = result.output
-
         if proposal_response and proposal_response.description:
             return AutoProposal(proposed_description=proposal_response.description.strip())
         else:
-            # This case should technically be less likely now due to Pydantic validation,
-            # but good to keep as a fallback.
             logger.warning("PydanticAI returned a valid structure but with an empty description.")
             return None
 
-    except openai.APIError as api_err:  # Keep original OpenAI error handling
-        logger.error(f"OpenAI API Error during proposal: {api_err}", exc_info=True)
-        return None
-    except ModelHTTPError as pydantic_ai_err:  # Catch PydanticAI HTTP errors
+    except ModelHTTPError as pydantic_ai_err:
         logger.error(
             f"PydanticAI ModelError during proposal generation: {pydantic_ai_err}",
             exc_info=True,
