@@ -83,13 +83,6 @@ class CdpBrowserExecutor(BrowserExecutor):
     async def _send_command(self, method: str, params: Optional[dict] = None) -> Optional[dict]:
         """Ensures connection (if managed internally) and sends a CDP command."""
         active_ws = self._ws  # Get the currently active connection (provided or internal)
-
-        # Log connection status before checks
-        ws_status = "None" if active_ws is None else active_ws.state
-        logger.debug(
-            f"[_send_command] Method: {method}. Checking WebSocket status. Provided: {self._provided_ws is not None}. Internal: {self._internal_ws is not None}. Active status: {ws_status}"
-        )
-
         if active_ws is None:
             # If no connection provided, attempt internal connection
             if self._provided_ws is None:
@@ -154,10 +147,6 @@ class CdpBrowserExecutor(BrowserExecutor):
                 f"JavaScript exception: {exception_details.get('text', 'Unknown JS Error')}"
             )
         else:
-            # Log the unexpected result before returning None
-            logger.error(
-                f"CDP Runtime.evaluate received unexpected result structure for expression starting with '{expression[:100]}...'. Full result: {eval_result}. Returning None."
-            )
             return None
 
     async def capture_screenshot(

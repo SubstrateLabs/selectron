@@ -69,8 +69,6 @@ async def send_cdp_command(
                     logger.error(f"CDP command error (id={current_id}): {response['error']}")
                     return None
                 return response.get("result")
-            else:
-                logger.warning(f"Received unexpected message format: {response}")
     except asyncio.TimeoutError:
         logger.error(f"Timeout waiting for response to command id {current_id} ({method})")
         return None
@@ -243,8 +241,7 @@ async def wait_for_page_load(ws, timeout: float = 15.0) -> bool:
             # Let's assume we should try waiting for the load event anyway.
             pass  # Fall through to waiting logic
         elif eval_result.get("result", {}).get("value") == "complete":
-            logger.debug("Page already in 'complete' readyState.")
-            return True  # Already loaded
+            return True
 
         logger.debug(
             f"Page readyState is '{eval_result.get('result', {}).get('value') if eval_result else 'unknown'}', waiting for Page.loadEventFired..."

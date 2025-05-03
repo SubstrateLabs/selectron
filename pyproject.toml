@@ -25,7 +25,6 @@ dependencies = [
     "imagehash>=4.3.2",
     "lxml>=5.4.0",
     "markdownify>=1.1.0",
-    "openai>=1.76.2",
     "pillow>=10.4.0",
     "psutil>=7.0.0",
     "pydantic-ai>=0.1.9",

@@ -1,7 +1,6 @@
 import asyncio
 from typing import Any, Optional
 
-import openai
 from markdownify import markdownify
 from PIL import Image
 from pydantic_ai import Agent, Tool
@@ -23,7 +22,7 @@ from textual.widgets import (
 )
 from textual.worker import Worker
 
-from selectron.ai.propose_select import propose_select
+from selectron.ai.propose_select import propose_selection
 from selectron.ai.selector_prompt import (
     SELECTOR_PROMPT_BASE,
     SELECTOR_PROMPT_DOM_TEMPLATE,
@@ -54,10 +53,10 @@ DEFAULT_THEME = THEME_DARK
 class SelectronApp(App[None]):
     CSS_PATH = "styles.tcss"
     BINDINGS = [
-        Binding(key="ctrl+c", action="quit", description="⣏ Quit App ⣹", show=False),
-        Binding(key="ctrl+q", action="quit", description="⣏ Quit App ⣹", show=True),
-        Binding(key="ctrl+l", action="open_log_file", description="⣏ Open Logs ⣹", show=True),
+        Binding(key="ctrl+c", action="quit", description="⣏ Quit ⣹", show=False),
+        Binding(key="ctrl+q", action="quit", description="⣏ Quit ⣹", show=True),
         Binding(key="ctrl+t", action="toggle_dark", description="⣏ Light/Dark Theme ⣹", show=True),
+        Binding(key="ctrl+l", action="open_log_file", description="⣏ .log file ⣹", show=True),
     ]
     shutdown_event: asyncio.Event
     _active_tab_ref: Optional[TabReference] = None
@@ -65,14 +64,18 @@ class SelectronApp(App[None]):
     _agent_worker: Optional[Worker[None]] = None
     _vision_worker: Optional[Worker[None]] = None
     _highlighter: ChromeHighlighter
-    _openai_client: Optional[openai.AsyncOpenAI] = None
     _last_proposed_selector: Optional[str] = None
     _chrome_monitor: Optional[ChromeMonitor] = None
+    _openai_key: Optional[str] = None
+    _anthropic_key: Optional[str] = None
 
-    def __init__(self):
+    def __init__(self, openai_key: Optional[str] = None, anthropic_key: Optional[str] = None):
         super().__init__()
+        self.title = "Selectron"
         self.shutdown_event = asyncio.Event()
         self._highlighter = ChromeHighlighter()
+        self._openai_key = openai_key
+        self._anthropic_key = anthropic_key
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -87,15 +90,14 @@ class SelectronApp(App[None]):
                     yield ListView(id="markdown-list")
                 with TabPane("⣏ Parsed Data ⣹", id="table-tab"):
                     yield DataTable(id="data-table")
-        with Horizontal(classes="input-bar"):
+        with Container(classes="input-bar"):
+            with Horizontal(classes="label-button-row"):
+                yield Static("Select element(s)", classes="input-label")
+                yield Button("Start", id="submit-button")
             yield Input(placeholder="Enter description or let AI propose...", id="prompt-input")
         yield Footer()
 
     async def on_mount(self) -> None:
-        try:
-            self._openai_client = openai.AsyncOpenAI()
-        except Exception as e:
-            logger.error(f"Failed to initialize OpenAI client: {e}", exc_info=True)
         try:
             table = self.query_one(DataTable)
             table.cursor_type = "row"
@@ -174,17 +176,13 @@ class SelectronApp(App[None]):
             logger.error(f"Failed to update data table from monitor callback: {table_err}")
 
         # vision-based initial description proposal using screenshot
-        if screenshot and self._openai_client:
-            # ensure client is not None for type checking
-            assert self._openai_client is not None
-            client = self._openai_client
-
+        if screenshot:
             if self._vision_worker and self._vision_worker.is_running:
                 self._vision_worker.cancel()
 
             async def _do_vision_proposal():
                 try:
-                    proposal = await propose_select(client, screenshot)
+                    proposal = await propose_selection(screenshot)
                     if isinstance(proposal, AutoProposal):
                         desc = proposal.proposed_description
 
@@ -300,6 +298,9 @@ class SelectronApp(App[None]):
             await self.action_launch_chrome()
         elif button_id == "restart-chrome":
             await self.action_restart_chrome()
+        elif button_id == "submit-button":
+            input_widget = self.query_one("#prompt-input", Input)
+            await self.on_input_submitted(Input.Submitted(input_widget, input_widget.value))
         else:
             logger.warning(f"Unhandled button press: {event.button.id}")
 

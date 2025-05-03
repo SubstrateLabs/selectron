@@ -1,2 +1,3 @@
 - proposal is not on active tab?
 - generate python to parse
+- anthropic/openai default models
