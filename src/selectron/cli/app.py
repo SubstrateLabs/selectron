@@ -23,6 +23,7 @@ from textual.widgets import (
 )
 from textual.worker import Worker
 
+from selectron.ai.propose_select import propose_select
 from selectron.ai.selector_prompt import (
     SELECTOR_PROMPT_BASE,
     SELECTOR_PROMPT_DOM_TEMPLATE,
@@ -31,9 +32,9 @@ from selectron.ai.selector_tools import (
     SelectorTools,
 )
 from selectron.ai.types import (
+    AutoProposal,
     SelectorProposal,
 )
-from selectron.ai.types import AutoProposal
 from selectron.chrome import chrome_launcher
 from selectron.chrome.chrome_highlighter import ChromeHighlighter
 from selectron.chrome.chrome_monitor import ChromeMonitor, TabChangeEvent
@@ -62,6 +63,7 @@ class SelectronApp(App[None]):
     _active_tab_ref: Optional[TabReference] = None
     _active_tab_dom_string: Optional[str] = None
     _agent_worker: Optional[Worker[None]] = None
+    _vision_worker: Optional[Worker[None]] = None
     _highlighter: ChromeHighlighter
     _openai_client: Optional[openai.AsyncOpenAI] = None
     _last_proposed_selector: Optional[str] = None
@@ -171,14 +173,35 @@ class SelectronApp(App[None]):
         except Exception as table_err:
             logger.error(f"Failed to update data table from monitor callback: {table_err}")
 
-        if self._agent_worker and self._agent_worker.is_running:
-            logger.info("Cancelling previous agent worker before auto-proposal.")
-            self._agent_worker.cancel()
-        self._agent_worker = self.run_worker(
-            self._run_auto_proposal_agent(tab_ref, self._active_tab_dom_string), # Use updated dom_string
-            exclusive=True,
-            group="agent_worker",
-        )
+        # vision-based initial description proposal using screenshot
+        if screenshot and self._openai_client:
+            # ensure client is not None for type checking
+            assert self._openai_client is not None
+            client = self._openai_client
+
+            if self._vision_worker and self._vision_worker.is_running:
+                self._vision_worker.cancel()
+
+            async def _do_vision_proposal():
+                try:
+                    proposal = await propose_select(client, screenshot)
+                    if isinstance(proposal, AutoProposal):
+                        desc = proposal.proposed_description
+
+                        def _update_input():
+                            try:
+                                prompt_input = self.query_one("#prompt-input", Input)
+                                prompt_input.value = desc
+                            except Exception as e:
+                                logger.error(f"Error updating input from vision proposal: {e}")
+
+                        self.app.call_later(_update_input)
+                except Exception as e:
+                    logger.error(f"Error during vision proposal: {e}", exc_info=True)
+
+            self._vision_worker = self.run_worker(
+                _do_vision_proposal(), exclusive=True, group="vision_proposal"
+            )
 
     async def _handle_rehighlight(self) -> None:
         await self.trigger_rehighlight()
@@ -202,14 +225,14 @@ class SelectronApp(App[None]):
         except Exception as e:
             logger.error(f"Error checking Chrome status: {e}", exc_info=True)
             new_status = "error"
-        
+
         home_panel.status = new_status
         logger.info(f"Chrome status check result: {new_status}")
 
         # --- Automatically connect if ready ---
         if new_status == "ready_to_connect":
             logger.info("Chrome is ready, automatically attempting to connect monitor...")
-            # Use call_later to avoid potential blocking/re-entrancy issues 
+            # Use call_later to avoid potential blocking/re-entrancy issues
             # if action_connect_monitor takes time or updates status itself.
             self.app.call_later(self.action_connect_monitor)
 
@@ -285,7 +308,6 @@ class SelectronApp(App[None]):
             target_description = event.value.strip()
             if not target_description:
                 return
-            logger.debug(f"Submit Check: active_tab_ref={bool(self._active_tab_ref)}, mon_exists={bool(self._chrome_monitor)}, mon_monitoring={self._chrome_monitor._monitoring if self._chrome_monitor else 'N/A'}")
             if (
                 not self._active_tab_ref
                 or not self._chrome_monitor
@@ -295,8 +317,7 @@ class SelectronApp(App[None]):
                     "Submit attempted but monitor not connected or no active tab identified."
                 )
                 return
-            logger.info(f"Input submitted. Target: '{target_description}'")
-            event.input.value = ""  # Clear the input field
+            event.input.value = ""
             if self._agent_worker and self._agent_worker.is_running:
                 logger.info("Cancelling previous agent worker.")
                 self._agent_worker.cancel()
@@ -516,69 +537,6 @@ class SelectronApp(App[None]):
             table.clear()
         except Exception as e:
             logger.error(f"Failed to query or clear data table: {e}")
-
-    async def _run_auto_proposal_agent(self, tab_ref: TabReference, dom_string: Optional[str]) -> None:
-        """Runs an agent to propose a target description based on page content."""
-        if not self._openai_client:
-            logger.error("Cannot run auto-proposal: OpenAI client not initialized.")
-            return
-        if not tab_ref.html:
-            logger.warning(f"Cannot run auto-proposal for tab {tab_ref.id}: HTML content missing.")
-            return
-
-        logger.info(f"Running AutoProposalAgent for tab {tab_ref.id}")
-
-        try:
-            # Simplified context for proposal
-            context_parts = [
-                f"URL: {tab_ref.url}",
-                f"Title: {tab_ref.title}",
-                "HTML Snippet (first 5000 chars):\n" + tab_ref.html[:5000],
-            ]
-            if dom_string:
-                context_parts.append("\n\nSimplified DOM Structure (first 3000 chars):\n" + dom_string[:3000])
-            
-            context = "\n".join(context_parts)
-
-            system_prompt = (
-                "You are an expert web analyst. Analyze the provided page context (URL, Title, HTML, DOM). "
-                "Your task is to identify the single most likely element a user would want to select or extract data from. "
-                "Propose a CONCISE natural language description for this element.\n"
-                "Examples: 'article title', 'main content body', 'login button', 'product price', 'first news headline'.\n"
-                "CRITICAL: Output ONLY the JSON object conforming to the AutoProposal schema."
-            )
-            
-            proposal_agent = Agent(
-                "openai:gpt-4.1",
-                output_type=AutoProposal, 
-                # No tools needed for this agent
-                system_prompt=system_prompt,
-            )
-
-            logger.debug("Starting auto-proposal agent run...")
-            agent_run_result = await proposal_agent.run(context)
-
-            if isinstance(agent_run_result.output, AutoProposal):
-                proposal = agent_run_result.output
-                logger.info(f"Auto-proposal finished. Proposed description: '{proposal.proposed_description}'")
-                
-                # Update the input field (use call_later for thread safety)
-                def update_input():
-                    try:
-                        prompt_input = self.query_one("#prompt-input", Input)
-                        prompt_input.value = proposal.proposed_description
-                    except Exception as e:
-                        logger.error(f"Error updating input field from auto-proposal: {e}")
-                
-                self.app.call_later(update_input)
-
-            else:
-                logger.error(
-                    f"Auto-proposal agent returned unexpected output type: {type(agent_run_result.output)} / {agent_run_result.output}"
-                )
-
-        except Exception as e:
-            logger.error(f"Error running AutoProposalAgent for tab {tab_ref.id}: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

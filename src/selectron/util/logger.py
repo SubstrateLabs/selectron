@@ -2,7 +2,6 @@ import logging
 
 from selectron.util.get_app_dir import get_app_dir
 
-
 _initialized = False
 LOG_FILE = get_app_dir() / "selectron.log"
 
@@ -27,7 +26,7 @@ def get_logger(name: str) -> logging.Logger:
             LOG_FILE, mode="w", encoding="utf-8"
         )  # Use write mode to clear on start
         _file_handler.setFormatter(log_formatter)
-        _file_handler.setLevel(logging.DEBUG) 
+        _file_handler.setLevel(logging.DEBUG)
         root_logger.addHandler(_file_handler)
 
         # Set library levels

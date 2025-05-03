@@ -78,8 +78,6 @@ class AgentResult(BaseModel):
 
 
 class SelectorProposal(BaseModel):
-    """Simplified result containing only the proposed selector and reasoning."""
-
     proposed_selector: str = Field(...)
     reasoning: str = Field(...)
     target_cardinality: Literal["unique", "multiple"] = Field(
@@ -88,15 +86,7 @@ class SelectorProposal(BaseModel):
     )
 
 
-class ProposalResult(BaseModel):
-    """Result of the UI proposal generation."""
-
-    description: Optional[str] = None
-    error_message: Optional[str] = None
-
-
-# --- Selector Agent Types ---
-
 class AutoProposal(BaseModel):
-    "Represents a proposed natural language description for a likely target element."
-    proposed_description: str = Field(description="A concise natural language description of the likely target element (e.g., 'main article title', 'login button').")
+    proposed_description: str = Field(
+        description="A concise natural language description of the target element(s)"
+    )

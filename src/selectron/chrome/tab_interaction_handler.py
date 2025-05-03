@@ -262,6 +262,23 @@ class TabInteractionHandler:
         # Ensure the task reference is cleared once it completes
         self._fetch_task.add_done_callback(lambda _task: setattr(self, "_fetch_task", None))
 
+    async def trigger_immediate_fetch(self):
+        """Triggers an immediate fetch of tab content, bypassing the debounce timer.
+        Skips if a fetch is already in progress.
+        """
+        # Prevent concurrent fetches for the same tab
+        if self._fetch_task and not self._fetch_task.done():
+            logger.debug(
+                f"Fetch already in progress for tab {self.tab_id}, skipping immediate trigger."
+            )
+            return
+
+        logger.debug(f"Triggering immediate fetch for tab {self.tab_id}")
+        # Run the fetch in the background
+        self._fetch_task = asyncio.create_task(self._fetch_and_process_tab_content())
+        # Ensure the task reference is cleared once it completes
+        self._fetch_task.add_done_callback(lambda _task: setattr(self, "_fetch_task", None))
+
     async def _fetch_and_process_tab_content(self):
         """Fetches HTML, screenshot, and DOM for the tab and calls the content_fetched_callback."""
         html_content: Optional[str] = None

@@ -1,12 +1,10 @@
 import asyncio
-from typing import Awaitable, Callable, Dict, Optional
+from typing import Awaitable, Callable, Optional
 
 import openai
 import websockets
 from PIL import Image
 
-from selectron.ai.propose_select import propose_select
-from selectron.ai.types import ProposalResult
 from selectron.chrome.cdp_executor import CdpBrowserExecutor
 from selectron.chrome.chrome_cdp import (
     ChromeTab,
@@ -28,7 +26,6 @@ logger = get_logger(__name__)
 # Define callback types for clarity
 ActiveTabCallback = Callable[[Optional[TabReference], Optional[str]], Awaitable[None]]
 PageContentCallback = Callable[[str], Awaitable[None]]
-ProposalCallback = Callable[[str], Awaitable[None]]
 
 
 class ChromeTabManager:
@@ -37,27 +34,22 @@ class ChromeTabManager:
     monitor: Optional[ChromeMonitor] = None
     shutdown_event: asyncio.Event
     _active_tab_ref: Optional[TabReference] = None
-    _proposal_tasks: Dict[str, asyncio.Task] = {}
     _openai_client: Optional[openai.AsyncOpenAI] = None
 
     # Callbacks provided by the UI layer
     _on_active_tab_updated: ActiveTabCallback
     _on_page_content_ready: PageContentCallback
-    _on_proposal_ready: ProposalCallback
 
     def __init__(
         self,
         openai_client: Optional[openai.AsyncOpenAI],
         on_active_tab_updated: ActiveTabCallback,
         on_page_content_ready: PageContentCallback,
-        on_proposal_ready: ProposalCallback,
     ):
         self.shutdown_event = asyncio.Event()
         self._openai_client = openai_client
         self._on_active_tab_updated = on_active_tab_updated
         self._on_page_content_ready = on_page_content_ready
-        self._on_proposal_ready = on_proposal_ready
-        self._proposal_tasks = {}
         logger.info("ChromeTabManager initialized.")
 
     async def start_monitoring_loop(self) -> bool:
@@ -130,8 +122,6 @@ class ChromeTabManager:
         """Signals the monitoring loop to stop and cleans up."""
         logger.info("Stopping Chrome monitoring...")
         self.shutdown_event.set()
-        # Cancel any running proposal tasks first
-        await self._cancel_proposal_tasks()
 
         # Stop the underlying monitor
         if self.monitor:
@@ -152,24 +142,6 @@ class ChromeTabManager:
                 old_ref.id == self._active_tab_ref.id for _, old_ref in event.navigated_tabs
             ):
                 active_tab_closed_or_navigated = True
-
-        # --- Cancel Stale Proposal Tasks --- #
-        # Use internal _proposal_tasks dict
-        tabs_navigated_away_from_or_closed = list(event.closed_tabs) + [
-            old_ref for _, old_ref in event.navigated_tabs
-        ]
-        for ref in tabs_navigated_away_from_or_closed:
-            if ref.id in self._proposal_tasks:
-                task_to_cancel = self._proposal_tasks.pop(ref.id, None)
-                if task_to_cancel and not task_to_cancel.done():
-                    logger.info(
-                        f"Polling detected navigation/closure for tab {ref.id}. Cancelling stale proposal task."
-                    )
-                    task_to_cancel.cancel()
-                elif task_to_cancel:
-                    logger.debug(
-                        f"Proposal task for navigated/closed tab {ref.id} was already finished."
-                    )
 
         # If the active tab was affected, clear the internal reference.
         # The UI layer will handle UI changes (like clearing highlights) via the callback.
@@ -268,8 +240,7 @@ class ChromeTabManager:
             )
 
     async def _process_new_tab(self, tab: ChromeTab):
-        """Fetches HTML, metadata, screenshot for a NEW or NAVIGATED tab."""
-        html = screenshot_pil_image = ws = dom_string = None
+        html = ws = dom_string = None
         final_url = final_title = None
         if not tab.webSocketDebuggerUrl:
             logger.warning(f"Tab {tab.id} missing ws url, cannot process.")
@@ -303,9 +274,7 @@ class ChromeTabManager:
                         logger.exception(f"Error fetching DOM for {final_url}: {dom_e}")
                 # Capture screenshot regardless of DOM fetch success if URL/title are okay
                 if final_title:  # Check title as proxy for basic page accessibility
-                    screenshot_pil_image = await capture_tab_screenshot(
-                        ws_url=ws_url, ws_connection=ws
-                    )
+                    await capture_tab_screenshot(ws_url=ws_url, ws_connection=ws)
             else:
                 logger.warning(f"Could not get final URL for {tab.id}")
         except Exception as e:
@@ -354,118 +323,3 @@ class ChromeTabManager:
                 logger.error(
                     f"Error invoking `_on_page_content_ready` callback for tab {tab.id}: {page_cb_err}"
                 )
-
-        # --- Trigger Proposal Generation Task --- #
-        # Check if prerequisites are met (client, screenshot)
-        if self._openai_client and screenshot_pil_image and final_url:
-            # Cancel previous task for the SAME tab ID if it exists
-            if tab.id in self._proposal_tasks:
-                existing_task = self._proposal_tasks.pop(tab.id, None)
-                if existing_task and not existing_task.done():
-                    logger.warning(
-                        f"Cancelling existing proposal task for tab {tab.id} due to new processing request."
-                    )
-                    existing_task.cancel()
-
-            # Create and store the new proposal task
-            proposal_task = asyncio.create_task(
-                self._run_proposal_generation(
-                    tab_id=tab.id, final_url=final_url, screenshot_pil_image=screenshot_pil_image
-                )
-            )
-            self._proposal_tasks[tab.id] = proposal_task
-
-            # Add callback to remove task from dict upon completion/cancellation
-            def _proposal_done_callback(task: asyncio.Task, tab_id_cb: str):
-                try:
-                    if task.cancelled():
-                        logger.debug(f"Proposal task for tab {tab_id_cb} was cancelled.")
-                        return
-                    exc = task.exception()
-                    if exc:
-                        # Error logging already happens inside _run_proposal_generation
-                        # Just log that the task failed here.
-                        logger.error(f"Proposal task for tab {tab_id_cb} failed.")
-                finally:
-                    removed_task = self._proposal_tasks.pop(tab_id_cb, None)
-                    if removed_task:
-                        logger.debug(f"Removed proposal task for tab {tab_id_cb} from tracking.")
-
-            proposal_task.add_done_callback(lambda t: _proposal_done_callback(t, tab.id))
-
-        else:
-            # Log why proposal generation is skipped
-            missing_for_proposal = []
-            if not self._openai_client:
-                missing_for_proposal.append("OpenAI client")
-            if not screenshot_pil_image:
-                missing_for_proposal.append("Screenshot")
-            if not final_url:
-                missing_for_proposal.append("Final URL")
-            if missing_for_proposal:
-                logger.warning(
-                    f"Skipping proposal generation for tab {tab.id} due to missing: {', '.join(missing_for_proposal)}"
-                )
-
-    async def _run_proposal_generation(
-        self, tab_id: str, final_url: Optional[str], screenshot_pil_image: Image.Image
-    ):
-        """Handles the OpenAI call for proposal generation."""
-        # Check if OpenAI client is configured
-        if not self._openai_client:
-            logger.error("OpenAI client not available for proposal generation.")
-            return
-
-        logger.info(f"Starting proposal generation task for tab {tab_id} ({final_url})")
-        try:
-            # Call the proposal function (ensure import exists)
-            proposal_result: ProposalResult = await propose_select(
-                client=self._openai_client,
-                screenshot=screenshot_pil_image,
-            )
-
-            if proposal_result.description:
-                proposed_description = proposal_result.description
-                logger.info(f"Proposal found (Tab: {tab_id}). Desc: '{proposed_description}'")
-                # Use the callback to inform the UI layer
-                try:
-                    # The UI layer will decide if the proposal is still relevant
-                    await self._on_proposal_ready(proposed_description)
-                    logger.debug(f"Callback `_on_proposal_ready` invoked for tab {tab_id}.")
-                except Exception as cb_err:
-                    logger.error(
-                        f"Error invoking `_on_proposal_ready` callback: {cb_err}", exc_info=True
-                    )
-
-            elif proposal_result.error_message:
-                logger.error(
-                    f"Proposal generation failed for tab {tab_id}. Error: {proposal_result.error_message}"
-                )
-            else:
-                # Handle unexpected empty result without error message
-                logger.error(
-                    f"Proposal generation for tab {tab_id} returned unexpected empty result."
-                )
-
-        except asyncio.CancelledError:
-            logger.debug(f"Proposal generation task for tab {tab_id} cancelled (expected).")
-            # Re-raise cancellation to allow proper handling by task management
-            raise
-        except Exception as e:
-            # Catch any other unexpected errors during the proposal call or processing
-            logger.error(
-                f"Unexpected error during proposal generation task for tab {tab_id}: {e}",
-                exc_info=True,
-            )
-
-    # --- Helper for cancelling tasks ---
-    async def _cancel_proposal_tasks(self):
-        """Cancels any outstanding proposal generation tasks."""
-        if self._proposal_tasks:
-            logger.info(f"Cancelling {len(self._proposal_tasks)} outstanding proposal tasks...")
-            tasks_to_cancel = list(self._proposal_tasks.values())
-            self._proposal_tasks.clear()
-            for task in tasks_to_cancel:
-                if not task.done():
-                    task.cancel()
-            await asyncio.sleep(0.1)  # Allow cancellations to propagate

@@ -125,6 +125,10 @@ class ChromeMonitor:
                 )
                 new_tab_refs.add(tab_ref)
                 await self._start_interaction_monitor(tab)
+                # Trigger initial fetch after starting monitor
+                handler = self._interaction_handlers.get(tab.id)
+                if handler:
+                    asyncio.create_task(handler.trigger_immediate_fetch())
 
             self.previous_tab_refs = new_tab_refs
 
@@ -317,6 +321,10 @@ class ChromeMonitor:
                         html=None,
                     )
                 )
+                # Trigger initial fetch for new tab
+                handler = self._interaction_handlers.get(tab.id)
+                if handler:
+                    asyncio.create_task(handler.trigger_immediate_fetch())
 
         # Process Removed Tabs
         closed_ids = set()
@@ -348,6 +356,10 @@ class ChromeMonitor:
                         html=None,  # Mark HTML as stale/None
                     )
                 )
+                # Trigger initial fetch for navigated tab
+                handler = self._interaction_handlers.get(new_tab.id)
+                if handler:
+                    asyncio.create_task(handler.trigger_immediate_fetch())
 
             # 3. Start interaction monitor for new context (maybe add small delay?)
             # await asyncio.sleep(0.1) # Optional small delay

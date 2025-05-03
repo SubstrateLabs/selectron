@@ -1,4 +1,2 @@
-- refactoring
-  - extract pieces of selector agent
+- proposal is not on active tab?
 - generate python to parse
-- prompt to connect (chrome_launcher)

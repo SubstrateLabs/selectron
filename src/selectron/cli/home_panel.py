@@ -47,6 +47,7 @@ class HomePanel(Container):
 
     def update_ui(self, status: ChromeStatus) -> None:
         container = self.query_one("#home-content-container", Vertical)
+
         async def clear_and_mount():
             await container.remove_children()
             widgets_to_mount = []
@@ -78,9 +79,7 @@ class HomePanel(Container):
                 ]
             elif status == "error":
                 widgets_to_mount = [
-                    Static(
-                        "Error connecting or checking Chrome status.", classes="error-message"
-                    ),
+                    Static("Error connecting or checking Chrome status.", classes="error-message"),
                     Button("Retry Status Check", id="check-chrome-status", variant="error"),
                 ]
 

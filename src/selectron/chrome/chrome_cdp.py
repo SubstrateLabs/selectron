@@ -69,10 +69,6 @@ async def send_cdp_command(
                     logger.error(f"CDP command error (id={current_id}): {response['error']}")
                     return None
                 return response.get("result")
-            elif "method" in response:
-                response_method = response.get('method')
-                if response_method not in ["Runtime.executionContextCreated", "Runtime.consoleAPICalled"]:
-                    logger.debug(f"Ignoring event/message: {response_method}")
             else:
                 logger.warning(f"Received unexpected message format: {response}")
     except asyncio.TimeoutError:
@@ -713,8 +709,8 @@ async def monitor_user_interactions(ws_url: str) -> AsyncGenerator[Dict[str, Any
                     close_timeout=5.0,
                     max_size=20 * 1024 * 1024,
                 )
-                ws = connection 
-                break  
+                ws = connection
+                break
             except (
                 OSError,
                 websockets.exceptions.InvalidMessage,

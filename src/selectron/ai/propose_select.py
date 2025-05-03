@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import json
+from typing import Optional
 
 import openai
 from openai.types.chat import ChatCompletionUserMessageParam
@@ -9,7 +10,7 @@ from PIL import Image
 
 from selectron.util.logger import get_logger
 
-from .types import ProposalResult
+from .types import AutoProposal
 
 DEFAULT_MODEL = "gpt-4.1-nano"
 
@@ -33,7 +34,7 @@ async def propose_select(
     client: openai.AsyncOpenAI,
     screenshot: Image.Image,
     model: str = DEFAULT_MODEL,
-) -> ProposalResult:
+) -> Optional[AutoProposal]:
     """
     Analyzes a screenshot using an OpenAI vision model to propose a UI description
     for potentially recurring elements.
@@ -45,7 +46,7 @@ async def propose_select(
         tab_id_for_logging: An optional identifier for logging purposes.
 
     Returns:
-        A ProposalResult object indicating success/failure and the description.
+        An AutoProposal object if successful, None otherwise.
     """
     try:
         # 1. Encode image
@@ -86,14 +87,14 @@ async def propose_select(
         response_content = completion.choices[0].message.content
         if not response_content:
             logger.warning("Received empty response content from proposal model.")
-            return ProposalResult(error_message="Empty response from model")
+            return None
 
         try:
             proposal_data = json.loads(response_content)
             description = proposal_data.get("description")
 
             if isinstance(description, str) and description.strip():
-                return ProposalResult(description=description.strip())
+                return AutoProposal(proposed_description=description.strip())
             else:
                 # Handle cases where 'description' is missing, not a string, or empty
                 err_msg = "Model response missing valid 'description' field."
@@ -102,16 +103,16 @@ async def propose_select(
                 else:
                     err_msg += " (Field missing)"
                 logger.warning(err_msg)
-                return ProposalResult(error_message=err_msg)
+                return None
 
         except json.JSONDecodeError as json_err:
             logger.error(
                 f"Failed to parse JSON response: {json_err}\nResponse: {response_content}",
             )
-            return ProposalResult(error_message=f"JSON decode error: {json_err}")
+            return None
     except openai.APIError as api_err:
         logger.error(f"OpenAI API Error during proposal: {api_err}", exc_info=True)
-        return ProposalResult(error_message=f"OpenAI API Error: {api_err}")
+        return None
     except Exception as e:
         logger.error(f"Unexpected error during proposal generation: {e}", exc_info=True)
-        return ProposalResult(error_message=f"Unexpected error: {e}")
+        return None
