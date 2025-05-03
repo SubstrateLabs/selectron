@@ -28,22 +28,52 @@ class SelectorTools:
         self.base_url = base_url
         logger.info(f"HTML structure parsed for SelectorTools. Base URL: {self.base_url}")
 
+    def _convert_html_to_markdown(self, element: Tag) -> str:
+        """Converts a BeautifulSoup Tag element to a Markdown string."""
+        # Basic implementation using markdownify, assumes installed
+        try:
+            import markdownify
+            # Convert the specific element, not just its inner content
+            # Use default options, maybe configure later if needed (e.g., heading style)
+            md = markdownify.markdownify(str(element), heading_style="ATX")
+            return md.strip()
+        except ImportError:
+            logger.warning("markdownify library not found. Falling back to plain text for markdown.")
+            return element.get_text(strip=True)
+        except Exception as e:
+            logger.error(f"Error during markdown conversion: {e}")
+            return f"Error converting to markdown: {e}"
+
     async def evaluate_selector(
         self,
         selector: str,
         target_text_to_check: str,
         anchor_selector: Optional[str] = None,
         max_html_length: Optional[int] = None,
+        max_matches_to_detail: int = 7,
     ) -> SelectorEvaluationResult:
-        """Evaluates selector (optionally within anchor). Checks if target_text_to_check is found. Returns count, details, text found flag, errors. Checks element size if max_html_length is provided."""
-        log_prefix = (
-            f"Evaluate Selector ('{selector}'"
-            + (f" within '{anchor_selector}'" if anchor_selector else "")
-            + f" for text '{target_text_to_check}')"
-        )
+        """Evaluates a CSS selector, checks for text, validates size, and provides rich detail on multiple matches.
+
+        Args:
+            selector: The CSS selector to evaluate.
+            target_text_to_check: Text content to check for within the matched elements.
+            anchor_selector: Optional selector to narrow the search scope.
+            max_html_length: Optional max length for single element HTML validation.
+            max_matches_to_detail: Max number of matches to include detailed info for.
+
+        Returns:
+            SelectorEvaluationResult with details.
+        """
+        log_prefix = f"Evaluate Selector ('{selector}'" + (
+            f" for text '{target_text_to_check[:20]}...'" if target_text_to_check else ""
+        ) + (f" within '{anchor_selector}'" if anchor_selector else "") + ")"
         logger.info(f"{log_prefix}: Starting.")
 
         base_element: BeautifulSoup | Tag | None = self.soup
+        size_validation_error_msg: Optional[str] = None
+        text_found_flag = False
+
+        # --- Handle Anchor Selector --- #
         if anchor_selector:
             try:
                 possible_anchors = self.soup.select(anchor_selector)
@@ -62,62 +92,51 @@ class SelectorTools:
                 )
 
             if len(possible_anchors) == 0:
-                error_msg = (
-                    f"Anchor Error: Anchor selector '{anchor_selector}' did not find any element."
-                )
+                error_msg = f"Anchor Error: Anchor selector '{anchor_selector}' did not find any element."
                 logger.warning(f"{log_prefix}: {error_msg}")
                 return SelectorEvaluationResult(
-                    selector_used=selector,
-                    anchor_selector_used=anchor_selector,
-                    element_count=0,
-                    error=error_msg,
-                    matches=[],
-                    target_text_found_in_any_match=False,
-                    size_validation_error=None,
-                    feedback_message=None,
+                    selector_used=selector, anchor_selector_used=anchor_selector, element_count=0, error=error_msg, matches=[], target_text_found_in_any_match=False, size_validation_error=None, feedback_message=None
                 )
             if len(possible_anchors) > 1:
                 error_msg = f"Anchor Error: Anchor selector '{anchor_selector}' is not unique (found {len(possible_anchors)})."
                 logger.warning(f"{log_prefix}: {error_msg}")
                 return SelectorEvaluationResult(
-                    selector_used=selector,
-                    anchor_selector_used=anchor_selector,
-                    element_count=0,
-                    error=error_msg,
-                    matches=[],
-                    target_text_found_in_any_match=False,
-                    size_validation_error=None,
-                    feedback_message=None,
+                    selector_used=selector, anchor_selector_used=anchor_selector, element_count=0, error=error_msg, matches=[], target_text_found_in_any_match=False, size_validation_error=None, feedback_message=None
                 )
             base_element = possible_anchors[0]
             logger.debug(f"{log_prefix}: Anchor found successfully.")
 
-        assert base_element is not None, "Base element for selection cannot be None"
+        assert base_element is not None, "Base element for evaluate_selector cannot be None"
 
-        max_matches_to_detail = 5
-        max_text_len = 150
-        text_found_flag = False
-        size_validation_error_msg: Optional[str] = None
         try:
             elements = base_element.select(selector)
             count = len(elements)
             match_details: list[MatchDetail] = []
 
+            # --- Populate Match Details (Up to max_matches_to_detail) --- #
             for i, el in enumerate(elements):
                 if not isinstance(el, Tag):
-                    continue  # Skip non-Tag elements like NavigableString
-                text = el.get_text(strip=True)
-                if target_text_to_check and target_text_to_check in text:
+                    continue # Skip non-Tag elements
+
+                # Check for target text within the element's raw text
+                if target_text_to_check and target_text_to_check in el.get_text(strip=True):
                     text_found_flag = True
-                if len(text) > max_text_len:
-                    text = text[:max_text_len] + "..."
+                
+                # Get details only for the first few matches
                 if i < max_matches_to_detail:
                     attrs = {
                         k: " ".join(v) if isinstance(v, list) else v for k, v in el.attrs.items()
                     }
+                    # Extract full markdown content using the helper
+                    markdown_content = self._convert_html_to_markdown(el) 
                     match_details.append(
-                        MatchDetail(tag_name=el.name, text_content=text, attributes=attrs)
+                        MatchDetail(
+                            tag_name=el.name, 
+                            text_content=markdown_content, # Use full markdown
+                            attributes=attrs
+                        )
                     )
+            # --- End Populate Match Details --- #
 
             # --- Perform size validation if unique element found --- #
             if count == 1 and max_html_length is not None and isinstance(elements[0], Tag):
@@ -141,52 +160,19 @@ class SelectorTools:
             # --- Generate feedback if selector is not unique --- #
             feedback = None
             if count > 1:
-                feedback_parts = [f"Selector matched {count} elements."]
-                # Analyze differences in the detailed matches
-                texts = {m.text_content for m in match_details if m.text_content}
-                if len(texts) > 1:
-                    feedback_parts.append(
-                        f"Differing text includes: {list(texts)[:3]}..."
-                    )  # Show first 3
-
-                all_attrs = set()
-                common_attrs = {**match_details[0].attributes} if match_details else {}
-                for m in match_details:
-                    all_attrs.update(m.attributes.keys())
-                    common_attrs.update(m.attributes)
-
-                # Simple diff: which attributes are sometimes missing?
-                missing_sometimes = set()
-                for attr_key in common_attrs.keys():
-                    if not all(attr_key in m.attributes for m in match_details):
-                        missing_sometimes.add(attr_key)
-                if missing_sometimes:
-                    feedback_parts.append(f"Some lack attributes like: {list(missing_sometimes)}.")
-
-                # Diff values for common specific attrs
-                for key in ["id", "class", "href", "title", "aria-label"]:
-                    if key in common_attrs:
-                        values = {
-                            m.attributes.get(key) for m in match_details if m.attributes.get(key)
-                        }
-                        if len(values) > 1:
-                            feedback_parts.append(
-                                f"Differing '{key}' values include: {list(values)[:3]}..."
-                            )
-
-                feedback = " ".join(feedback_parts)
-                logger.info(f"{log_prefix}: Generated feedback for non-unique selector: {feedback}")
+                feedback = f"Selector matched {count} elements. Review the 'matches' list for details (tag, attributes, markdown content) of the first {len(match_details)} matches to help refine your selector."
+                logger.info(f"{log_prefix}: Generated feedback for non-unique selector (details in 'matches' list).")
             # --- End feedback generation --- #
 
             result = SelectorEvaluationResult(
                 selector_used=selector,
                 anchor_selector_used=anchor_selector,
                 element_count=count,
-                matches=match_details,
+                matches=match_details, # Now contains richer details
                 target_text_found_in_any_match=text_found_flag,
                 error=None,
                 size_validation_error=size_validation_error_msg,
-                feedback_message=feedback,  # Assign feedback
+                feedback_message=feedback, # Updated feedback message
             )
             logger.info(
                 f"{log_prefix}: Result: Count={result.element_count}, TextFound={result.target_text_found_in_any_match}, MatchesDetailed={len(result.matches)}"
@@ -194,8 +180,10 @@ class SelectorTools:
             # Slightly more detailed log for the first match if present
             if result.matches:
                 first = result.matches[0]
+                # Log truncated markdown for brevity in this specific log line
+                log_md_preview = (first.text_content[:100] + "...") if first.text_content and len(first.text_content) > 100 else first.text_content
                 logger.debug(
-                    f"{log_prefix}: First Match: <{first.tag_name}> attrs={first.attributes} text='{first.text_content}'"
+                    f"{log_prefix}: First Match: <{first.tag_name}> attrs={first.attributes} markdown='{log_md_preview}'"
                 )
             return result
         except Exception as e:
@@ -224,8 +212,6 @@ class SelectorTools:
             + (f" within '{anchor_selector}'" if anchor_selector else "")
             + ")"
         )
-        logger.info(f"{log_prefix}: Starting.")
-
         base_element: BeautifulSoup | Tag | None = self.soup
         parent_element: Optional[Tag] = None
         if anchor_selector:
@@ -326,8 +312,6 @@ class SelectorTools:
             + (f" within '{anchor_selector}'" if anchor_selector else "")
             + ")"
         )
-        logger.info(f"{log_prefix}: Starting.")
-
         base_element: BeautifulSoup | Tag | None = self.soup
         element: Optional[Tag] = None
         if anchor_selector:
@@ -557,9 +541,6 @@ class SelectorTools:
                 try:
                     # Use the modified copy for markdown conversion
                     markdown_content_val = markdownify(str(element_copy), base_url=self.base_url)
-                    logger.info(
-                        f"{log_prefix}: Generated markdown content (first 100 chars): '{markdown_content_val[:100]}...'"
-                    )
                 except Exception as md_err:
                     logger.warning(f"{log_prefix}: Failed to generate markdown content: {md_err}")
                     markdown_content_val = f"Error generating markdown: {md_err}"
@@ -618,9 +599,6 @@ class SelectorTools:
                     )
 
                 markdown_content_val = markdownify(str(element_copy_for_md), base_url=self.base_url)
-                logger.info(
-                    f"{log_prefix}: Generated markdown content (first 100 chars): '{markdown_content_val[:100]}...'"
-                )
             except Exception as md_err:
                 logger.warning(f"{log_prefix}: Failed to generate markdown content: {md_err}")
                 markdown_content_val = f"Error generating markdown: {md_err}"

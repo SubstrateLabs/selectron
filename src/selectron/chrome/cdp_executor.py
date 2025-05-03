@@ -1,8 +1,12 @@
 import asyncio
+import base64
+import binascii
 import json
+from io import BytesIO
 from typing import Any, Optional
 
 import websockets
+from PIL import Image
 from websockets.protocol import State
 
 from selectron.chrome.chrome_cdp import send_cdp_command
@@ -154,8 +158,8 @@ class CdpBrowserExecutor(BrowserExecutor):
             else:
                 logger.debug(
                     f"[evaluate] JS result type is undefined for expr starting with '{expression[:100]}...'. Raw result: {eval_result}. Returning None."
-                ) # Log if undefined
-                return None # Represent undefined JS result as None
+                )  # Log if undefined
+                return None  # Represent undefined JS result as None
         elif eval_result and "exceptionDetails" in eval_result:
             exception_details = eval_result["exceptionDetails"]
             logger.error(f"JavaScript exception during evaluate: {exception_details}")
@@ -167,6 +171,54 @@ class CdpBrowserExecutor(BrowserExecutor):
             logger.error(
                 f"CDP Runtime.evaluate received unexpected result structure for expression starting with '{expression[:100]}...'. Full result: {eval_result}. Returning None."
             )
+            return None
+
+    async def capture_screenshot(
+        self, format: str = "png", quality: Optional[int] = None
+    ) -> Optional[Image.Image]:
+        """Captures a screenshot using the current page context and connection."""
+        active_ws = self._ws
+        if not active_ws or active_ws.state == State.CLOSED:
+            logger.error("Cannot capture screenshot, WebSocket is not connected or closed.")
+            return None
+
+        try:
+            # Ensure Page domain is enabled (might be redundant, but safe)
+            # await self._send_command("Page.enable") # Enable might interfere if called elsewhere? Let's try without first.
+
+            screenshot_params: dict[str, Any] = {"format": format}
+            if (format == "jpeg" or format == "webp") and quality is not None:
+                screenshot_params["quality"] = max(0, min(100, quality))
+
+            # Use the existing _send_command which handles connection checks
+            capture_result = await self._send_command("Page.captureScreenshot", screenshot_params)
+
+            if not capture_result or "data" not in capture_result:
+                logger.error("Failed to capture screenshot via CDP command.")
+                return None
+
+            image_data_base64 = capture_result["data"]
+            try:
+                image_data = base64.b64decode(image_data_base64)
+                image = Image.open(BytesIO(image_data))
+                logger.debug(f"Screenshot captured successfully (format: {format})")
+                return image
+            except (TypeError, binascii.Error) as decode_err:
+                logger.error(f"Failed to decode base64 image data: {decode_err}")
+                return None
+            except Exception as img_err:
+                logger.error(f"Failed to create PIL Image from screenshot data: {img_err}")
+                return None
+
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning(f"WebSocket closed during screenshot attempt: {e}")
+            # If internal, mark as closed
+            if active_ws == self._internal_ws:
+                async with self._lock:
+                    self._internal_ws = None
+            raise  # Re-raise so caller knows connection died
+        except Exception as e:
+            logger.error(f"Unexpected error during screenshot capture: {e}", exc_info=True)
             return None
 
     @property

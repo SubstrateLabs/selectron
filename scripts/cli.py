@@ -3,7 +3,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import websockets
 from PIL import Image
@@ -16,8 +16,8 @@ from textual.widgets import Footer, Header, Input, RichLog
 from textual.worker import Worker
 
 from selectron.ai.selector_agent import (
-    _DOM_CONTEXT_PROMPT_SECTION,
-    _SYSTEM_PROMPT_BASE,
+    DOM_CONTEXT_PROMPT,
+    SYSTEM_PROMPT_BASE,
 )
 from selectron.ai.selector_tools import SelectorEvaluationResult, SelectorTools
 from selectron.ai.selector_types import (
@@ -54,16 +54,12 @@ LOG_FILE = get_app_dir() / "selectron.log"
 # --- Textual App ---
 
 
-class CliApp(App[None]):
-    """A Textual app with Chrome monitoring and log file watching."""
-
+class Selectron(App[None]):
     CSS_PATH = "cli.tcss"  # Add path to the CSS file
-
     BINDINGS = [
         Binding(key="ctrl+c", action="quit", description="Quit App", show=False),
         Binding(key="ctrl+q", action="quit", description="Quit App", show=True),
         Binding(key="ctrl+l", action="open_log_file", description="Open Logs", show=True),
-        # Binding(key="ctrl+t", action="toggle_dark", description="Toggle dark mode"), # Example if needed
     ]
 
     # Initialize dark mode state
@@ -221,8 +217,6 @@ class CliApp(App[None]):
                 f"Error reading log file {self._log_file_path}: {e}", exc_info=True
             )  # Log error to file
 
-    # --- Input Handling ---
-
     @on(Input.Submitted, "#log-input")  # Handle Enter key on the specific input
     def handle_log_input_submission(self, event: Input.Submitted) -> None:
         """Logs the input field's content when Enter is pressed."""
@@ -250,8 +244,6 @@ class CliApp(App[None]):
             logger.debug(
                 "Log input submitted but was empty."
             )  # Optional: log empty submissions as debug
-
-    # --- Monitoring ---
 
     async def run_monitoring(self) -> None:
         """Runs the main Chrome monitoring loop."""
@@ -577,11 +569,12 @@ class CliApp(App[None]):
             # self.notify(err_msg, title="Error Opening Log", severity="error")
 
     async def _run_agent_and_highlight(self, target_description: str) -> None:
-        """Runs the SelectorAgent and highlights the final proposed selector."""
+        """Runs the SelectorAgent, captures screenshots on highlight, and highlights the final proposed selector."""
         if not self._active_tab_ref or not self._active_tab_ref.ws_url:
             logger.warning("Cannot run agent: No active tab reference with ws_url.")
             return
 
+        latest_screenshot: Optional[Image.Image] = None  # Variable to hold the latest screenshot
         tab_ref = self._active_tab_ref
         ws_url = tab_ref.ws_url  # We know this exists now
         current_html = tab_ref.html
@@ -688,6 +681,7 @@ class CliApp(App[None]):
             tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
 
             async def evaluate_selector_wrapper(selector: str, target_text_to_check: str, **kwargs):
+                nonlocal latest_screenshot  # Allow modification
                 # Run the actual tool
                 logger.debug(f"Agent calling evaluate_selector: '{selector}'")
                 result = await tools_instance.evaluate_selector(
@@ -695,37 +689,40 @@ class CliApp(App[None]):
                 )
                 if result and result.element_count > 0 and not result.error:
                     logger.debug(f"Highlighting intermediate selector: '{selector}'")
-                    asyncio.create_task(
-                        self.highlight_service.highlight(
-                            self._active_tab_ref, selector, color="yellow"
-                        )
+                    # Await highlight and capture result
+                    success, img = await self.highlight_service.highlight(
+                        self._active_tab_ref, selector, color="yellow"
                     )
+                    if success and img:
+                        latest_screenshot = img  # Update latest screenshot
                 return result
 
             async def get_children_tags_wrapper(selector: str, **kwargs):
+                nonlocal latest_screenshot  # Allow modification
                 logger.debug(f"Agent calling get_children_tags: '{selector}'")
                 result = await tools_instance.get_children_tags(selector=selector, **kwargs)
                 # Highlight the parent element being inspected
                 if result and result.parent_found and not result.error:
                     logger.debug(f"Highlighting parent for get_children_tags: '{selector}'")
-                    asyncio.create_task(
-                        self.highlight_service.highlight(
-                            self._active_tab_ref, selector, color="red"
-                        )
+                    success, img = await self.highlight_service.highlight(
+                        self._active_tab_ref, selector, color="red"
                     )
+                    if success and img:
+                        latest_screenshot = img  # Update latest screenshot
                 return result
 
             async def get_siblings_wrapper(selector: str, **kwargs):
+                nonlocal latest_screenshot  # Allow modification
                 logger.debug(f"Agent calling get_siblings: '{selector}'")
                 result = await tools_instance.get_siblings(selector=selector, **kwargs)
                 # Highlight the element whose siblings are being checked
                 if result and result.element_found and not result.error:
                     logger.debug(f"Highlighting element for get_siblings: '{selector}'")
-                    asyncio.create_task(
-                        self.highlight_service.highlight(
-                            self._active_tab_ref, selector, color="blue"
-                        )
+                    success, img = await self.highlight_service.highlight(
+                        self._active_tab_ref, selector, color="blue"
                     )
+                    if success and img:
+                        latest_screenshot = img  # Update latest screenshot
                 return result
 
             async def extract_data_from_element_wrapper(selector: str, **kwargs):
@@ -741,22 +738,16 @@ class CliApp(App[None]):
                 Tool(extract_data_from_element_wrapper),
             ]
 
-            # --- Setup System Prompt --- #
-            system_prompt = _SYSTEM_PROMPT_BASE
+            system_prompt = SYSTEM_PROMPT_BASE
             if current_dom_string:
-                # Limit DOM representation size if needed (copied logic)
-                max_dom_len = 10000
-                truncated_dom = current_dom_string[:max_dom_len]
-                if len(current_dom_string) > max_dom_len:
-                    truncated_dom += "\n... (truncated)"
-                system_prompt += _DOM_CONTEXT_PROMPT_SECTION.format(
-                    dom_representation=truncated_dom
+                system_prompt += DOM_CONTEXT_PROMPT.format(
+                    dom_representation=current_dom_string
                 )
             elif not self._active_tab_dom_string:  # Log only if it was never fetched
                 logger.warning(f"Proceeding without DOM string representation for tab {tab_ref.id}")
 
             agent = Agent(
-                "anthropic:claude-3-7-sonnet-latest",
+                "openai:gpt-4.1",
                 output_type=SelectorProposal,
                 tools=wrapped_tools,
                 system_prompt=system_prompt,
@@ -781,7 +772,13 @@ class CliApp(App[None]):
             # --- End explicit output instruction ---
             query = " ".join(query_parts)
 
-            agent_run_result = await agent.run(query)
+            # --- Prepare Agent Input (Text + Optional Image) --- #
+            # Initialize with text query as default
+            agent_input: Any = query
+            # --- End Prepare Agent Input --- #
+
+            # Use the prepared agent_input (which could be str or list)
+            agent_run_result = await agent.run(agent_input)
 
             # --- Process Result --- #
             if isinstance(agent_run_result.output, SelectorProposal):
@@ -851,16 +848,62 @@ class CliApp(App[None]):
                 # --- Perform Highlight / Clear State --- #
                 if verification_passed:
                     # Use highlight_service
-                    asyncio.create_task(
-                        self.highlight_service.highlight(
-                            self._active_tab_ref, proposal.proposed_selector, color=highlight_color
-                        )
+                    logger.debug("Attempting final highlight and screenshot...")
+                    # Await final highlight and potentially capture final screenshot
+                    final_success, final_img = await self.highlight_service.highlight(
+                        self._active_tab_ref, proposal.proposed_selector, color=highlight_color
                     )
+                    if final_success:
+                        logger.info(f"Final highlight successful for selector: {proposal.proposed_selector}")
+                        if final_img:
+                            logger.info("Final screenshot captured.")
+                            # Optional: Save or use final_img
+                        else:
+                            logger.warning("Final highlight succeeded but screenshot failed.")
+
+                        # --- Log final selected content --- #
+                        try:
+                            logger.debug(f"Extracting final content for selector: {proposal.proposed_selector}")
+                            extraction_result = await tools_instance.extract_data_from_element(
+                                selector=proposal.proposed_selector
+                            )
+                            if extraction_result and extraction_result.extracted_markdown:
+                                logger.info(f"Final Selected Content:\n{extraction_result.extracted_markdown}")
+                            elif extraction_result and extraction_result.error:
+                                 logger.warning(f"Failed to extract final content: {extraction_result.error}")
+                            else:
+                                logger.warning("Final content extraction returned no content or error.")
+                        except Exception as final_extract_err:
+                            logger.error(f"Error during final content extraction: {final_extract_err}", exc_info=True)
+                        # --- End log final content --- #
+
+                    else:
+                        logger.error(f"Final highlight FAILED for selector: {proposal.proposed_selector}")
+
+                    # --- Log final selected content --- #
+                    try:
+                        logger.debug(f"Extracting final content for selector: {proposal.proposed_selector}")
+                        extraction_result = await tools_instance.extract_data_from_element(
+                            selector=proposal.proposed_selector
+                        )
+                        if extraction_result and extraction_result.extracted_markdown:
+                             # Truncate for logging
+                            log_content = extraction_result.extracted_markdown[:500]
+                            if len(extraction_result.extracted_markdown) > 500:
+                                log_content += "... (truncated)"
+                            logger.info(f"Final Selected Content:\n{log_content}")
+                        elif extraction_result and extraction_result.error:
+                             logger.warning(f"Failed to extract final content: {extraction_result.error}")
+                        else:
+                            logger.warning("Final content extraction returned no content or error.")
+                    except Exception as final_extract_err:
+                        logger.error(f"Error during final content extraction: {final_extract_err}", exc_info=True)
+                    # --- End log final content --- #
+
                 else:
                     # Clear highlights and state via service if verification fails
-                    self.call_later(
-                        self.highlight_service.clear, self._active_tab_ref
-                    )  # Use call_later for consistency
+                    logger.info("Clearing highlights and state due to verification failure.")
+                    await self.highlight_service.clear(self._active_tab_ref)
                     self.highlight_service.set_active(False)
 
             else:
@@ -876,12 +919,11 @@ class CliApp(App[None]):
 
     async def trigger_rehighlight(self):
         """Triggers a re-highlight using the HighlightService."""
-        logger.debug("[CliApp] Triggering rehighlight via HighlightService")  # Updated log source
         await self.highlight_service.rehighlight(self._active_tab_ref)
 
 
 if __name__ == "__main__":
     # Ensure logger is initialized (and file created) before app runs
     get_logger("__main__")  # Initial call to setup file logging
-    app = CliApp()
+    app = Selectron()
     app.run()

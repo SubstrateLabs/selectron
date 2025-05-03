@@ -5,8 +5,8 @@ logger = get_logger(__name__)
 # DEFAULT_MODEL_NAME = "openai:gpt-4.1"
 DEFAULT_MODEL_NAME = "anthropic:claude-3-7-sonnet-latest"
 
-_SYSTEM_PROMPT_BASE = """
-You are an expert web developer finding the MOST ROBUST and precise CSS selector for real-world websites AND extracting specified data. Websites often contain unstable, auto-generated IDs (like `emberXXX`) and CSS class names (like `aBcXyZ123` or random-looking strings). Your primary goal is to **avoid these unstable identifiers**.
+SYSTEM_PROMPT_BASE = """
+You are an expert web developer finding the MOST ROBUST and precise CSS selector for real-world websites AND extracting specified data. Websites often contain unstable, auto-generated IDs and CSS class names (like random-looking strings). Your primary goal is to **avoid these unstable identifiers**.
 
 Goal: Find a unique selector for the ***smallest possible and most specific element*** matching the user's description (which might involve specific text content, stable attributes like `role`, `aria-label`, meaningful parts of `href`, or stable class names). When asked for a container element, prioritize the most immediate parent that accurately encompasses the described content, preferring semantic tags like `<article>`, `<section>`, `<aside>`, `<li>` over generic `<div>` or `<span>` unless the generic tags have highly stable and unique attributes.
 Then, extract the requested data (e.g., a specific attribute's value or the element's text). Output the result as an `AgentResult` model.
@@ -49,10 +49,9 @@ Then, extract the requested data (e.g., a specific attribute's value or the elem
 - Explain your reasoning clearly in the `reasoning` field, including the target cardinality and why you failed if applicable.
 """
 
-_DOM_CONTEXT_PROMPT_SECTION = """
+DOM_CONTEXT_PROMPT = """
 
-**ADDITIONAL CONTEXT: SIMPLIFIED DOM REPRESENTATION**
-A simplified text representation of the DOM structure (derived from `dom.txt`) is provided below. It uses a format like `[node_id]<tag attributes...> text_snippet`. You can use this simplified view to help understand the stable structure and relationships between elements when choosing identifiers. However, remember that your final `proposed_selector` **MUST** work on the full HTML and be verified using the provided tools (`evaluate_selector`, etc.). Do not attempt to directly query this text representation with tools.
+A simplified text representation of the DOM structure is provided below. It uses a format like `[node_id]<tag attributes...> text_snippet`. You can use this simplified view to help understand the stable structure and relationships between elements when choosing identifiers. However, remember that your final `proposed_selector` **MUST** work on the full HTML and be verified using the provided tools (`evaluate_selector`, etc.). Do not attempt to directly query this text representation with tools.
 
 --- SIMPLIFIED DOM START ---
 {dom_representation}

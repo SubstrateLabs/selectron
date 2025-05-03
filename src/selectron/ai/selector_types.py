@@ -5,7 +5,9 @@ from pydantic import BaseModel, Field
 
 class MatchDetail(BaseModel):
     tag_name: str = Field(..., description="Tag name of the matched element.")
-    text_content: Optional[str] = Field(None, description="Truncated text content (max 150 chars).")
+    text_content: Optional[str] = Field(
+        None, description="Full markdown content of the matched element and its children."
+    )
     attributes: dict[str, str] = Field({}, description="Dictionary of the element's attributes.")
 
 
