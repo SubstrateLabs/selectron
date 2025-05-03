@@ -7,8 +7,6 @@ Screen {
 .log-container {
     /* Takes up all available vertical space */
     height: 1fr;
-    /* Add some padding around the log */
-    padding: 1;
 }
 
 
@@ -18,5 +16,21 @@ Screen {
     width: 1fr;
     /* Add margin to the right */
     margin-right: 1;
+}
+
+/* Style the input bar container */
+.input-bar {
+    /* Pin to the bottom */
+    dock: bottom;
+    /* Let height adjust to content */
+    height: auto;
+    /* Add margin below to avoid footer overlap */
+    margin-bottom: 1;
+}
+
+/* Style the Markdown widget used for snippets in the ListView */
+.markdown-snippet {
+    height: auto; /* Let height adjust to content */
+    # border: round gray;
 }
 

@@ -6,6 +6,7 @@ alwaysApply: false
 # Writing modern Python: style guide
 
 ## General rules
+- You can *always* assume we have all libraries installed, NO CONDITIONAL IMPORTS.
 - Prefer using Pydantic models to dataclasses or TypedDicts
 
 ## For-else statements

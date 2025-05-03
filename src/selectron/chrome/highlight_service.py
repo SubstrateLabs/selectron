@@ -290,17 +290,21 @@ class HighlightService:
         logger.debug(f"[HighlightService] Received trigger rehighlight for tab {tab_ref.id}")
         if self._highlights_active and self._last_highlight_selector and self._last_highlight_color:
             selector = self._last_highlight_selector
-            current_color = self._last_highlight_color # Use the stored color
+            current_color = self._last_highlight_color  # Use the stored color
             tab_id = tab_ref.id
             ws_url = tab_ref.ws_url
             url = tab_ref.url
-            
+
             if not ws_url:
-                logger.warning(f"[HighlightService] Cannot rehighlight on tab {tab_id}: Missing websocket URL.")
+                logger.warning(
+                    f"[HighlightService] Cannot rehighlight on tab {tab_id}: Missing websocket URL."
+                )
                 return
 
-            logger.debug(f"[HighlightService] Re-drawing highlight '{selector}' with {current_color} on tab {tab_id}")
-            
+            logger.debug(
+                f"[HighlightService] Re-drawing highlight '{selector}' with {current_color} on tab {tab_id}"
+            )
+
             # --- Replicate JS execution logic from highlight() MINUS the clear() --- #
             escaped_selector = (
                 selector.replace("\\", "\\\\")
@@ -381,7 +385,9 @@ class HighlightService:
                 result = await executor.evaluate(js_code)
                 logger.debug(f"[HighlightService] Rehighlight JS execution result: {result}")
             except websockets.exceptions.WebSocketException as e:
-                logger.warning(f"[HighlightService] Rehighlight failed for tab {tab_id}: WebSocket error - {e}")
+                logger.warning(
+                    f"[HighlightService] Rehighlight failed for tab {tab_id}: WebSocket error - {e}"
+                )
             except Exception as e:
                 logger.error(
                     f"[HighlightService] Rehighlight failed for tab {tab_id}: Unexpected error - {e}",
@@ -389,7 +395,9 @@ class HighlightService:
                 )
             # No longer calling self.highlight here
         else:
-            logger.debug("[HighlightService] Skipping rehighlight (not active or no selector/color)")
+            logger.debug(
+                "[HighlightService] Skipping rehighlight (not active or no selector/color)"
+            )
 
     def is_active(self) -> bool:
         """Returns true if highlights are considered active."""

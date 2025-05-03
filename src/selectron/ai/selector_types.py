@@ -24,6 +24,7 @@ class SelectorEvaluationResult(BaseModel):
     feedback_message: Optional[str] = Field(
         None, description="Feedback for the agent if the selector was not unique or had issues."
     )
+    matched_html_snippets: Optional[list[str]] = None
 
 
 class ChildDetail(BaseModel):

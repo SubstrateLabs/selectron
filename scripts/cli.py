@@ -1,46 +1,69 @@
 import asyncio
+import base64
+import io
+import json
 import logging
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
 
+import openai
 import websockets
+from markdownify import markdownify as md_converter
+from openai.types.chat import ChatCompletionUserMessageParam
 from PIL import Image
 from pydantic_ai import Agent, Tool
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
-from textual.widgets import Footer, Header, Input, RichLog
+from textual.containers import Container, Horizontal
+from textual.widgets import (
+    Button,
+    Footer,
+    Header,
+    Input,
+    ListItem,
+    ListView,
+    Markdown,
+    RichLog,
+    Static,
+    TabbedContent,
+    TabPane,
+)
 from textual.worker import Worker
 
 from selectron.ai.selector_agent import (
     DOM_CONTEXT_PROMPT,
     SYSTEM_PROMPT_BASE,
 )
-from selectron.ai.selector_tools import SelectorEvaluationResult, SelectorTools
+from selectron.ai.selector_tools import (
+    SelectorEvaluationResult,
+    SelectorTools,
+)  # Added SelectorEvaluationResult back
 from selectron.ai.selector_types import (
     SelectorProposal,
 )
-from selectron.chrome.cdp_executor import CdpBrowserExecutor
+from selectron.chrome.cdp_executor import CdpBrowserExecutor  # Added back
 from selectron.chrome.chrome_cdp import (
-    ChromeTab,
-    capture_tab_screenshot,
-    get_final_url_and_title,
-    get_html_via_ws,
-    wait_for_page_load,
+    ChromeTab,  # Added back
+    capture_tab_screenshot,  # Added back
+    get_final_url_and_title,  # Added back
+    get_html_via_ws,  # Added back
+    wait_for_page_load,  # Added back
 )
-from selectron.chrome.chrome_monitor import ChromeMonitor, TabChangeEvent
-from selectron.chrome.connect import ensure_chrome_connection
-from selectron.chrome.highlight_service import HighlightService
-from selectron.chrome.types import TabReference
-from selectron.dom.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES
-from selectron.dom.dom_service import DomService
-from selectron.util.extract_metadata import HtmlMetadata, extract_metadata
-from selectron.util.get_app_dir import get_app_dir
+from selectron.chrome.chrome_monitor import ChromeMonitor, TabChangeEvent  # Added back
+from selectron.chrome.connect import ensure_chrome_connection  # Added back
+from selectron.chrome.highlight_service import HighlightService  # Added back
+from selectron.chrome.types import TabReference  # Added back
+from selectron.dom.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES  # Added back
+from selectron.dom.dom_service import DomService  # Added back
+from selectron.util.extract_metadata import HtmlMetadata, extract_metadata  # Added back
+from selectron.util.get_app_dir import get_app_dir  # Added back
 from selectron.util.logger import get_logger
-from selectron.util.sample_save import save_sample_data
+from selectron.util.sample_save import save_sample_data  # Added back
+
+# --- End Selectron Imports ---
 
 # --- Logging Setup ---
 logger = get_logger(__name__)
@@ -75,6 +98,10 @@ class Selectron(App[None]):
     _active_tab_dom_string: Optional[str] = None
     _agent_worker: Optional[Worker[None]] = None
     highlight_service: HighlightService
+    _openai_client: Optional[openai.AsyncOpenAI] = None
+    _proposal_tasks: dict[str, asyncio.Task] = {}
+    _last_proposal_status: dict[str, str] = {}
+    _last_proposed_selector: Optional[str] = None
 
     def __init__(self):
         super().__init__()
@@ -95,17 +122,21 @@ class Selectron(App[None]):
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         yield Header()
-        with Container():  # Main container
-            yield Vertical(
-                RichLog(highlight=True, markup=False, id="log-panel", wrap=True),
-                classes="log-container",
-            )
-            # Input and Submit button row
-            # with Horizontal(classes="input-bar"):  # Container for input and submit - Removed container
-            yield Input(placeholder="Enter text to log...", id="log-input")
-            # yield Button("Open logs", id="open-log")  # Moved and renamed Open Log button - Removed button
-            # Button sits below logs and input
-            # yield Horizontal( # Removed this container
+        # Main container holds the TabbedContent
+        with Container(id="main-container"):  # Give the container an ID for potential styling
+            # TabbedContent takes up the main area
+            with TabbedContent(initial="logs-tab"):
+                # Logs Tab
+                with TabPane("✧ Logs ✧", id="logs-tab"):
+                    yield RichLog(highlight=True, markup=False, id="log-panel", wrap=True)
+                # List View Tab
+                with TabPane("✧ Data ✧", id="list-tab"):
+                    yield ListView(id="placeholder-list")
+        # Input bar remains docked at the bottom, outside the main container
+        with Horizontal(classes="input-bar"):  # Container for input and submit
+            yield Input(placeholder="Enter description or let AI propose...", id="log-input")
+            yield Button("Select", id="submit-button")
+
         yield Footer()
 
     def action_toggle_dark(self) -> None:
@@ -130,6 +161,15 @@ class Selectron(App[None]):
 
         # Ensure logger is initialized (though clearing is now manual)
         get_logger(__name__)  # Still good practice to get the logger instance
+
+        # Initialize OpenAI client
+        try:
+            self._openai_client = openai.AsyncOpenAI()
+            logger.info("OpenAI client initialized successfully.")
+        except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client: {e}", exc_info=True)
+            # Decide if we should exit or just log the error
+            # self.exit("Failed to initialize OpenAI client.") # Optional: exit if client is crucial
 
         # Load initial logs from file (which should now be reliably empty)
         self._load_initial_logs()
@@ -221,29 +261,50 @@ class Selectron(App[None]):
     def handle_log_input_submission(self, event: Input.Submitted) -> None:
         """Logs the input field's content when Enter is pressed."""
         if event.value:  # Only log if there's text
-            selector_to_try = event.value
-            logger.info(f"User Input (Selector): {selector_to_try}")
-            event.input.clear()  # Clear the input after logging
-
-            # --- Cancel previous agent, clear state, and clear highlights ---
-            if self._agent_worker and self._agent_worker.is_running:
-                logger.debug("Cancelling previous agent worker.")
-                self._agent_worker.cancel()
-            # Clear highlight state via service
-            self.highlight_service.set_active(False)
-            # Use call_later to ensure visual highlight clearing happens in the event loop
-            self.call_later(self.highlight_service.clear, self._active_tab_ref)
-            # --- Start new agent worker ---
-            logger.debug(f"Starting new agent worker for '{selector_to_try}'.")
-            self._agent_worker = self.run_worker(
-                self._run_agent_and_highlight(selector_to_try), exclusive=False
-            )  # Assign the new worker
-            # Set highlight service inactive explicitly when starting agent
-            self.highlight_service.set_active(False)
+            description = event.value
+            # Use the refactored helper method to trigger the agent
+            self.call_later(self._trigger_agent_run, description)
+            event.input.clear()  # Clear the input after triggering
         else:
             logger.debug(
                 "Log input submitted but was empty."
             )  # Optional: log empty submissions as debug
+
+    @on(Button.Pressed, "#submit-button")
+    async def handle_submit_button_press(self, event: Button.Pressed) -> None:
+        """Handles the submit button press, triggering the agent with the input content."""
+        input_widget = self.query_one("#log-input", Input)
+        description = input_widget.value
+        if description:
+            # Use the refactored helper method to trigger the agent
+            await self._trigger_agent_run(description)
+            input_widget.clear()  # Clear the input after triggering
+        else:
+            logger.debug("Submit button pressed with empty input.")
+
+    async def _trigger_agent_run(self, description: str):
+        """Triggers the agent execution with the given description."""
+        if not description:
+            logger.debug("Agent trigger attempted with empty description.")
+            return
+
+        logger.info(f"Triggering Agent Run with: '{description}'")
+
+        # --- Cancel previous agent, clear state, and clear highlights ---
+        if self._agent_worker and self._agent_worker.is_running:
+            logger.debug("Cancelling previous agent worker.")
+            self._agent_worker.cancel()
+        # Clear highlight state via service
+        self.highlight_service.set_active(False)
+        # Use call_later to ensure visual highlight clearing happens in the event loop
+        self.call_later(self.highlight_service.clear, self._active_tab_ref)
+        # --- Start new agent worker ---
+        logger.debug(f"Starting new agent worker for '{description}'.")
+        self._agent_worker = self.run_worker(
+            self._run_agent_and_highlight(description), exclusive=False
+        )  # Assign the new worker
+        # Set highlight service inactive explicitly when starting agent
+        self.highlight_service.set_active(False)
 
     async def run_monitoring(self) -> None:
         """Runs the main Chrome monitoring loop."""
@@ -298,18 +359,36 @@ class Selectron(App[None]):
                         active_tab_closed_or_navigated = True
                         break
 
+        # --- Cancel Stale Proposal Tasks ---
+        tabs_navigated_away_from_or_closed = list(event.closed_tabs) + [
+            old_ref for _, old_ref in event.navigated_tabs
+        ]
+        for ref in tabs_navigated_away_from_or_closed:
+            if ref.id in self._proposal_tasks:
+                task_to_cancel = self._proposal_tasks.pop(ref.id, None)  # Use pop with default None
+                if task_to_cancel and not task_to_cancel.done():
+                    logger.info(
+                        f"Polling detected navigation/closure for tab {ref.id}. Cancelling stale proposal task."
+                    )
+                    task_to_cancel.cancel()
+                elif task_to_cancel:  # Task existed but was already done
+                    logger.debug(
+                        f"Proposal task for navigated/closed tab {ref.id} was already finished."
+                    )
+
         if active_tab_closed_or_navigated:
             logger.info("Active tab closed or navigated, clearing highlights.")
             await self.highlight_service.clear(self._active_tab_ref)
             self.highlight_service.set_active(False)
-            # Consider clearing _active_tab_ref here too?
-            # self._active_tab_ref = None
+            # self._active_tab_ref = None # Consider clearing ref here?
             # self._active_tab_dom_string = None
 
         for new_tab in event.new_tabs:
             if new_tab.webSocketDebuggerUrl:
                 logger.info(f"Polling: New Tab: {new_tab.title} ({new_tab.url})")
-                tasks.append(self._process_new_tab(new_tab))
+                tasks.append(
+                    self._process_new_tab(new_tab)
+                )  # This will now create proposal tasks internally
             else:
                 logger.warning(f"Polling: New tab {new_tab.id} missing websocket URL.")
 
@@ -321,13 +400,14 @@ class Selectron(App[None]):
                 f"Polling: Navigated Tab: ID {navigated_tab.id} from {old_ref.url} TO {navigated_tab.url}"
             )
             if navigated_tab.webSocketDebuggerUrl:
-                tasks.append(self._process_new_tab(navigated_tab))
+                tasks.append(
+                    self._process_new_tab(navigated_tab)
+                )  # This will now create proposal tasks internally
             else:
                 logger.warning(f"Polling: Navigated tab {navigated_tab.id} missing websocket URL.")
 
         if tasks:
-            # Run these tasks concurrently but manage them within the worker
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks)  # Run processing for new/navigated tabs
 
     async def _handle_interaction_update(self, ref: TabReference):
         logger.debug(f"Interaction Update: Tab {ref.id} ({ref.url})")
@@ -340,13 +420,79 @@ class Selectron(App[None]):
         scroll_y: Optional[int],
         dom_string: Optional[str],
     ):
-        """Callback triggered after interaction + debounce + content fetch."""
         logger.info(f"Interaction: Content Fetched: Tab {ref.id} ({ref.url}) ScrollY: {scroll_y}")
-        self._active_tab_ref = ref
+        self._active_tab_ref = ref  # Keep updating active tab ref
+
+        # --- Add Debugging Log ---
+        logger.debug(
+            f"Checking retry condition for Tab {ref.id}: "
+            f"Last Status = '{self._last_proposal_status.get(ref.id)}', "
+            f"Task Running = {ref.id in self._proposal_tasks}"
+        )
+        # --- End Debugging Log ---
+
+        # --- Attempt Proposal Retry if applicable ---
+        # Check if last status was 'not_found' and no proposal task is currently running for this tab
+        if (
+            self._last_proposal_status.get(ref.id) == "not_found"
+            and ref.id not in self._proposal_tasks
+        ):
+            logger.info(
+                f"Retrying proposal generation for tab {ref.id} after interaction (previous status was 'not_found')."
+            )
+            # Check prerequisites again
+            if self._openai_client and image:
+                # Create and store the new proposal task (using the same logic as in _process_new_tab)
+                logger.info(
+                    f"Creating proposal generation task for tab {ref.id} ({ref.url}) (Retry)"
+                )
+                proposal_task = asyncio.create_task(
+                    self._run_proposal_generation(
+                        tab_id=ref.id,
+                        final_url=ref.url,
+                        screenshot_pil_image=image,  # Use the new image from interaction
+                    )
+                )
+                self._proposal_tasks[ref.id] = proposal_task
+
+                # Re-use the same callback structure
+                def _proposal_done_callback(task: asyncio.Task, tab_id_cb: str):
+                    try:
+                        exc = task.exception()
+                        if exc:
+                            if isinstance(exc, asyncio.CancelledError):
+                                logger.debug(
+                                    f"Proposal task (Retry) for tab {tab_id_cb} was cancelled."
+                                )
+                            else:
+                                logger.error(
+                                    f"Proposal task (Retry) for tab {tab_id_cb} failed: {exc}",
+                                    exc_info=exc,
+                                )
+                    finally:
+                        removed_task = self._proposal_tasks.pop(tab_id_cb, None)
+                        if removed_task:
+                            logger.debug(
+                                f"Removed completed/cancelled proposal task (Retry) for tab {tab_id_cb}."
+                            )
+
+                proposal_task.add_done_callback(lambda t: _proposal_done_callback(t, ref.id))
+            else:
+                # Log if retry prerequisites are missing
+                missing_prereqs = []
+                if not self._openai_client:
+                    missing_prereqs.append("OpenAI client")
+                if not image:
+                    missing_prereqs.append("Screenshot")
+                logger.warning(
+                    f"Skipping proposal retry for tab {ref.id} due to missing prerequisites: {', '.join(missing_prereqs)}"
+                )
+        # --- End Proposal Retry ---
 
         # Log if DOM string was fetched
         if dom_string:
             logger.info(f"    Fetched DOM (Length: {len(dom_string)})")
+            self._active_tab_dom_string = dom_string  # Update DOM string based on interaction fetch
         else:
             logger.warning(f"    DOM string not fetched for {ref.url} after interaction.")
 
@@ -457,7 +603,7 @@ class Selectron(App[None]):
         else:
             logger.error(f"Process Failed: Tab {tab.id} ({tab.url}) - No final URL")
 
-        # --- Update Active Tab Reference --- #
+        # --- Update Active Tab Reference (Keep this logic) --- #
         # Set the active tab reference ONLY if we successfully got the core data needed for the agent
         if final_url and html and ws_url:
             new_tab_ref = TabReference(
@@ -489,8 +635,69 @@ class Selectron(App[None]):
             self._active_tab_ref = None
             self._active_tab_dom_string = None
 
-        # --- Save Data ---
-        if html and metadata and final_url:
+        # --- Generate Auto-Proposal (Task Based) --- #
+        if self._openai_client and screenshot_pil_image:
+            # --- Cancel previous task for the SAME tab ID if it exists (e.g., rapid navigation) ---
+            if tab.id in self._proposal_tasks:
+                existing_task = self._proposal_tasks.pop(tab.id)
+                if not existing_task.done():
+                    logger.warning(
+                        f"Cancelling existing proposal task for tab {tab.id} due to new processing request."
+                    )
+                    existing_task.cancel()
+            # --- End cancellation of previous ---
+
+            logger.info(f"Creating proposal generation task for tab {tab.id} ({final_url})")
+            proposal_task = asyncio.create_task(
+                self._run_proposal_generation(
+                    tab_id=tab.id, final_url=final_url, screenshot_pil_image=screenshot_pil_image
+                )
+            )
+            self._proposal_tasks[tab.id] = proposal_task
+
+            # Define the callback slightly differently to handle potential exceptions in pop
+            def _proposal_done_callback(task: asyncio.Task, tab_id_cb: str):
+                try:
+                    # Log if the task raised an exception
+                    exc = task.exception()
+                    if exc:
+                        if isinstance(exc, asyncio.CancelledError):
+                            # Log cancellation at DEBUG level
+                            logger.debug(
+                                f"Proposal task for tab {tab_id_cb} was cancelled (expected)."
+                            )
+                        else:
+                            # Log other exceptions at ERROR level
+                            logger.error(
+                                f"Proposal task for tab {tab_id_cb} failed with exception: {exc}",
+                                exc_info=exc,
+                            )
+                finally:
+                    # Always try to remove the task from the dict
+                    removed_task = self._proposal_tasks.pop(tab_id_cb, None)
+                    if removed_task:
+                        logger.debug(
+                            f"Removed completed/cancelled proposal task for tab {tab_id_cb} from tracking dict."
+                        )
+
+            # Add the callback to remove the task from the dictionary upon completion/cancellation
+            proposal_task.add_done_callback(lambda t: _proposal_done_callback(t, tab.id))
+
+        else:
+            # Keep the logging for missing prerequisites
+            missing_for_proposal = []
+            if not self._openai_client:
+                missing_for_proposal.append("OpenAI client")
+            if not screenshot_pil_image:
+                missing_for_proposal.append("Screenshot")
+            if missing_for_proposal:
+                logger.warning(
+                    f"Skipping proposal generation task creation for {final_url or tab.url} due to missing: {', '.join(missing_for_proposal)}"
+                )
+        # --- End Generate Auto-Proposal --- #
+
+        # --- Save Data (Keep this logic) ---
+        if html and metadata and final_url:  # Keep checking for html/metadata for saving
             try:
                 await save_sample_data(
                     url=final_url,
@@ -509,6 +716,19 @@ class Selectron(App[None]):
         """Action to quit the app."""
         logger.info("Shutdown requested...")
         self.shutdown_event.set()
+
+        # --- Cancel any outstanding proposal tasks ---
+        if self._proposal_tasks:
+            logger.info(f"Cancelling {len(self._proposal_tasks)} outstanding proposal tasks...")
+            tasks_to_cancel = list(self._proposal_tasks.values())  # Get tasks before clearing dict
+            self._proposal_tasks.clear()  # Clear the dict
+            for task in tasks_to_cancel:
+                if not task.done():
+                    task.cancel()
+            # Give cancellations a moment to propagate
+            await asyncio.sleep(0.1)
+        # --- End cancel proposal tasks ---
+
         if self.monitor_task:
             try:
                 logger.info("Waiting for monitor worker...")
@@ -680,13 +900,60 @@ class Selectron(App[None]):
             # Use the potentially updated html and url
             tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
 
+            # --- Helper to Update List View --- #
+            async def _update_list_with_markdown(html_snippets: list[str], source_selector: str):
+                # Takes raw HTML snippets now
+                try:
+                    list_view = self.query_one("#placeholder-list", ListView)
+                    await list_view.clear()
+                    if not md_converter:
+                        await list_view.append(
+                            ListItem(Static("[markdownify library not installed]"))
+                        )
+                        return
+
+                    if html_snippets:
+                        logger.debug(
+                            f"Updating list view with {len(html_snippets)} HTML snippets for '{source_selector}', converting to markdown."
+                        )
+                        for html_content in html_snippets:
+                            try:
+                                md_content = md_converter(html_content, heading_style="ATX")
+                            except Exception as md_err:
+                                logger.warning(
+                                    f"Failed to convert HTML snippet to markdown: {md_err}"
+                                )
+                                md_content = f"_Error converting HTML:_\\n```html\\n{html_content[:200]}...\\n```"
+
+                            md_widget = Markdown(md_content.strip(), classes="markdown-snippet")
+                            list_item = ListItem(md_widget, classes="markdown-list-item")
+                            await list_view.append(list_item)
+                    else:
+                        logger.debug(f"No HTML snippets to display for '{source_selector}'.")
+                        await list_view.append(ListItem(Static("[No matching elements found]")))
+                except Exception as list_update_err:
+                    logger.error(f"Error updating list view: {list_update_err}")
+
+            # --- End Helper --- #
+
             async def evaluate_selector_wrapper(selector: str, target_text_to_check: str, **kwargs):
                 nonlocal latest_screenshot  # Allow modification
                 # Run the actual tool
                 logger.debug(f"Agent calling evaluate_selector: '{selector}'")
                 result = await tools_instance.evaluate_selector(
-                    selector=selector, target_text_to_check=target_text_to_check, **kwargs
+                    selector=selector,
+                    target_text_to_check=target_text_to_check,
+                    **kwargs,
+                    return_matched_html=True,  # Ensure we always request HTML
                 )
+
+                # Update list view with markdown from successful evaluations
+                if result and not result.error:
+                    # Pass raw HTML snippets to the helper for conversion
+                    html_to_show = result.matched_html_snippets or []
+                    await _update_list_with_markdown(html_to_show, selector)
+                # Do not clear list view on evaluation error, keep previous state
+
                 if result and result.element_count > 0 and not result.error:
                     logger.debug(f"Highlighting intermediate selector: '{selector}'")
                     # Await highlight and capture result
@@ -740,9 +1007,7 @@ class Selectron(App[None]):
 
             system_prompt = SYSTEM_PROMPT_BASE
             if current_dom_string:
-                system_prompt += DOM_CONTEXT_PROMPT.format(
-                    dom_representation=current_dom_string
-                )
+                system_prompt += DOM_CONTEXT_PROMPT.format(dom_representation=current_dom_string)
             elif not self._active_tab_dom_string:  # Log only if it was never fetched
                 logger.warning(f"Proceeding without DOM string representation for tab {tab_ref.id}")
 
@@ -847,6 +1112,10 @@ class Selectron(App[None]):
 
                 # --- Perform Highlight / Clear State --- #
                 if verification_passed:
+                    # Store the successful selector
+                    self._last_proposed_selector = proposal.proposed_selector
+                    logger.info(f"Storing successful selector: {self._last_proposed_selector}")
+
                     # Use highlight_service
                     logger.debug("Attempting final highlight and screenshot...")
                     # Await final highlight and potentially capture final screenshot
@@ -854,7 +1123,9 @@ class Selectron(App[None]):
                         self._active_tab_ref, proposal.proposed_selector, color=highlight_color
                     )
                     if final_success:
-                        logger.info(f"Final highlight successful for selector: {proposal.proposed_selector}")
+                        logger.info(
+                            f"Final highlight successful for selector: {proposal.proposed_selector}"
+                        )
                         if final_img:
                             logger.info("Final screenshot captured.")
                             # Optional: Save or use final_img
@@ -863,46 +1134,50 @@ class Selectron(App[None]):
 
                         # --- Log final selected content --- #
                         try:
-                            logger.debug(f"Extracting final content for selector: {proposal.proposed_selector}")
+                            logger.debug(
+                                f"Extracting final content for selector: {proposal.proposed_selector}"
+                            )
                             extraction_result = await tools_instance.extract_data_from_element(
                                 selector=proposal.proposed_selector
                             )
                             if extraction_result and extraction_result.extracted_markdown:
-                                logger.info(f"Final Selected Content:\n{extraction_result.extracted_markdown}")
+                                # Truncate for logging
+                                log_content = extraction_result.extracted_markdown[:500]
+                                if len(extraction_result.extracted_markdown) > 500:
+                                    log_content += "... (truncated)"
+                                logger.info(f"Final Selected Content:\\n{log_content}")
                             elif extraction_result and extraction_result.error:
-                                 logger.warning(f"Failed to extract final content: {extraction_result.error}")
+                                logger.warning(
+                                    f"Failed to extract final content: {extraction_result.error}"
+                                )
                             else:
-                                logger.warning("Final content extraction returned no content or error.")
+                                logger.warning(
+                                    "Final content extraction returned no content or error."
+                                )
                         except Exception as final_extract_err:
-                            logger.error(f"Error during final content extraction: {final_extract_err}", exc_info=True)
+                            logger.error(
+                                f"Error during final content extraction: {final_extract_err}",
+                                exc_info=True,
+                            )
                         # --- End log final content --- #
 
                     else:
-                        logger.error(f"Final highlight FAILED for selector: {proposal.proposed_selector}")
-
-                    # --- Log final selected content --- #
-                    try:
-                        logger.debug(f"Extracting final content for selector: {proposal.proposed_selector}")
-                        extraction_result = await tools_instance.extract_data_from_element(
-                            selector=proposal.proposed_selector
+                        logger.error(
+                            f"Final highlight FAILED for selector: {proposal.proposed_selector}"
                         )
-                        if extraction_result and extraction_result.extracted_markdown:
-                             # Truncate for logging
-                            log_content = extraction_result.extracted_markdown[:500]
-                            if len(extraction_result.extracted_markdown) > 500:
-                                log_content += "... (truncated)"
-                            logger.info(f"Final Selected Content:\n{log_content}")
-                        elif extraction_result and extraction_result.error:
-                             logger.warning(f"Failed to extract final content: {extraction_result.error}")
-                        else:
-                            logger.warning("Final content extraction returned no content or error.")
-                    except Exception as final_extract_err:
-                        logger.error(f"Error during final content extraction: {final_extract_err}", exc_info=True)
-                    # --- End log final content --- #
+                        # If highlight fails, maybe don't update list? Or clear selector?
+                        # For now, let's still assume the selector is valid and update list
+                        # Removed call
+                        # logger.debug("Scheduling list view update even though highlight failed...")
+                        # self.call_later(self._evaluate_and_update_list_view) # Keep this call
 
                 else:
                     # Clear highlights and state via service if verification fails
                     logger.info("Clearing highlights and state due to verification failure.")
+                    # Clear the stored selector if verification failed
+                    self._last_proposed_selector = None  # Keep this
+                    # Clear the list view as well
+                    self.call_later(self._clear_list_view)  # Keep this call
                     await self.highlight_service.clear(self._active_tab_ref)
                     self.highlight_service.set_active(False)
 
@@ -910,16 +1185,173 @@ class Selectron(App[None]):
                 logger.error(
                     f"Agent returned unexpected output type: {type(agent_run_result.output)} / {agent_run_result.output}"
                 )
+                # Clear selector and list view if agent fails
+                self._last_proposed_selector = None
+                self.call_later(self._clear_list_view)
 
         except Exception as e:
             logger.error(
                 f"Error running SelectorAgent for target '{target_description}': {e}",
                 exc_info=True,
             )
+            # Clear selector and list view on general agent error
+            self._last_proposed_selector = None
+            self.call_later(self._clear_list_view)
 
     async def trigger_rehighlight(self):
         """Triggers a re-highlight using the HighlightService."""
         await self.highlight_service.rehighlight(self._active_tab_ref)
+
+    async def _run_proposal_generation(
+        self, tab_id: str, final_url: Optional[str], screenshot_pil_image: Image.Image
+    ):
+        """Handles the OpenAI call for proposal and triggers agent if successful."""
+        if not self._openai_client:  # Re-check client just in case
+            logger.error("OpenAI client not available for proposal generation.")
+            return
+
+        logger.info(f"Starting proposal generation task for tab {tab_id} ({final_url})")
+        self._last_proposal_status[tab_id] = "pending"  # Set status to pending
+
+        try:
+            # 1. Encode image
+            buffered = io.BytesIO()
+            img_to_save = screenshot_pil_image
+            if img_to_save.mode == "RGBA":
+                img_to_save = img_to_save.convert("RGB")
+            img_to_save.save(buffered, format="JPEG", quality=85)
+            base64_image = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+            # 2. Define prompt
+            proposal_prompt = """You are an expert UI analyst. Analyze the provided screenshot. Perform the following steps:
+
+1.  **Identify the Main Content Area:** Locate the primary region displaying core content, ignoring global headers/footers/navigation/sidebars.
+2.  **Analyze Main Content Structure:** Determine if this area primarily consists of:
+    a.  **Recurring Units:** Multiple distinct, visually similar, repeating elements forming a list, grid, or feed (e.g., posts, videos, products, comments, list items).
+    b.  **Single Block:** One dominant block of continuous text and/or images, characteristic of a single article, blog post, documentation page, or similar static content page.
+    c.  **Other/Ambiguous:** A simple form, landing page elements, highly varied content without clear repetition, etc.
+
+3.  **Determine Output based on Step 2:**
+    *   **Case (a) - Recurring Units:** Identify the MOST representative type. Provide ONE concise, generic description suitable for selecting **ALL instances** (e.g., "All primary posts in the feed", "Each result item in the list"). Output JSON: `{"status": "found", "description": "Your description here"}`
+    *   **Case (b) - Single Block (Article-like):** This is NOT a list of recurring primary items. Output JSON: `{"status": "not_found"}`
+    *   **Case (c) - Other/Ambiguous:** Treat as not having clear, primary recurring items. Output JSON: `{"status": "not_found"}`
+
+CRITICAL: Output ONLY the JSON object (`{"status": "found", "description": "..."}` OR `{"status": "not_found"}`). No other text, labels, formatting, or explanation.
+
+Example "found" output:
+`{"status": "found", "description": "All primary posts/updates in the main feed area"}`
+
+Example "not_found" output (for single article, ambiguous page, form, etc.):
+`{"status": "not_found"}`"""
+
+            # 3. Construct messages
+            messages: list[ChatCompletionUserMessageParam] = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": proposal_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}",
+                                "detail": "low",
+                            },
+                        },
+                    ],
+                }
+            ]
+
+            # 4. Make API call
+            logger.info(f"Calling OpenAI vision model for structured proposal (Tab: {tab_id})...")
+            completion = await self._openai_client.chat.completions.create(
+                model="gpt-4.1-nano",
+                messages=messages,
+                max_tokens=500,
+                response_format={"type": "json_object"},
+            )
+            await asyncio.sleep(0)  # Check for cancellation
+
+            # 5. Parse and conditionally trigger
+            response_content = completion.choices[0].message.content
+            current_status = "error"  # Default status if parsing fails
+            if response_content:
+                logger.debug(f"Raw proposal JSON response (Tab: {tab_id}): {response_content}")
+                try:
+                    proposal_data = json.loads(response_content)
+                    status = proposal_data.get("status")
+                    description = proposal_data.get("description")
+
+                    if status == "found" and isinstance(description, str) and description.strip():
+                        proposed_description = description.strip()
+                        logger.info(
+                            f"Proposal status: found (Tab: {tab_id}). Desc: '{proposed_description}'"
+                        )
+                        logger.info(
+                            f"Updating input field for tab {tab_id} with: '{proposed_description}'"
+                        )
+                        try:
+                            # Check if this tab is STILL the active tab before updating input
+                            if self._active_tab_ref and self._active_tab_ref.id == tab_id:
+                                log_input_widget = self.query_one("#log-input", Input)
+                                # Update the input widget's value
+                                log_input_widget.value = proposed_description
+                                # Optionally move focus back to the input
+                                # self.call_later(log_input_widget.focus)
+                            else:
+                                logger.info(
+                                    f"Proposal for tab {tab_id} succeeded, but it's no longer the active tab. Input not updated."
+                                )
+                        except Exception as e:
+                            logger.error(
+                                f"Failed to get log input widget to update value for tab {tab_id}: {e}",
+                                exc_info=True,
+                            )
+                        current_status = "found"  # Update status
+                    elif status == "not_found":
+                        logger.info(
+                            f"Proposal status: not_found (Tab: {tab_id}). Input not updated."
+                        )
+                        current_status = "not_found"  # Update status
+                    else:
+                        logger.warning(
+                            f"Proposal JSON (Tab: {tab_id}) unexpected structure. Status='{status}', Desc type='{type(description)}'. Input not updated."
+                        )
+                        current_status = "error"  # Keep status as error
+
+                except json.JSONDecodeError as json_err:
+                    logger.error(
+                        f"Failed to parse JSON response (Tab: {tab_id}): {json_err}\nResponse: {response_content}. Input not updated.",
+                    )
+                    current_status = "error"  # Set status to error
+            else:
+                logger.warning(
+                    f"Proposal model returned empty response (Tab: {tab_id}). Input not updated."
+                )
+                current_status = "error"  # Set status to error
+
+            self._last_proposal_status[tab_id] = current_status  # Store final status
+
+        except asyncio.CancelledError:
+            logger.debug(f"Proposal generation task for tab {tab_id} cancelled (expected).")
+            # Don't change status if cancelled, allows retry based on previous status
+            raise
+        except Exception as proposal_err:
+            logger.error(
+                f"Error during proposal generation task for tab {tab_id}: {proposal_err}",
+                exc_info=True,
+            )
+            self._last_proposal_status[tab_id] = "error"  # Store error status
+        # finally: # Removed finally block for status setting, doing it after processing now
+        #    logger.debug(f"Proposal generation task for tab {tab_id} finished.")
+
+    async def _clear_list_view(self) -> None:
+        """Helper method to safely clear the list view."""
+        try:
+            list_view = self.query_one("#placeholder-list", ListView)
+            await list_view.clear()
+            logger.debug("List view cleared.")
+        except Exception as e:
+            logger.error(f"Failed to query or clear list view: {e}")
 
 
 if __name__ == "__main__":
