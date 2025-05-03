@@ -70,7 +70,7 @@ async def send_cdp_command(
                     return None
                 return response.get("result")
     except asyncio.TimeoutError:
-        logger.error(f"Timeout waiting for response to command id {current_id} ({method})")
+        # logger.error(f"Timeout waiting for response to command id {current_id} ({method})")
         return None
     except websockets.exceptions.ConnectionClosed:
         logger.error("WebSocket connection closed unexpectedly.")
@@ -533,7 +533,6 @@ async def capture_tab_screenshot(
     # Use provided connection or create a new one
     try:
         if ws_connection:
-            logger.debug("Using provided WebSocket connection for screenshot.")
             # Directly use the provided connection without context manager
             return await _do_capture(ws_connection)
         else:

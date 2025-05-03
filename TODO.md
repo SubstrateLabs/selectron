@@ -1,6 +1,3 @@
-- initial active tab pick is wrong
-- missing dom.txt - sometimes? every time?
 - cached highlight selectors on new tab
-- proposal is not on active tab?
 - generate python to parse
 - anthropic/openai default models

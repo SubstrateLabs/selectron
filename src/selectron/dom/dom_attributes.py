@@ -11,8 +11,8 @@ DOM_STRING_INCLUDE_ATTRIBUTES = [
     "alt",
     "href",
     "type",
-    "value",  # Useful for input fields
-    "for",  # Useful for labels
+    "value",
+    "for",
     "data-testid",
     "data-cy",
     "data-qa",

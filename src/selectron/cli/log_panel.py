@@ -75,7 +75,6 @@ class LogPanel(Container):
             # Opening with 'w' mode truncates the file.
             open(self._log_file_path, "w", encoding="utf-8").close()
             self._last_log_position = 0  # Reset position after clearing
-            logger.debug(f"Log file {self._log_file_path} cleared successfully.")
         except Exception as e:
             err_msg = f"ERROR: Failed to clear log file {self._log_file_path} on mount: {e}"
             # Log to stderr as the logger might write to the file we just failed to clear

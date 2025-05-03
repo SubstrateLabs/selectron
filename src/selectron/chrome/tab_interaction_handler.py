@@ -321,11 +321,7 @@ class TabInteractionHandler:
             try:
                 html_script = "document.documentElement.outerHTML"
                 html_content = await browser_executor.evaluate(html_script)
-                if html_content:
-                    logger.debug(
-                        f"Successfully fetched HTML (len {len(html_content)}) for {self.tab_id}"
-                    )
-                else:
+                if not html_content:
                     logger.warning(f"Failed to fetch HTML via executor for {self.tab_id}")
             except Exception as html_e:
                 logger.error(
@@ -345,9 +341,8 @@ class TabInteractionHandler:
                         dom_string = dom_state.element_tree.elements_to_string(
                             include_attributes=DOM_STRING_INCLUDE_ATTRIBUTES
                         )
-                        logger.debug(
-                            f"Successfully fetched and serialized DOM (len {len(dom_string) if dom_string else 'N/A'}) for {self.tab_id}"
-                        )
+                        if not dom_string or len(dom_string) < 100:
+                            logger.warning(f"DOM string is missing or too short for {self.tab_id}: {dom_string[:100] if dom_string else 'None'}")
                     else:
                         logger.warning(f"get_elements returned empty state for {self.tab_id}")
                 except Exception as dom_e:
@@ -365,9 +360,6 @@ class TabInteractionHandler:
                 scroll_eval = await browser_executor.evaluate(scroll_script)
                 if isinstance(scroll_eval, (int, float)):
                     scroll_y_at_capture = int(scroll_eval)
-                    logger.debug(
-                        f"Captured scrollY={scroll_y_at_capture} just before screenshot for {self.tab_id}"
-                    )
                 else:
                     logger.warning(
                         f"Could not get scrollY before screenshot for {self.tab_id}. Fallback: {self._last_interaction_scroll_y}"
@@ -422,5 +414,4 @@ class TabInteractionHandler:
             )
         finally:
             if ws and ws.state != websockets.protocol.State.CLOSED:
-                logger.debug(f"Closing WebSocket connection after fetching content: {ws_url}")
                 await ws.close()

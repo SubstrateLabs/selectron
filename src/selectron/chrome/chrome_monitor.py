@@ -101,7 +101,6 @@ class ChromeMonitor:
     async def _initialize_tabs_and_monitors(self):
         """Gets current tabs, updates state, and starts interaction monitors."""
         try:
-            logger.debug("Stopping any lingering interaction handlers before init...")
             await self._stop_all_interaction_monitors()
 
             initial_cdp_tabs: List[ChromeTab] = await get_tabs()

@@ -12,18 +12,17 @@ class MatchDetail(BaseModel):
 
 
 class SelectorEvaluationResult(BaseModel):
-    selector_used: str = Field(...)
-    anchor_selector_used: Optional[str] = Field(None)
-    element_count: int = Field(...)
-    matches: list[MatchDetail] = Field([])
-    target_text_found_in_any_match: bool = Field(False)
-    error: Optional[str] = Field(None)
-    size_validation_error: Optional[str] = Field(
-        None, description="Error message if element size validation fails, otherwise None."
-    )
-    feedback_message: Optional[str] = Field(
-        None, description="Feedback for the agent if the selector was not unique or had issues."
-    )
+    """Result of evaluating a CSS selector."""
+
+    selector_used: str
+    anchor_selector_used: Optional[str] = None
+    element_count: int
+    matches: list[MatchDetail] = Field(default_factory=list)
+    target_text_found_in_any_match: bool
+    error: Optional[str] = None
+    size_validation_error: Optional[str] = None
+    feedback_message: Optional[str] = None  # General feedback, e.g., if not unique
+    simplicity_warning: Optional[str] = None # Specific warning if selector seems too broad
     matched_html_snippets: Optional[list[str]] = None
 
 

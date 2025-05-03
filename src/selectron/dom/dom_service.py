@@ -128,7 +128,7 @@ class DomService:
     ) -> tuple[DOMElementNode, SelectorMap]:
         js_node_map = eval_page["map"]
         js_root_id = eval_page["rootId"]
-
+        logger.debug(f"Received {len(js_node_map)} nodes from buildDomTree.js")
         selector_map = {}
         node_map = {}
 
@@ -162,6 +162,9 @@ class DomService:
 
         if html_to_dict is None or not isinstance(html_to_dict, DOMElementNode):
             raise ValueError("Failed to parse HTML to dictionary")
+
+        # Ensure the root node itself is marked as visible, as JS doesn't explicitly set it for body
+        html_to_dict.is_visible = True
 
         return html_to_dict, selector_map
 
@@ -212,6 +215,7 @@ class DomService:
             shadow_root=node_data.get("shadowRoot", False),
             parent=None,
             viewport_info=viewport_info,
+            is_content_element=node_data.get("isContentElement", False),
         )
 
         children_ids = node_data.get("children", [])

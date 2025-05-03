@@ -34,10 +34,11 @@ def time_execution_async(
     def decorator(func: Callable[P, Coroutine[Any, Any, R]]) -> Callable[P, Coroutine[Any, Any, R]]:
         @wraps(func)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+            logger.debug(f"{additional_text} started")
             start_time = time.time()
             result = await func(*args, **kwargs)
             execution_time = time.time() - start_time
-            logger.debug(f"{additional_text} executed in {execution_time:.2f}s")
+            logger.debug(f"{additional_text} completed in {execution_time:.2f}s")
             return result
 
         return wrapper

@@ -1,7 +1,6 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import websockets
-from PIL import Image
 
 from selectron.chrome.cdp_executor import CdpBrowserExecutor
 from selectron.chrome.types import TabReference
@@ -18,13 +17,12 @@ class ChromeHighlighter:
 
     async def highlight(
         self, tab_ref: Optional[TabReference], selector: str, color: str = "yellow"
-    ) -> Tuple[bool, Optional[Image.Image]]:
-        """Highlights elements matching a selector using overlays and captures a screenshot.
+    ) -> bool:
+        """Highlights elements matching a selector using overlays.
 
         Returns:
-            Tuple[bool, Optional[Image.Image]]: (highlight_success, optional_screenshot_image)
+            bool: highlight_success
         """
-        screenshot_image: Optional[Image.Image] = None
         highlight_success = False
 
         if not tab_ref or not tab_ref.ws_url:
@@ -32,9 +30,7 @@ class ChromeHighlighter:
                 "Cannot highlight selector: Missing active tab reference or websocket URL."
             )
             self._highlights_active = False
-            return False, None
-
-        logger.debug(f"Request to highlight: '{selector}' with color {color} on tab {tab_ref.id}")
+            return False
 
         # --- Determine alternating color logic --- #
         current_color = color
@@ -57,7 +53,7 @@ class ChromeHighlighter:
         # --- Create Executor Once --- #
         if not tab_ref.ws_url:
             logger.error("Internal error: ws_url became None unexpectedly.")
-            return False, None
+            return False
         executor = CdpBrowserExecutor(tab_ref.ws_url, tab_ref.url or "")
 
         # --- Clear previous highlights FIRST (using the same executor) ---
@@ -106,7 +102,7 @@ class ChromeHighlighter:
 
             const elements = document.querySelectorAll(selector);
             if (!elements || elements.length === 0) {{
-                return `No elements found for selector: ${{selector}}`;
+                return `No elements found for selector: ${selector}`;
             }}
 
             let highlightedCount = 0;
@@ -158,16 +154,16 @@ class ChromeHighlighter:
         except websockets.exceptions.WebSocketException as e:
             logger.error(f"Highlight selector failed for tab {tab_id}: WebSocket error - {e}")
             self._highlights_active = False
-            return False, None
+            return False
         except Exception as e:
             logger.error(
                 f"Highlight selector failed for tab {tab_id}: Unexpected error - {e}",
                 exc_info=True,
             )
             self._highlights_active = False
-            return False, None
+            return False
 
-        return highlight_success, screenshot_image
+        return highlight_success
 
     async def clear(
         self,
@@ -192,9 +188,6 @@ class ChromeHighlighter:
             self._highlights_active = False
             self._last_highlight_selector = None
             self._last_highlight_color = None
-        else:
-            # If called internally (before highlighting), just perform the clear action
-            logger.debug(f"Clearing previous overlays for tab {tab_ref.id} before new highlight")
 
         ws_url = tab_ref.ws_url
         url = tab_ref.url
@@ -238,7 +231,6 @@ class ChromeHighlighter:
         if not tab_ref:
             return
 
-        logger.debug(f"Received trigger rehighlight for tab {tab_ref.id}")
         if self._highlights_active and self._last_highlight_selector and self._last_highlight_color:
             selector = self._last_highlight_selector
             current_color = self._last_highlight_color  # Use the stored color

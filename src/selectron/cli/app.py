@@ -200,7 +200,6 @@ class SelectronApp(App[None]):
             and self._active_tab_ref
             and self._vision_proposal_done_for_tab != self._active_tab_ref.id
         ):
-            logger.debug(f"Proceeding with vision proposal for tab {self._active_tab_ref.id}")
             if self._vision_worker and self._vision_worker.is_running:
                 logger.debug("Cancelling previous vision worker.")
                 self._vision_worker.cancel()
@@ -237,9 +236,7 @@ class SelectronApp(App[None]):
             and self._active_tab_ref
             and self._vision_proposal_done_for_tab == self._active_tab_ref.id
         ):
-            logger.debug(
-                f"Vision proposal already done or running for tab {self._active_tab_ref.id}, skipping."
-            )
+            pass
         elif not screenshot:
             logger.debug("Skipping vision proposal: No screenshot available.")
 
@@ -394,7 +391,6 @@ class SelectronApp(App[None]):
             logger.warning("Cannot run agent: No active tab reference with html.")
             return
 
-        latest_screenshot: Optional[Image.Image] = None
         tab_ref = self._active_tab_ref
         current_html = tab_ref.html
         current_dom_string = self._active_tab_dom_string
@@ -418,7 +414,6 @@ class SelectronApp(App[None]):
             tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
 
             async def evaluate_selector_wrapper(selector: str, target_text_to_check: str, **kwargs):
-                nonlocal latest_screenshot
                 logger.debug(f"Agent calling evaluate_selector: '{selector}'")
                 result = await tools_instance.evaluate_selector(
                     selector=selector,
@@ -427,49 +422,37 @@ class SelectronApp(App[None]):
                     return_matched_html=True,
                 )
                 if result and result.element_count > 0 and not result.error:
-                    logger.debug(f"Highlighting intermediate selector: '{selector}'")
-                    success, img = await self._highlighter.highlight(
+                    success = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="yellow"
                     )
-                    if success and img:
-                        latest_screenshot = img
+                    if success:
+                        pass
                 return result
 
             async def get_children_tags_wrapper(selector: str, **kwargs):
-                nonlocal latest_screenshot
                 logger.debug(f"Agent calling get_children_tags: '{selector}'")
                 result = await tools_instance.get_children_tags(selector=selector, **kwargs)
                 if result and result.parent_found and not result.error:
-                    logger.debug(f"Highlighting parent for get_children_tags: '{selector}'")
-                    success, img = await self._highlighter.highlight(
+                    success = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="red"
                     )
-                    if success and img:
-                        latest_screenshot = img
+                    if success:
+                        pass
                 return result
 
             async def get_siblings_wrapper(selector: str, **kwargs):
-                nonlocal latest_screenshot
                 logger.debug(f"Agent calling get_siblings: '{selector}'")
                 result = await tools_instance.get_siblings(selector=selector, **kwargs)
                 if result and result.element_found and not result.error:
-                    success, img = await self._highlighter.highlight(
+                    success = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="blue"
                     )
-                    if success and img:
-                        latest_screenshot = img
+                    if success:
+                        pass
                 return result
 
             async def extract_data_from_element_wrapper(selector: str, **kwargs):
-                nonlocal latest_screenshot
-                logger.debug(f"Highlighting potentially final selector: '{selector}'")
-                success, img = await self._highlighter.highlight(
-                    self._active_tab_ref, selector, color="lime"
-                )
-                if success and img:
-                    latest_screenshot = img
-                elif not success:
-                    logger.warning(f"Highlight failed for extraction selector: '{selector}'")
+                # No highlight here anymore, final highlight happens after agent completion.
                 return await tools_instance.extract_data_from_element(selector=selector, **kwargs)
 
             wrapped_tools = [
@@ -509,6 +492,14 @@ class SelectronApp(App[None]):
                     f"FINISHED. Proposal: {proposal.proposed_selector}\nREASONING: {proposal.reasoning}"
                 )
                 self._last_proposed_selector = proposal.proposed_selector
+                # Highlight the final proposed selector in lime
+                success = await self._highlighter.highlight(
+                    self._active_tab_ref, proposal.proposed_selector, color="lime"
+                )
+                if success:
+                    pass
+                elif not success:
+                    logger.warning(f"Final highlight failed for selector: '{proposal.proposed_selector}'")
             else:
                 logger.error(
                     f"Agent returned unexpected output type: {type(agent_run_result.output)} / {agent_run_result.output}"
@@ -525,12 +516,7 @@ class SelectronApp(App[None]):
     async def trigger_rehighlight(self):
         # Check if there's an active tab and if the highlighter state indicates highlights are active
         if self._active_tab_ref and self._highlighter.is_active():
-            logger.debug(  # Changed level to debug as this might happen often during agent run
-                f"Attempting re-highlight on tab {self._active_tab_ref.id}"
-            )
             await self._highlighter.rehighlight(self._active_tab_ref)
-        else:
-            logger.debug("Skipping re-highlight: No active tab or highlights not active.")
 
     async def _clear_table_view(self) -> None:
         try:
