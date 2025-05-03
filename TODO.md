@@ -1,3 +1,4 @@
 - test selector tools
+- rename cli ui reference ids
 - refactoring
 - generate python to parse

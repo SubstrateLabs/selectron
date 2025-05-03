@@ -36,8 +36,9 @@ def get_logger(name: str) -> logging.Logger:
         _file_handler.setLevel(logging.INFO)  # Log INFO and above to file
         root_logger.addHandler(_file_handler)
 
-        # Set library levels (optional, but good practice)
+        # Set library levels
         logging.getLogger("websockets").setLevel(logging.WARNING)
+        logging.getLogger("httpx").setLevel(logging.WARNING)
 
         _initialized = True
 

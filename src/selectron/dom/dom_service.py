@@ -1,4 +1,3 @@
-# NOTE: modified from the original
 import logging
 from importlib import resources
 from typing import Optional, Protocol
@@ -11,12 +10,10 @@ from selectron.dom.dom_views import (
     SelectorMap,
 )
 from selectron.dom.history_tree_views import ViewportInfo
-from selectron.util.time_execution import time_execution_async
 
 logger = logging.getLogger(__name__)
 
 
-# NOTE: previously dependend on playwright, abstracted
 class BrowserExecutor(Protocol):
     async def evaluate(self, expression: str, arg: Optional[dict] = None) -> dict:
         """Evaluates JavaScript expression in the page context."""
@@ -125,7 +122,6 @@ class DomService:
 
         return await self._construct_dom_tree(eval_page)
 
-    @time_execution_async("--construct_dom_tree")
     async def _construct_dom_tree(
         self,
         eval_page: dict,

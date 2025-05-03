@@ -86,3 +86,13 @@ class SelectorProposal(BaseModel):
         "unique",
         description="Indicates if the selector targets a single element or intentionally multiple elements.",
     )
+
+
+class ProposalResult(BaseModel):
+    """Result of the UI proposal generation."""
+
+    description: Optional[str] = None
+    error_message: Optional[str] = None
+
+
+# --- Selector Agent Types ---

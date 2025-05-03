@@ -6,7 +6,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup, Tag
 from markdownify import markdownify
 
-from selectron.ai.selector_types import (
+from selectron.ai.types import (
     ChildDetail,
     ChildrenTagsResult,
     ExtractionResult,

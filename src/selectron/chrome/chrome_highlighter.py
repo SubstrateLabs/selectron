@@ -10,9 +10,7 @@ from selectron.util.logger import get_logger
 logger = get_logger(__name__)
 
 
-class HighlightService:
-    """Manages highlighting elements in a Chrome tab via CDP."""
-
+class ChromeHighlighter:
     def __init__(self):
         self._highlights_active: bool = False
         self._last_highlight_selector: Optional[str] = None
