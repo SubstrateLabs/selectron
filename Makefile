@@ -1,7 +1,7 @@
 .PHONY: format lint typecheck test install clean
 
-cli:
-	uv run scripts/cli.py
+dev:
+	uv run selectron
 
 # ================================
 # housekeeping

@@ -37,6 +37,9 @@ dependencies = [
     "websockets>=15.0.1",
 ]
 
+[project.scripts]
+selectron = "selectron.entry_points:start"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0", 

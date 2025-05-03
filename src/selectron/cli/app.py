@@ -34,6 +34,7 @@ from selectron.ai.types import (
     SelectorProposal,
 )
 from selectron.chrome.chrome_highlighter import ChromeHighlighter
+from selectron.chrome.chrome_tab_manager import ChromeTabManager
 from selectron.chrome.connect import ensure_chrome_connection
 from selectron.chrome.types import TabReference
 from selectron.cli.log_panel import LogPanel
@@ -44,34 +45,25 @@ logger = get_logger(__name__)
 LOG_PATH = get_app_dir() / "selectron.log"
 THEME_DARK = "nord"
 THEME_LIGHT = "solarized-light"
-DEFAULT_THEME = THEME_LIGHT
+DEFAULT_THEME = THEME_DARK
 
 
-class Selectron(App[None]):
-    CSS_PATH = "cli.tcss"
+class SelectronApp(App[None]):
+    CSS_PATH = "styles.tcss"
     BINDINGS = [
         Binding(key="ctrl+c", action="quit", description="Quit App", show=False),
         Binding(key="ctrl+q", action="quit", description="Quit App", show=True),
         Binding(key="ctrl+l", action="open_log_file", description="Open Logs", show=True),
         Binding(key="ctrl+t", action="toggle_dark", description="Toggle Theme", show=True),
     ]
-
-    # Removed monitor and monitor_task, will be managed by ChromeTabManager
     shutdown_event: asyncio.Event
-
-    # Attributes for log file watching
     _active_tab_ref: Optional[TabReference] = None
     _active_tab_dom_string: Optional[str] = None
     _agent_worker: Optional[Worker[None]] = None
     _highlighter: ChromeHighlighter
     _openai_client: Optional[openai.AsyncOpenAI] = None
-    # Removed _proposal_tasks
     _last_proposed_selector: Optional[str] = None
-
-    # Add instance for the new manager
-    _tab_manager: Optional["ChromeTabManager"] = (
-        None  # Forward reference if manager imports Selectron
-    )
+    _tab_manager: Optional[ChromeTabManager] = None
 
     def __init__(self):
         super().__init__()
@@ -81,21 +73,21 @@ class Selectron(App[None]):
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         yield Header()
-        # Main container holds the TabbedContent
-        with Container(id="main-container"):  # Give the container an ID for potential styling
-            # TabbedContent takes up the main area
-            with TabbedContent(initial="logs-tab"):
-                with TabPane("✦ Logs ✧", id="logs-tab"):
-                    # Instantiate the new LogPanel widget
-                    yield LogPanel(log_file_path=LOG_PATH, id="log-panel-widget")
-                with TabPane("✦ Extracted Markdown ✧", id="markdown-tab"):
-                    yield ListView(id="markdown-list")
-                with TabPane("✦ Parsed Data ✧", id="table-tab"):
-                    yield DataTable(id="data-table")
-        # Input bar remains docked at the bottom, outside the main container
-        with Horizontal(classes="input-bar"):  # Container for input and submit
-            yield Input(placeholder="Enter description or let AI propose...", id="prompt-input")
-            yield Button("Select", id="submit-button")
+        # # Main container holds the TabbedContent
+        # with Container(id="main-container"):  # Give the container an ID for potential styling
+        #     # TabbedContent takes up the main area
+        #     with TabbedContent(initial="logs-tab"):
+        #         with TabPane("✦ Logs ✧", id="logs-tab"):
+        #             # Instantiate the new LogPanel widget
+        #             yield LogPanel(log_file_path=LOG_PATH, id="log-panel-widget")
+        #         with TabPane("✦ Extracted Markdown ✧", id="markdown-tab"):
+        #             yield ListView(id="markdown-list")
+        #         with TabPane("✦ Parsed Data ✧", id="table-tab"):
+        #             yield DataTable(id="data-table")
+        # # Input bar remains docked at the bottom, outside the main container
+        # with Horizontal(classes="input-bar"):  # Container for input and submit
+        #     yield Input(placeholder="Enter description or let AI propose...", id="prompt-input")
+        #     yield Button("Select", id="submit-button")
 
         yield Footer()
 
@@ -116,12 +108,12 @@ class Selectron(App[None]):
             on_page_content_ready=self._handle_page_content_update,
             on_proposal_ready=self._handle_proposal_update,
         )
-        self.run_worker(
-            self._tab_manager.run_monitoring_task(), exclusive=True, group="chrome_manager"
-        )
+        # self.run_worker(
+        #     self._tab_manager.run_monitoring_task(), exclusive=True, group="chrome_manager"
+        # )
         self.theme = DEFAULT_THEME
-        if not await ensure_chrome_connection():
-            logger.error("Failed to establish Chrome connection.")
+        # if not await ensure_chrome_connection():
+        #     logger.error("Failed to establish Chrome connection.")
 
     async def _handle_active_tab_update(
         self, tab_ref: Optional[TabReference], dom_string: Optional[str]
@@ -417,7 +409,6 @@ if __name__ == "__main__":
     # Ensure logger is initialized (and file created) before app runs
     get_logger("__main__")  # Initial call to setup file logging
     # Import manager here to avoid circular dependency if manager needs Selectron types
-    from selectron.chrome.chrome_tab_manager import ChromeTabManager
 
-    app = Selectron()
+    app = SelectronApp()
     app.run()
