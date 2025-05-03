@@ -1,4 +1,4 @@
+- pydanticai model length in messages exceeds
 - generate python
 - save results
 - selector/parser registry
-- cached highlight selectors on new tab?

@@ -384,9 +384,13 @@ class ChromeHighlighter:
         tab_ref: Optional[TabReference],
         status_text: str,
         state: str = "idle",
+        show_spinner: bool = False,
         executor: Optional[CdpBrowserExecutor] = None,
     ) -> None:
-        """Shows or updates an agent status badge in the top-right corner."""
+        """Shows or updates an agent status badge in the top-right corner.
+
+        Optionally includes a simple text spinner.
+        """
         if not tab_ref:
             return  # Silently ignore if no tab
 
@@ -397,6 +401,10 @@ class ChromeHighlighter:
             "thinking": ("#ADD8E6", "#000000"),  # Light blue background, black text
             "sending": ("#FFFFE0", "#000000"),  # Light yellow background, black text
             "received_success": ("#90EE90", "#000000"),  # Light green background, black text
+            "received_no_results": (
+                "#FFD700",
+                "#000000",
+            ),  # Gold/Orange background, black text for no results found
             "received_error": ("#FFA07A", "#000000"),  # Light salmon background, black text
             "final_success": ("#90EE90", "#000000"),  # Same as received_success for now
         }
@@ -404,53 +412,91 @@ class ChromeHighlighter:
 
         # Escape status text for JS
         escaped_status_text = (
-            status_text.replace("\\", "\\\\")
-            .replace("'", "\\'")
-            .replace('"', '\\"')
-            .replace("`", "\\`")
-            .replace("\\n", "\\\\n")  # Ensure newlines in python are escaped for JS
+            status_text.replace("\\\\", "\\\\\\\\")
+            .replace("'", "\\\\'")
+            .replace('"', '\\\\"')
+            .replace("`", "\\\\`")
+            .replace(
+                "\\\\n", "\\\\\\\\n"
+            )  # Ensure newlines are doubly escaped for JS within template literal
         )
 
         js_code = f"""
         (function() {{
             const badgeId = '{badge_id}';
-            const text = `{escaped_status_text}`;
+            const text = `{escaped_status_text}`; // Base text content
             const bgColor = '{bg_color}';
             const textColor = '{text_color}';
+            const showSpinner = {str(show_spinner).lower()}; // Correctly pass boolean to JS
+            const spinnerChars = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']; // Braille spinner
+            let spinnerIndex = 0;
+            const spinnerIntervalAttr = 'data-spinner-interval-id';
+            const baseTextAttr = 'data-base-text';
 
             let badge = document.getElementById(badgeId);
 
+            // --- Create Badge if it doesn't exist ---
             if (!badge) {{
                 badge = document.createElement('div');
                 badge.id = badgeId;
                 badge.style.position = 'fixed';
-                badge.style.top = '0px';    // Position exactly at top
-                badge.style.right = '0px';   // Position exactly at right
-                badge.style.padding = '2px 5px'; // Reduced padding
+                badge.style.top = '0px';
+                badge.style.right = '0px';
+                badge.style.padding = '2px 5px';
                 badge.style.borderRadius = '5px';
                 badge.style.fontSize = '10px';
                 badge.style.fontFamily = 'sans-serif';
-                badge.style.zIndex = '2147483647'; // Max z-index
-                badge.style.pointerEvents = 'none'; // Prevent interference
-                badge.style.opacity = '0.8';   // Semi-transparent
-                badge.style.whiteSpace = 'pre-wrap'; // Allow wrapping (restored)
-                badge.style.maxWidth = '300px'; // Restore max width for wrapping
-                // Append to body if available, otherwise documentElement
+                badge.style.zIndex = '2147483647';
+                badge.style.pointerEvents = 'none';
+                badge.style.opacity = '0.88';
+                badge.style.whiteSpace = 'pre-wrap';
+                badge.style.maxWidth = '300px';
+                badge.style.border = '1px solid black'; 
                 const parent = document.body || document.documentElement;
                 if (parent) {{
                     parent.appendChild(badge);
                 }} else {{
-                    console.warn('Selectron: Could not find body or documentElement to append agent status badge.');
+                    console.warn('Selectron: Could not find parent for badge.');
                     return 'ERROR: Could not find parent for badge.';
                 }}
             }}
 
-            // Update content and style
-            badge.textContent = text;
+            // --- Clear existing spinner interval if present ---
+            const existingIntervalId = badge.getAttribute(spinnerIntervalAttr);
+            if (existingIntervalId) {{
+                clearInterval(parseInt(existingIntervalId, 10));
+                badge.removeAttribute(spinnerIntervalAttr);
+                // Restore base text if spinner was active
+                const baseText = badge.getAttribute(baseTextAttr);
+                if (baseText) badge.textContent = baseText;
+            }}
+            badge.removeAttribute(baseTextAttr); // Clear base text attr
+
+
+            // --- Update style and base text ---
+            badge.style.border = '1px solid black'; // Ensure border is set on updates too
             badge.style.backgroundColor = bgColor;
             badge.style.color = textColor;
+            badge.textContent = text; // Set initial text
 
-            return `Agent status badge updated: ${{text}} (State: {state})`;
+            // --- Start new spinner if requested ---
+            if (showSpinner) {{
+                badge.setAttribute(baseTextAttr, text); // Store base text
+                const intervalId = setInterval(() => {{
+                    spinnerIndex = (spinnerIndex + 1) % spinnerChars.length;
+                    // Check if badge still exists before updating
+                    const currentBadge = document.getElementById(badgeId);
+                    if (currentBadge) {{
+                       currentBadge.textContent = spinnerChars[spinnerIndex] + ' ' + text;
+                    }} else {{
+                        // Badge was removed, clear interval
+                        clearInterval(intervalId);
+                    }}
+                }}, 250); // Update spinner every 250ms
+                badge.setAttribute(spinnerIntervalAttr, intervalId.toString());
+            }}
+
+            return `Agent status badge updated: ${{text}} (State: {state}, Spinner: ${{showSpinner}})`;
         }})();
         """
         await self._execute_js_on_tab(tab_ref, js_code, "update agent status", executor)
@@ -460,7 +506,7 @@ class ChromeHighlighter:
         tab_ref: Optional[TabReference],
         executor: Optional[CdpBrowserExecutor] = None,
     ) -> None:
-        """Removes the agent status badge."""
+        """Removes the agent status badge and clears any running spinner."""
         if not tab_ref:
             return  # Silently ignore if no tab
 
@@ -470,11 +516,22 @@ class ChromeHighlighter:
             const badgeId = '{badge_id}';
             const badge = document.getElementById(badgeId);
             if (badge) {{
+                 // --- Clear spinner interval before removing ---
+                const spinnerIntervalAttr = 'data-spinner-interval-id';
+                const existingIntervalId = badge.getAttribute(spinnerIntervalAttr);
+                if (existingIntervalId) {{
+                    try {{
+                       clearInterval(parseInt(existingIntervalId, 10));
+                       console.log('Selectron: Cleared spinner interval on hide.');
+                    }} catch (e) {{
+                       console.warn('Selectron: Failed to clear spinner interval on hide:', e);
+                    }}
+                }}
+                // --- End clear spinner ---
                 try {{
                     badge.remove();
                     return `SUCCESS: Removed agent status badge ('${{badgeId}}').`;
                 }} catch (e) {{
-                    // Log error to console for debugging on the page
                     console.error('Selectron: Failed to remove agent status badge:', e);
                     return `ERROR: Failed to remove agent status badge ('${{badgeId}}'): ${{e.message}}`;
                 }}

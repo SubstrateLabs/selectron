@@ -1,0 +1,198 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Optional
+
+from PIL import Image
+
+from selectron.ai.propose_selection import propose_selection
+from selectron.ai.types import AutoProposal
+from selectron.chrome.chrome_highlighter import ChromeHighlighter
+from selectron.chrome.chrome_monitor import TabChangeEvent
+from selectron.chrome.types import TabReference
+from selectron.util.logger import get_logger
+
+if TYPE_CHECKING:
+    from textual.widgets import DataTable, Input, Label
+
+    from selectron.cli.app import SelectronApp  # Use specific type if possible
+
+logger = get_logger(__name__)
+
+
+class MonitorEventHandler:
+    """Handles callbacks from the ChromeMonitor."""
+
+    def __init__(
+        self,
+        app: SelectronApp,  # Keep strong typing
+        highlighter: ChromeHighlighter,
+        url_label: Label,
+        data_table: DataTable,
+        prompt_input: Input,
+    ):
+        self._app = app
+        self._highlighter = highlighter
+        # Store references to UI elements needed
+        self._url_label = url_label
+        self._data_table = data_table
+        self._prompt_input = prompt_input
+
+    async def handle_polling_change(self, event: TabChangeEvent) -> None:
+        """Handles tab navigation/changes detected by polling."""
+        # Logic moved from SelectronApp._handle_polling_change
+        navigated_tabs_info = event.navigated_tabs
+        if navigated_tabs_info:
+            navigated_ids = {new_tab.id for new_tab, _ in navigated_tabs_info}
+            logger.debug(f"Polling detected navigation for tabs: {navigated_ids}. Resetting flag.")
+            # Access app state via self._app
+            self._app._propose_selection_done_for_tab = None
+            # NOTE: Cannot reliably clear highlights/badges here as ws_url may be missing
+
+    async def handle_interaction_update(self, tab_ref: TabReference) -> None:
+        """Handles updates triggered by user interaction in a tab."""
+        # Logic moved from SelectronApp._handle_interaction_update
+        self._app._active_tab_ref = tab_ref
+
+        try:
+            # Use the stored Label reference
+            if tab_ref and tab_ref.url:
+                self._url_label.update(tab_ref.url)
+        except Exception as label_err:
+            logger.error(f"Failed to update URL label on interaction: {label_err}")
+
+        # Call app's method to clear table
+        await self._app._clear_table_view()
+
+        # Reset proposal flag logic
+        current_active_id_for_propose_select = self._app._propose_selection_done_for_tab
+        if tab_ref and tab_ref.id != current_active_id_for_propose_select:
+            logger.debug(
+                f"Interaction detected on tab {tab_ref.id} (different from last proposal tab {current_active_id_for_propose_select}). Priming proposal."
+            )
+            self._app._propose_selection_done_for_tab = (
+                None  # Allow proposal for this tab upon next content fetch
+            )
+
+    async def handle_content_fetched(
+        self,
+        tab_ref: TabReference,
+        screenshot: Optional[Image.Image],
+        scroll_y: Optional[int],
+        dom_string: Optional[str],
+    ) -> None:
+        """Handles updates after tab content (HTML, screenshot, DOM) is fetched."""
+        # Logic moved from SelectronApp._handle_content_fetched
+        html_content = tab_ref.html  # HTML is now part of the TabReference passed
+
+        if not html_content:
+            logger.warning(
+                f"Monitor Content Fetched (Tab {tab_ref.id}): No HTML content in TabReference."
+            )
+            await self._app._clear_table_view()
+            return
+
+        # Always update the active ref and DOM string first (on the app)
+        self._app._active_tab_ref = tab_ref
+        self._app._active_tab_dom_string = dom_string
+
+        # Update UI Label using the latest fetched info (using stored ref)
+        try:
+            if tab_ref and tab_ref.url:
+                self._url_label.update(tab_ref.url)
+            else:
+                self._url_label.update("No active tab URL")
+        except Exception as label_err:
+            logger.error(f"Failed to update URL label on content fetch: {label_err}")
+
+        try:
+            # Use stored DataTable ref
+            self._data_table.clear()
+            html_to_display = (
+                html_content[:5000] + "..." if len(html_content) > 5000 else html_content
+            )
+            self._data_table.add_row(
+                html_to_display,
+                key=f"html_{tab_ref.id}",
+            )
+        except Exception as table_err:
+            logger.error(f"Failed to update data table from monitor callback: {table_err}")
+
+        # Check if the main agent worker is running (on the app)
+        if self._app._agent_worker and self._app._agent_worker.is_running:
+            logger.debug("Skipping proposal: Selector agent is currently running.")
+            pass  # Let the logic proceed to potentially update the flag if needed, but don't start worker
+        else:
+            # Only proceed with proposal if agent is NOT running
+            if (
+                screenshot
+                and self._app._active_tab_ref
+                and self._app._propose_selection_done_for_tab != self._app._active_tab_ref.id
+            ):
+                await self._highlighter.show_agent_status(
+                    self._app._active_tab_ref, "Proposing selection...", state="thinking"
+                )
+
+                if (
+                    self._app._propose_selection_worker
+                    and self._app._propose_selection_worker.is_running
+                ):
+                    logger.debug("Cancelling previous propose worker.")
+                    self._app._propose_selection_worker.cancel()
+
+                async def _do_propose_selection():
+                    try:
+                        # Use app's model config
+                        proposal = await propose_selection(screenshot, self._app._model_config)
+                        if self._app._active_tab_ref:
+                            self._app._propose_selection_done_for_tab = self._app._active_tab_ref.id
+
+                        if isinstance(proposal, AutoProposal):
+                            desc = proposal.proposed_description
+
+                            def _update_input():
+                                try:
+                                    # Use stored Input ref
+                                    self._prompt_input.value = desc
+                                    if desc and self._app._active_tab_ref:
+                                        # Use app's call_later
+                                        self._app.call_later(
+                                            self._highlighter.show_agent_status,
+                                            self._app._active_tab_ref,
+                                            desc,
+                                            state="idle",
+                                        )
+                                except Exception as e:
+                                    logger.error(f"Error updating input from proposal: {e}")
+
+                            # Use app's call_later
+                            self._app.call_later(_update_input)
+
+                            if self._app._active_tab_ref:
+                                self._app.call_later(
+                                    self._highlighter.show_agent_status,
+                                    self._app._active_tab_ref,
+                                    desc,
+                                    state="idle",
+                                )
+
+                    except Exception as e:
+                        logger.error(f"Error during proposal: {e}", exc_info=True)
+                        if self._app._active_tab_ref:
+                            self._app.call_later(
+                                lambda: self._highlighter.hide_agent_status(
+                                    self._app._active_tab_ref
+                                )
+                            )
+
+                # Use app's run_worker
+                self._app._propose_selection_worker = self._app.run_worker(
+                    _do_propose_selection(), exclusive=True, group="propose_selection"
+                )
+            elif (
+                screenshot
+                and self._app._active_tab_ref
+                and self._app._propose_selection_done_for_tab == self._app._active_tab_ref.id
+            ):
+                pass
+            elif not screenshot:
+                logger.debug("Skipping proposal: No screenshot available.")

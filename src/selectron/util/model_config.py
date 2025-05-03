@@ -1,7 +1,7 @@
 import os
 from typing import Literal, Optional
 
-Provider = Literal["anthropic", "openai", "openrouter"]
+Provider = Literal["anthropic", "openai"]
 
 CLAUDE_3_5_SONNET = "anthropic:claude-3-5-sonnet-latest"
 CLAUDE_3_7_SONNET = "anthropic:claude-3-7-sonnet-latest"
@@ -11,7 +11,7 @@ OPENAI_GPT_4_1 = "openai:gpt-4.1"
 ANTHROPIC_PROPOSE_MODEL = CLAUDE_3_5_SONNET
 ANTHROPIC_AGENT_MODEL = CLAUDE_3_7_SONNET
 OPENAI_PROPOSE_MODEL = OPENAI_GPT_4_1_NANO
-OPENAI_AGENT_MODEL = OPENAI_GPT_4_1_MINI
+OPENAI_AGENT_MODEL = OPENAI_GPT_4_1
 
 
 class ModelConfig:
