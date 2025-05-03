@@ -6,6 +6,7 @@ from pydantic_ai import Agent, Tool
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
+from textual.timer import Timer
 from textual.widgets import (
     Button,
     DataTable,
@@ -18,7 +19,7 @@ from textual.widgets import (
 )
 from textual.worker import Worker
 
-from selectron.ai.propose_select import propose_selection
+from selectron.ai.propose_selection import propose_selection
 from selectron.ai.selector_prompt import (
     SELECTOR_PROMPT_BASE,
     SELECTOR_PROMPT_DOM_TEMPLATE,
@@ -64,6 +65,7 @@ class SelectronApp(App[None]):
     _last_proposed_selector: Optional[str] = None
     _chrome_monitor: Optional[ChromeMonitor] = None
     _vision_proposal_done_for_tab: Optional[str] = None
+    _input_debounce_timer: Optional[Timer] = None
 
     def __init__(self, model_config: ModelConfig):
         super().__init__()
@@ -110,7 +112,9 @@ class SelectronApp(App[None]):
         # Reset vision proposal flag for any tab that navigated
         navigated_ids = {new_tab.id for new_tab, _ in event.navigated_tabs}
         if navigated_ids:
-            logger.debug(f"Polling detected navigation for tabs: {navigated_ids}. Resetting vision flag.")
+            logger.debug(
+                f"Polling detected navigation for tabs: {navigated_ids}. Resetting vision flag."
+            )
             # We only track one flag, so if *any* navigation occurs, reset it.
             # This assumes the user interaction/focus will align with one of the navigated tabs soon.
             # A more complex approach might involve checking if the *currently active* tab navigated,
@@ -133,12 +137,19 @@ class SelectronApp(App[None]):
             logger.debug(
                 f"Interaction detected on DIFFERENT tab {tab_ref.id} (current: {current_active_id}). Priming vision proposal."
             )
+            # Hide any status badge from previous tab interaction
+            await self._highlighter.hide_agent_status(tab_ref)
             self._vision_proposal_done_for_tab = (
                 None  # Allow proposal for this tab upon next content fetch
             )
 
         try:
-            self.query_one("#prompt-input", Input).value = ""
+            input_widget = self.query_one("#prompt-input", Input)
+            if input_widget.value:  # Clear input only if it has value
+                input_widget.value = ""
+                # Also hide the status badge since we cleared the input
+                if self._active_tab_ref:
+                    await self._highlighter.hide_agent_status(self._active_tab_ref)
             # Clear prompt regardless of tab match
         except Exception as e:
             logger.warning(f"Could not clear prompt input on interaction: {e}")
@@ -200,6 +211,10 @@ class SelectronApp(App[None]):
             and self._active_tab_ref
             and self._vision_proposal_done_for_tab != self._active_tab_ref.id
         ):
+            await self._highlighter.show_agent_status(
+                self._active_tab_ref, "Proposing selection...", state="thinking"
+            )
+
             if self._vision_worker and self._vision_worker.is_running:
                 logger.debug("Cancelling previous vision worker.")
                 self._vision_worker.cancel()
@@ -218,13 +233,36 @@ class SelectronApp(App[None]):
                             try:
                                 prompt_input = self.query_one("#prompt-input", Input)
                                 prompt_input.value = desc
+                                # Show "Ready" badge after AI proposal fills input
+                                if desc and self._active_tab_ref:
+                                    self.app.call_later(
+                                        self._highlighter.show_agent_status,
+                                        self._active_tab_ref,
+                                        desc,
+                                        state="idle",
+                                    )
                             except Exception as e:
                                 logger.error(f"Error updating input from vision proposal: {e}")
 
                         self.app.call_later(_update_input)
 
+                        # Update badge to "Ready" after successful proposal
+                        if self._active_tab_ref:
+                            self.app.call_later(
+                                self._highlighter.show_agent_status,
+                                self._active_tab_ref,
+                                desc,
+                                state="idle",
+                            )
+
                 except Exception as e:
                     logger.error(f"Error during vision proposal: {e}", exc_info=True)
+                    # Hide status badge on vision proposal error
+                    if self._active_tab_ref:
+                        self.app.call_later(
+                            lambda: self._highlighter.hide_agent_status(self._active_tab_ref)
+                        )
+                    # Hide status badge on error? Maybe not, input might still be valid.
                     # Potentially reset the flag on error? Or leave it set to prevent retries?
                     # Let's leave it set for now.
 
@@ -331,6 +369,7 @@ class SelectronApp(App[None]):
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "prompt-input":
+            # When submitted, the agent will start and show its own status, overriding "Ready"
             target_description = event.value.strip()
             if not target_description:
                 return
@@ -357,7 +396,11 @@ class SelectronApp(App[None]):
         if self._chrome_monitor:
             await self._chrome_monitor.stop_monitoring()
         if self._agent_worker and self._agent_worker.is_running:
+            logger.info("Cancelling agent worker on quit.")
             self._agent_worker.cancel()
+            # Ensure badge is hidden on quit, even if agent was running
+            if self._active_tab_ref:
+                await self._highlighter.hide_agent_status(self._active_tab_ref)
         self._highlighter.set_active(False)
         if self._active_tab_ref:
             try:
@@ -400,9 +443,11 @@ class SelectronApp(App[None]):
             logger.error(
                 f"Cannot run agent: HTML content missing in active tab ref {tab_ref.id}. Aborting."
             )
+            await self._highlighter.hide_agent_status(tab_ref)  # Hide badge on abort
             return
         if not current_url:
             logger.error(f"Cannot run agent: URL missing in active tab ref {tab_ref.id}. Aborting.")
+            await self._highlighter.hide_agent_status(tab_ref)  # Hide badge on abort
             return
 
         logger.info(
@@ -411,9 +456,21 @@ class SelectronApp(App[None]):
         base_url_for_agent = current_url
 
         try:
+            # --- Initial status update ---
+            await self._highlighter.show_agent_status(
+                tab_ref, "Agent starting...", state="thinking"
+            )
+            # Use the same executor for subsequent operations if created by highlighter
+            # Note: This assumes show_agent_status might create one we can reuse.
+            # A more robust way might be to explicitly create one here and pass it.
+            # Let's assume _execute_js_on_tab handles creation/reuse implicitly for now.
+
             tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
 
             async def evaluate_selector_wrapper(selector: str, target_text_to_check: str, **kwargs):
+                await self._highlighter.show_agent_status(
+                    tab_ref, f"Tool: evaluate_selector('{selector[:30]}...')", state="sending"
+                )
                 result = await tools_instance.evaluate_selector(
                     selector=selector,
                     target_text_to_check=target_text_to_check,
@@ -424,33 +481,137 @@ class SelectronApp(App[None]):
                     success = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="yellow"
                     )
+                    await self._highlighter.show_agent_status(
+                        tab_ref,
+                        f"Tool: evaluate_selector OK ({result.element_count} found)",
+                        state="received_success",
+                    )
                     if success:
                         pass
+                elif result and result.error:
+                    await self._highlighter.show_agent_status(
+                        tab_ref,
+                        f"Tool: evaluate_selector Error: {result.error[:50]}...",
+                        state="received_error",
+                    )
+                else:
+                    # No elements found or other non-error case
+                    await self._highlighter.show_agent_status(
+                        tab_ref, "Tool: evaluate_selector OK (0 found)", state="received_success"
+                    )  # Still success technically
+                    success = await self._highlighter.highlight(
+                        self._active_tab_ref, selector, color="yellow"
+                    )
                 return result
 
             async def get_children_tags_wrapper(selector: str, **kwargs):
+                await self._highlighter.show_agent_status(
+                    tab_ref, f"Tool: get_children_tags('{selector[:30]}...')", state="sending"
+                )
                 result = await tools_instance.get_children_tags(selector=selector, **kwargs)
                 if result and result.parent_found and not result.error:
                     success = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="red"
                     )
+                    await self._highlighter.show_agent_status(
+                        tab_ref,
+                        f"Tool: get_children_tags OK ({len(result.children_details or [])} children)",
+                        state="received_success",
+                    )
                     if success:
                         pass
+                elif result and result.error:
+                    await self._highlighter.show_agent_status(
+                        tab_ref,
+                        f"Tool: get_children_tags Error: {result.error[:50]}...",
+                        state="received_error",
+                    )
+                else:
+                    # Parent not found or other non-error case
+                    await self._highlighter.show_agent_status(
+                        tab_ref,
+                        "Tool: get_children_tags OK (Parent not found)",
+                        state="received_success",
+                    )
+                    success = await self._highlighter.highlight(
+                        self._active_tab_ref, selector, color="red"
+                    )
                 return result
 
             async def get_siblings_wrapper(selector: str, **kwargs):
+                await self._highlighter.show_agent_status(
+                    tab_ref, f"Tool: get_siblings('{selector[:30]}...')", state="sending"
+                )
                 result = await tools_instance.get_siblings(selector=selector, **kwargs)
                 if result and result.element_found and not result.error:
                     success = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="blue"
                     )
+                    await self._highlighter.show_agent_status(
+                        tab_ref,
+                        f"Tool: get_siblings OK ({len(result.siblings or [])} siblings)",
+                        state="received_success",
+                    )
                     if success:
                         pass
+                elif result and result.error:
+                    await self._highlighter.show_agent_status(
+                        tab_ref,
+                        f"Tool: get_siblings Error: {result.error[:50]}...",
+                        state="received_error",
+                    )
+                else:
+                    # Element not found or other non-error case
+                    await self._highlighter.show_agent_status(
+                        tab_ref,
+                        "Tool: get_siblings OK (Element not found)",
+                        state="received_success",
+                    )
+                    success = await self._highlighter.highlight(
+                        self._active_tab_ref, selector, color="blue"
+                    )
                 return result
 
             async def extract_data_from_element_wrapper(selector: str, **kwargs):
+                await self._highlighter.show_agent_status(
+                    tab_ref,
+                    f"Tool: extract_data_from_element('{selector[:30]}...')",
+                    state="sending",
+                )
                 # No highlight here anymore, final highlight happens after agent completion.
-                return await tools_instance.extract_data_from_element(selector=selector, **kwargs)
+                result = await tools_instance.extract_data_from_element(selector=selector, **kwargs)
+                # Check for error first. If no error, extraction was attempted (element likely found).
+                if result and not result.error:
+                    # Access extracted_data directly, it's a dict - NO, check individual fields
+                    # Check which fields have data
+                    extracted_count = sum(
+                        1
+                        for val in [
+                            result.extracted_text,
+                            result.extracted_attribute_value,
+                            result.extracted_markdown,
+                            result.extracted_html,
+                        ]
+                        if val is not None
+                    )
+                    await self._highlighter.show_agent_status(
+                        tab_ref,
+                        f"Tool: extract_data OK ({extracted_count} fields populated)",
+                        state="received_success",
+                    )
+                elif result and result.error:
+                    await self._highlighter.show_agent_status(
+                        tab_ref,
+                        f"Tool: extract_data Error: {result.error[:50]}...",
+                        state="received_error",
+                    )
+                else:
+                    await self._highlighter.show_agent_status(
+                        tab_ref,
+                        "Tool: extract_data OK (Element not found or no data)",
+                        state="received_success",
+                    )
+                return result
 
             wrapped_tools = [
                 Tool(evaluate_selector_wrapper),
@@ -466,6 +627,9 @@ class SelectronApp(App[None]):
                 )
             else:
                 logger.warning(f"Proceeding without DOM string representation for tab {tab_ref.id}")
+
+            # Update status before agent run
+            await self._highlighter.show_agent_status(tab_ref, "Thinking...", state="thinking")
 
             agent = Agent(
                 self._model_config.selector_agent_model,
@@ -483,32 +647,65 @@ class SelectronApp(App[None]):
             query = " ".join(query_parts)
             agent_input: Any = query
             agent_run_result = await agent.run(agent_input)
+
+            # --- Status update after agent run ---
             if isinstance(agent_run_result.output, SelectorProposal):
                 proposal = agent_run_result.output
                 logger.info(
-                    f"FINISHED. Proposal: {proposal.proposed_selector}\nREASONING: {proposal.reasoning}"
+                    f"FINISHED. Proposal: {proposal.proposed_selector}\\nREASONING: {proposal.reasoning}"
+                )
+                await self._highlighter.show_agent_status(
+                    tab_ref,
+                    "Success",
+                    state="final_success",
                 )
                 self._last_proposed_selector = proposal.proposed_selector
                 # Highlight the final proposed selector in lime
                 success = await self._highlighter.highlight(
                     self._active_tab_ref, proposal.proposed_selector, color="lime"
                 )
+                # Keep success badge briefly, then hide? Or hide immediately? Let's hide after a short delay.
+                self.app.call_later(self._delayed_hide_status)
+
                 if success:
                     pass
                 elif not success:
-                    logger.warning(f"Final highlight failed for selector: '{proposal.proposed_selector}'")
+                    logger.warning(
+                        f"Final highlight failed for selector: '{proposal.proposed_selector}'"
+                    )
             else:
                 logger.error(
-                    f"Agent returned unexpected output type: {type(agent_run_result.output)} / {agent_run_result.output}"
+                    f"Agent returned unexpected output type: {type(agent_run_result.output)}"
+                )
+                await self._highlighter.show_agent_status(
+                    tab_ref,
+                    "Agent Error: Unexpected output type",
+                    state="received_error",
                 )
                 self._last_proposed_selector = None
                 self.call_later(self._clear_table_view)
+                self.app.call_later(self._delayed_hide_status)  # Hide error badge too
         except Exception as e:
             logger.error(
                 f"Error running SelectorAgent for target '{target_description}': {e}", exc_info=True
             )
+            # --- Status update on agent exception ---
+            if tab_ref:  # Check if tab_ref is still valid
+                error_msg = f"Agent Error: {type(e).__name__}"
+                await self._highlighter.show_agent_status(
+                    tab_ref, error_msg, state="received_error"
+                )
+                if self.app:  # Ensure app context is available
+                    self.app.call_later(self._delayed_hide_status)
+
             self._last_proposed_selector = None
             self.call_later(self._clear_table_view)
+        finally:
+            # Ensure the badge is eventually hidden if not handled by success/error paths with delays
+            # This is a fallback in case the worker is cancelled or ends unexpectedly
+            if self._active_tab_ref:
+                # Let the delayed hides handle it. If cancelled, action_quit handles it.
+                pass
 
     async def trigger_rehighlight(self):
         # Check if there's an active tab and if the highlighter state indicates highlights are active
@@ -521,3 +718,35 @@ class SelectronApp(App[None]):
             table.clear()
         except Exception as e:
             logger.error(f"Failed to query or clear data table: {e}")
+
+    async def on_input_changed(self, event: Input.Changed) -> None:
+        """Handle changes in the prompt input using a timer for debouncing."""
+        if event.input.id == "prompt-input":
+            # Cancel existing timer if it exists
+            if self._input_debounce_timer:
+                self._input_debounce_timer.stop()
+
+            # Define the action to perform after debounce timeout
+            async def _update_status_after_debounce():
+                current_value = event.value.strip()  # Use event value captured by closure
+                if self._active_tab_ref:
+                    if current_value:
+                        # Display the current input value in the badge
+                        await self._highlighter.show_agent_status(
+                            self._active_tab_ref, current_value, state="idle"
+                        )
+                    else:
+                        await self._highlighter.hide_agent_status(self._active_tab_ref)
+                self._input_debounce_timer = None  # Clear timer ref after execution
+
+            # Start a new timer
+            self._input_debounce_timer = self.set_timer(
+                0.5, _update_status_after_debounce, name="input_debounce"
+            )
+
+    async def _delayed_hide_status(self) -> None:
+        """Helper method called via call_later to hide the status badge after a delay."""
+        await asyncio.sleep(3.0)  # Handle the delay internally
+        if self._active_tab_ref:
+            logger.debug("Hiding agent status badge after delay.")
+            await self._highlighter.hide_agent_status(self._active_tab_ref)

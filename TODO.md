@@ -1,3 +1,4 @@
-- cached highlight selectors on new tab
-- generate python to parse
-- anthropic/openai default models
+- generate python
+- save results
+- selector/parser registry
+- cached highlight selectors on new tab?

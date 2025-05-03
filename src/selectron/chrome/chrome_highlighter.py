@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 
 import websockets
 
@@ -14,6 +14,7 @@ class ChromeHighlighter:
         self._highlights_active: bool = False
         self._last_highlight_selector: Optional[str] = None
         self._last_highlight_color: Optional[str] = None
+        self._agent_status_badge_id = "selectron-agent-status-badge"
 
     async def highlight(
         self, tab_ref: Optional[TabReference], selector: str, color: str = "yellow"
@@ -32,7 +33,6 @@ class ChromeHighlighter:
             self._highlights_active = False
             return False
 
-        # --- Determine alternating color logic --- #
         current_color = color
         alternate_color_map = {
             "yellow": "orange",
@@ -42,25 +42,30 @@ class ChromeHighlighter:
         }
         if color in alternate_color_map and self._last_highlight_color == color:
             current_color = alternate_color_map[color]
-        # --- End alternate color logic --- #
 
-        # --- Store state for re-highlighting ---
         self._last_highlight_selector = selector
         self._last_highlight_color = current_color
         self._highlights_active = True
-        # --- End store state ---
 
         # --- Create Executor Once --- #
-        if not tab_ref.ws_url:
-            logger.error("Internal error: ws_url became None unexpectedly.")
+        temp_executor = None
+        if tab_ref.ws_url:
+            try:
+                # Create one executor to potentially reuse for clear and highlight JS
+                temp_executor = CdpBrowserExecutor(tab_ref.ws_url, tab_ref.url or "")
+            except Exception as e:
+                logger.error(f"Failed to create executor for highlighting: {e}")
+                self._highlights_active = False
+                return False
+        else:
+            logger.error("Highlight error: ws_url is None")
+            self._highlights_active = False
             return False
-        executor = CdpBrowserExecutor(tab_ref.ws_url, tab_ref.url or "")
 
         # --- Clear previous highlights FIRST (using the same executor) ---
-        await self.clear(tab_ref, called_internally=True, executor=executor)
+        await self.clear(tab_ref, called_internally=True, executor=temp_executor)
         # --- End clear previous ---
 
-        tab_id = tab_ref.id
         # Escape the selector string for use within the JS string literal
         escaped_selector = (
             selector.replace("\\", "\\\\")
@@ -139,29 +144,26 @@ class ChromeHighlighter:
         }})();
         """
 
-        try:
-            result = await executor.evaluate(js_code)
-            if result and (
-                "Highlighted" in result
-                or "container not found" in result
-                or "Removed highlight container" in result
-            ):
-                highlight_success = True
-            else:
-                logger.warning(f"Highlight JS returned unexpected value: {result}")
-                highlight_success = False
+        # Use the helper method to execute the highlight JS, passing the same executor
+        result = await self._execute_js_on_tab(
+            tab_ref,
+            js_code,
+            purpose=f"highlight selector '{selector[:30]}...'",
+            executor=temp_executor,  # Reuse executor
+        )
 
-        except websockets.exceptions.WebSocketException as e:
-            logger.error(f"Highlight selector failed for tab {tab_id}: WebSocket error - {e}")
-            self._highlights_active = False
-            return False
-        except Exception as e:
-            logger.error(
-                f"Highlight selector failed for tab {tab_id}: Unexpected error - {e}",
-                exc_info=True,
-            )
-            self._highlights_active = False
-            return False
+        if (
+            result
+            and isinstance(result, str)
+            and ("Highlighted" in result or "No elements found" in result)
+        ):
+            highlight_success = True
+        else:
+            logger.warning(f"Highlight JS returned unexpected value: {result}")
+            highlight_success = False
+            self._highlights_active = False  # Mark as inactive on failure
+
+        # Assuming temp_executor is managed (closed) by _execute_js_on_tab or CDP library handles closure implicitly
 
         return highlight_success
 
@@ -173,7 +175,7 @@ class ChromeHighlighter:
     ) -> None:
         """Removes all highlights previously added by this tool.
 
-        Can use a provided executor or create a temporary one.
+        Can use a provided executor or create a temporary one via _execute_js_on_tab.
         """
         if not tab_ref or not tab_ref.ws_url:
             # Don't warn if called internally during highlight process
@@ -188,10 +190,6 @@ class ChromeHighlighter:
             self._highlights_active = False
             self._last_highlight_selector = None
             self._last_highlight_color = None
-
-        ws_url = tab_ref.ws_url
-        url = tab_ref.url
-        tab_id = tab_ref.id
 
         container_id = "selectron-highlight-container"
 
@@ -215,17 +213,14 @@ class ChromeHighlighter:
         }})();
         """
 
-        try:
-            if executor:
-                await executor.evaluate(js_code)
-            else:
-                executor = CdpBrowserExecutor(ws_url, url or "")
-                await executor.evaluate(js_code)
-        except websockets.exceptions.WebSocketException:
-            # Ignore connection errors during cleanup, tab might be closed
-            pass
-        except Exception as e:
-            logger.warning(f"Non-critical error clearing highlights on tab {tab_id}: {e}")
+        # Use helper to execute JS, passing the executor if provided
+        await self._execute_js_on_tab(
+            tab_ref,
+            js_code,
+            purpose="clear highlights",
+            executor=executor,  # Pass along the executor if it exists
+        )
+        # No need for explicit try/except here, helper handles common ones
 
     async def rehighlight(self, tab_ref: Optional[TabReference]):
         if not tab_ref:
@@ -236,12 +231,8 @@ class ChromeHighlighter:
             current_color = self._last_highlight_color  # Use the stored color
             tab_id = tab_ref.id
             ws_url = tab_ref.ws_url
-            url = tab_ref.url
-
             if not ws_url:
-                logger.warning(
-                    f"[HighlightService] Cannot rehighlight on tab {tab_id}: Missing websocket URL."
-                )
+                logger.warning(f"Cannot rehighlight on tab {tab_id}: Missing websocket URL.")
                 return
 
             # --- Replicate JS execution logic from highlight() MINUS the clear() --- #
@@ -264,7 +255,7 @@ class ChromeHighlighter:
                 const containerId = '{container_id}';
                 const overlayAttr = '{overlay_attribute}';
 
-                // --- Start: Difference from highlight() --- 
+                // --- Start: Difference from highlight() ---
                 // Ensure container exists, but DO NOT clear its children first
                 let container = document.getElementById(containerId);
                 if (!container) {{
@@ -284,7 +275,7 @@ class ChromeHighlighter:
                     const oldOverlays = container.querySelectorAll(`[${{overlayAttr}}="true"]`);
                     oldOverlays.forEach(o => o.remove());
                 }}
-                // --- End: Difference from highlight() --- 
+                // --- End: Difference from highlight() ---
 
                 const elements = document.querySelectorAll(selector);
                 if (!elements || elements.length === 0) {{
@@ -319,16 +310,11 @@ class ChromeHighlighter:
                 return `Rehighlight: Drew ${{highlightedCount}} overlays for: ${{selector}}`;
             }})();
             """
-            try:
-                executor = CdpBrowserExecutor(ws_url, url or "")
-                await executor.evaluate(js_code)
-            except websockets.exceptions.WebSocketException as e:
-                logger.warning(f"Rehighlight failed for tab {tab_id}: WebSocket error - {e}")
-            except Exception as e:
-                logger.error(
-                    f"Rehighlight failed for tab {tab_id}: Unexpected error - {e}",
-                    exc_info=True,
-                )
+            # Use helper method for JS execution
+            await self._execute_js_on_tab(
+                tab_ref, js_code, purpose=f"rehighlight selector '{selector[:30]}...'"
+            )
+            # Error logging is handled within _execute_js_on_tab
         else:
             logger.debug("Skipping rehighlight (not active or no selector/color)")
 
@@ -342,3 +328,159 @@ class ChromeHighlighter:
         if not active:
             self._last_highlight_color = None
             self._last_highlight_selector = None
+
+    async def _execute_js_on_tab(
+        self,
+        tab_ref: Optional[TabReference],
+        js_code: str,
+        purpose: str = "generic JS execution",
+        executor: Optional[CdpBrowserExecutor] = None,
+    ) -> Optional[Any]:
+        """Helper to execute JS, handling common boilerplate and errors."""
+        if not tab_ref or not tab_ref.ws_url:
+            logger.debug(
+                f"Cannot execute JS ({purpose}): Missing active tab reference or websocket URL."
+            )
+            return None
+
+        tab_id = tab_ref.id
+        ws_url = tab_ref.ws_url
+        url = tab_ref.url
+
+        temp_executor = None
+        if not executor:
+            # Create temporary executor if none provided
+            # Ensure it's closed or managed properly if CdpBrowserExecutor needs it
+            try:
+                temp_executor = CdpBrowserExecutor(ws_url, url or "")
+                exec_to_use = temp_executor
+            except Exception as e:
+                logger.error(f"Failed to create temporary executor for JS ({purpose}): {e}")
+                return None
+        else:
+            exec_to_use = executor
+
+        try:
+            result = await exec_to_use.evaluate(js_code)
+            return result
+        except websockets.exceptions.WebSocketException as e:
+            logger.warning(
+                f"JS execution failed ({purpose}) for tab {tab_id}: WebSocket error - {e}"
+            )
+            # If using a temp executor, it might be left dangling here. Assuming evaluate handles closure on error.
+            return None
+        except Exception as e:
+            logger.error(
+                f"JS execution failed ({purpose}) for tab {tab_id}: Unexpected error - {e}",
+                exc_info=True,
+            )
+            return None
+        # Ensure temporary executor is handled if created, though evaluate usually closes it.
+        # If CdpBrowserExecutor requires manual close/cleanup, that needs to be added.
+        # Assuming evaluate handles connection lifecycle implicitly for now.
+
+    async def show_agent_status(
+        self,
+        tab_ref: Optional[TabReference],
+        status_text: str,
+        state: str = "idle",
+        executor: Optional[CdpBrowserExecutor] = None,
+    ) -> None:
+        """Shows or updates an agent status badge in the top-right corner."""
+        if not tab_ref:
+            return  # Silently ignore if no tab
+
+        badge_id = self._agent_status_badge_id
+        # Define colors based on state
+        state_colors = {
+            "idle": ("#DDDDDD", "#000000"),  # Light gray background, black text
+            "thinking": ("#ADD8E6", "#000000"),  # Light blue background, black text
+            "sending": ("#FFFFE0", "#000000"),  # Light yellow background, black text
+            "received_success": ("#90EE90", "#000000"),  # Light green background, black text
+            "received_error": ("#FFA07A", "#000000"),  # Light salmon background, black text
+            "final_success": ("#90EE90", "#000000"),  # Same as received_success for now
+        }
+        bg_color, text_color = state_colors.get(state, state_colors["idle"])
+
+        # Escape status text for JS
+        escaped_status_text = (
+            status_text.replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace('"', '\\"')
+            .replace("`", "\\`")
+            .replace("\\n", "\\\\n")  # Ensure newlines in python are escaped for JS
+        )
+
+        js_code = f"""
+        (function() {{
+            const badgeId = '{badge_id}';
+            const text = `{escaped_status_text}`;
+            const bgColor = '{bg_color}';
+            const textColor = '{text_color}';
+
+            let badge = document.getElementById(badgeId);
+
+            if (!badge) {{
+                badge = document.createElement('div');
+                badge.id = badgeId;
+                badge.style.position = 'fixed';
+                badge.style.top = '0px';    // Position exactly at top
+                badge.style.right = '0px';   // Position exactly at right
+                badge.style.padding = '2px 5px'; // Reduced padding
+                badge.style.borderRadius = '5px';
+                badge.style.fontSize = '10px';
+                badge.style.fontFamily = 'sans-serif';
+                badge.style.zIndex = '2147483647'; // Max z-index
+                badge.style.pointerEvents = 'none'; // Prevent interference
+                badge.style.opacity = '0.8';   // Semi-transparent
+                badge.style.whiteSpace = 'pre-wrap'; // Allow wrapping (restored)
+                badge.style.maxWidth = '300px'; // Restore max width for wrapping
+                // Append to body if available, otherwise documentElement
+                const parent = document.body || document.documentElement;
+                if (parent) {{
+                    parent.appendChild(badge);
+                }} else {{
+                    console.warn('Selectron: Could not find body or documentElement to append agent status badge.');
+                    return 'ERROR: Could not find parent for badge.';
+                }}
+            }}
+
+            // Update content and style
+            badge.textContent = text;
+            badge.style.backgroundColor = bgColor;
+            badge.style.color = textColor;
+
+            return `Agent status badge updated: ${{text}} (State: {state})`;
+        }})();
+        """
+        await self._execute_js_on_tab(tab_ref, js_code, "update agent status", executor)
+
+    async def hide_agent_status(
+        self,
+        tab_ref: Optional[TabReference],
+        executor: Optional[CdpBrowserExecutor] = None,
+    ) -> None:
+        """Removes the agent status badge."""
+        if not tab_ref:
+            return  # Silently ignore if no tab
+
+        badge_id = self._agent_status_badge_id
+        js_code = f"""
+        (function() {{
+            const badgeId = '{badge_id}';
+            const badge = document.getElementById(badgeId);
+            if (badge) {{
+                try {{
+                    badge.remove();
+                    return `SUCCESS: Removed agent status badge ('${{badgeId}}').`;
+                }} catch (e) {{
+                    // Log error to console for debugging on the page
+                    console.error('Selectron: Failed to remove agent status badge:', e);
+                    return `ERROR: Failed to remove agent status badge ('${{badgeId}}'): ${{e.message}}`;
+                }}
+            }} else {{
+                return 'INFO: Agent status badge not found, nothing to remove.';
+            }}
+        }})();
+        """
+        await self._execute_js_on_tab(tab_ref, js_code, "hide agent status", executor)

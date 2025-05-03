@@ -342,7 +342,9 @@ class TabInteractionHandler:
                             include_attributes=DOM_STRING_INCLUDE_ATTRIBUTES
                         )
                         if not dom_string or len(dom_string) < 100:
-                            logger.warning(f"DOM string is missing or too short for {self.tab_id}: {dom_string[:100] if dom_string else 'None'}")
+                            logger.warning(
+                                f"DOM string is missing or too short for {self.tab_id}: {dom_string[:100] if dom_string else 'None'}"
+                            )
                     else:
                         logger.warning(f"get_elements returned empty state for {self.tab_id}")
                 except Exception as dom_e:

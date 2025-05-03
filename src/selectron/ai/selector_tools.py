@@ -200,22 +200,26 @@ class SelectorTools:
             simplicity_warning = None
             # Constants for simplicity check
             max_markdown_len_threshold = 3000
-            common_structural_tags = {'body', 'html', 'main', 'article', 'header', 'footer', 'nav'}
+            common_structural_tags = {"body", "html", "main", "article", "header", "footer", "nav"}
             # Check only if we found at least one element
             if count > 0 and isinstance(elements[0], Tag):
                 first_el = elements[0]
                 # Check 1: Is the selector just a simple, generic tag name?
                 is_simple_tag_selector = (
-                    selector.strip().isalnum() and
-                    selector.strip().lower() not in common_structural_tags and
-                    len(selector.strip().split()) == 1 # Ensure no complex attributes etc.
+                    selector.strip().isalnum()
+                    and selector.strip().lower() not in common_structural_tags
+                    and len(selector.strip().split()) == 1  # Ensure no complex attributes etc.
                 )
                 if is_simple_tag_selector:
-                     simplicity_warning = f"Warning: Selector ('{selector}') uses only a generic tag name. Consider adding classes, IDs, or attributes for stability and specificity."
+                    simplicity_warning = f"Warning: Selector ('{selector}') uses only a generic tag name. Consider adding classes, IDs, or attributes for stability and specificity."
                 # Check 2: Is the content length excessive? (Only if no simple tag warning yet)
                 if not simplicity_warning:
                     # Re-use markdown if already calculated, else calculate it now
-                    markdown_content = markdown_content if 'markdown_content' in locals() else self._convert_html_to_markdown(first_el)
+                    markdown_content = (
+                        markdown_content
+                        if "markdown_content" in locals()
+                        else self._convert_html_to_markdown(first_el)
+                    )
                     markdown_len = len(markdown_content)
                     if markdown_len > max_markdown_len_threshold:
                         simplicity_warning = f"Warning: Selector matched an element with very large content ({markdown_len} chars markdown > {max_markdown_len_threshold}). Consider refining for more specificity."
@@ -231,7 +235,7 @@ class SelectorTools:
                 error=None,
                 size_validation_error=size_validation_error_msg,
                 feedback_message=feedback,  # Updated feedback message
-                simplicity_warning=simplicity_warning, # Added simplicity warning
+                simplicity_warning=simplicity_warning,  # Added simplicity warning
                 matched_html_snippets=matched_html if return_matched_html else None,
             )
             logger.info(

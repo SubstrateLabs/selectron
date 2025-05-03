@@ -22,7 +22,7 @@ class SelectorEvaluationResult(BaseModel):
     error: Optional[str] = None
     size_validation_error: Optional[str] = None
     feedback_message: Optional[str] = None  # General feedback, e.g., if not unique
-    simplicity_warning: Optional[str] = None # Specific warning if selector seems too broad
+    simplicity_warning: Optional[str] = None  # Specific warning if selector seems too broad
     matched_html_snippets: Optional[list[str]] = None
 
 

@@ -161,8 +161,8 @@ class DOMElementNode(DOMBaseNode):
         formatted_text = []
 
         def process_node(node: DOMBaseNode, depth: int) -> None:
-            if not node.is_visible: # Skip invisible nodes entirely
-                 return
+            if not node.is_visible:  # Skip invisible nodes entirely
+                return
 
             depth_str = depth * "\t"
 
@@ -172,54 +172,72 @@ class DOMElementNode(DOMBaseNode):
                 attributes_to_include = {}
 
                 # Basic attributes for all visible elements for context
-                basic_attrs = ["id", "class", "role", "name", "data-testid", "aria-label", "placeholder", "title", "alt", "href", "type", "for"]
+                basic_attrs = [
+                    "id",
+                    "class",
+                    "role",
+                    "name",
+                    "data-testid",
+                    "aria-label",
+                    "placeholder",
+                    "title",
+                    "alt",
+                    "href",
+                    "type",
+                    "for",
+                ]
                 for attr_name in basic_attrs:
-                     if attr_name in node.attributes and node.attributes[attr_name]:
-                         attributes_to_include[attr_name] = str(node.attributes[attr_name])
+                    if attr_name in node.attributes and node.attributes[attr_name]:
+                        attributes_to_include[attr_name] = str(node.attributes[attr_name])
 
                 # If it's highlighted, use the more specific attribute logic
                 if node.highlight_index is not None:
                     if include_attributes:
-                         # Start fresh for highlighted, apply include_attributes logic
-                         attributes_to_include = {}
-                         for attr_name in include_attributes:
-                             if attr_name in node.attributes:
-                                 attributes_to_include[attr_name] = str(node.attributes[attr_name])
+                        # Start fresh for highlighted, apply include_attributes logic
+                        attributes_to_include = {}
+                        for attr_name in include_attributes:
+                            if attr_name in node.attributes:
+                                attributes_to_include[attr_name] = str(node.attributes[attr_name])
 
-                         # Apply optimizations
-                         if node.tag_name == attributes_to_include.get("role"):
-                             del attributes_to_include["role"]
-                         aria_label_val = attributes_to_include.get("aria-label", "").strip()
-                         # Placeholder for text extraction (simplified for now)
-                         # We might need a simpler text getter if get_all_text_till_next_clickable_element is too complex/buggy
-                         # For now, let's assume direct text children are most important
-                         immediate_text = "".join(c.text for c in node.children if isinstance(c, DOMTextNode) and c.is_visible).strip()
-                         if aria_label_val and aria_label_val == immediate_text:
-                             del attributes_to_include["aria-label"]
-                         placeholder_val = attributes_to_include.get("placeholder", "").strip()
-                         if placeholder_val and placeholder_val == immediate_text:
-                             del attributes_to_include["placeholder"]
+                        # Apply optimizations
+                        if node.tag_name == attributes_to_include.get("role"):
+                            del attributes_to_include["role"]
+                        aria_label_val = attributes_to_include.get("aria-label", "").strip()
+                        # Placeholder for text extraction (simplified for now)
+                        # We might need a simpler text getter if get_all_text_till_next_clickable_element is too complex/buggy
+                        # For now, let's assume direct text children are most important
+                        immediate_text = "".join(
+                            c.text
+                            for c in node.children
+                            if isinstance(c, DOMTextNode) and c.is_visible
+                        ).strip()
+                        if aria_label_val and aria_label_val == immediate_text:
+                            del attributes_to_include["aria-label"]
+                        placeholder_val = attributes_to_include.get("placeholder", "").strip()
+                        if placeholder_val and placeholder_val == immediate_text:
+                            del attributes_to_include["placeholder"]
 
                 # Format the final attributes string
                 if attributes_to_include:
                     attr_parts = []
                     for key, value in attributes_to_include.items():
-                        escaped_value = value.replace("'", "\\'") # Ensure proper escaping
+                        escaped_value = value.replace("'", "\\'")  # Ensure proper escaping
                         attr_parts.append(f"{key}='{escaped_value}'")
                     attrs_str = " ".join(attr_parts)
-
 
                 # --- Build the output line ---
                 highlight_indicator = ""
                 if node.highlight_index is not None:
                     highlight_indicator = f"[{node.highlight_index}]"
                     if node.is_new:
-                        highlight_indicator = f"*{highlight_indicator}*" # Add star for new elements
+                        highlight_indicator = (
+                            f"*{highlight_indicator}*"  # Add star for new elements
+                        )
 
                 line = f"{depth_str}{highlight_indicator}<{tag}"
                 if attrs_str:
                     line += f" {attrs_str}"
-                line += " />" # Always self-close for this simplified representation for now
+                line += " />"  # Always self-close for this simplified representation for now
                 formatted_text.append(line)
 
                 # Always recurse for children of visible elements, incrementing depth
@@ -229,9 +247,9 @@ class DOMElementNode(DOMBaseNode):
             elif isinstance(node, DOMTextNode):
                 # Render visible text nodes
                 text = node.text.strip()
-                if text: # Only add if there's actual text content
+                if text:  # Only add if there's actual text content
                     # Add text indented under its parent
-                    formatted_text.append(f"{depth_str}  {text}") # Indent text further
+                    formatted_text.append(f"{depth_str}  {text}")  # Indent text further
 
         process_node(self, 0)
         return "\n".join(formatted_text)
