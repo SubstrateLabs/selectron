@@ -249,7 +249,6 @@ class TabInteractionHandler:
     async def _trigger_debounced_fetch(self):
         """Callback executed after the debounce delay. Starts the HTML fetch task."""
         self._debounce_timer = None  # Timer has fired
-
         # Prevent concurrent fetches for the same tab initiated by interactions
         if self._fetch_task and not self._fetch_task.done():
             logger.debug(

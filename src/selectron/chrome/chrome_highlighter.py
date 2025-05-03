@@ -231,7 +231,6 @@ class ChromeHighlighter:
             self._highlights_active = False
             self._last_highlight_selector = None
             self._last_highlight_color = None
-            logger.debug(f"[HighlightService] Clearing highlights and state for tab {tab_ref.id}")
         else:
             # If called internally (before highlighting), just perform the clear action
             logger.debug(
@@ -407,4 +406,3 @@ class ChromeHighlighter:
         if not active:
             self._last_highlight_color = None
             self._last_highlight_selector = None
-            logger.debug("[HighlightService] Highlights explicitly deactivated.")

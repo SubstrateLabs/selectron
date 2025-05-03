@@ -14,8 +14,6 @@ logger = get_logger(__name__)
 
 
 class LogPanel(Container):
-    """A container widget that displays and tails a log file."""
-
     def __init__(
         self,
         log_file_path: Path,
@@ -49,22 +47,6 @@ class LogPanel(Container):
         self._load_initial_logs()
         self.set_interval(self._watch_interval, self._watch_log_file)
 
-    def _is_info_or_higher(self, log_line: str) -> bool:
-        """Check if a log line string appears to be INFO level or higher."""
-        # Simple check based on standard format: YYYY-MM-DD HH:MM:SS [LEVEL] ...
-        if (
-            "[INFO ]" in log_line
-            or "[WARN ]" in log_line
-            or "[ERROR]" in log_line
-            or "[CRIT ]" in log_line
-        ):
-            return True
-        # Assume non-prefixed lines might be important (like parts of tracebacks)
-        # or are INFO level if they don't match DEBUG
-        if "[DEBUG]" not in log_line:
-            return True  # Show if not explicitly DEBUG
-        return False
-
     def _load_initial_logs(self) -> None:
         """Load existing content from the log file into the panel, filtering for INFO+."""
         if not self._rich_log:
@@ -75,13 +57,8 @@ class LogPanel(Container):
                 with open(self._log_file_path, "r", encoding="utf-8") as f:
                     log_content = f.read()
                     self._last_log_position = f.tell()
-                    lines_to_write = [
-                        line
-                        for line in log_content.splitlines(keepends=True)
-                        if self._is_info_or_higher(line)
-                    ]
-                    if lines_to_write:
-                        self._rich_log.write("".join(lines_to_write))
+                    if log_content:
+                        self._rich_log.write(log_content)
             else:
                 self._rich_log.write(
                     Text(f"Log file not found: {self._log_file_path}", style="yellow")
@@ -119,13 +96,7 @@ class LogPanel(Container):
                 f.seek(self._last_log_position)
                 new_content = f.read()
                 if new_content:
-                    lines_to_write = [
-                        line
-                        for line in new_content.splitlines(keepends=True)
-                        if self._is_info_or_higher(line)
-                    ]
-                    if lines_to_write:
-                        self._rich_log.write("".join(lines_to_write))
+                    self._rich_log.write(new_content)
                     self._last_log_position = f.tell()
         except Exception as e:
             # Avoid logging the error back to the log file causing a potential loop

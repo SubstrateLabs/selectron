@@ -140,16 +140,11 @@ class ChromeMonitor:
             return
 
         self._monitoring = False
-
-        logger.debug("Stopping interaction handlers...")
         await self._stop_all_interaction_monitors()
-
         if self._monitor_task and not self._monitor_task.done():
-            logger.debug("Stopping main polling task...")
             self._monitor_task.cancel()
             try:
                 await asyncio.wait_for(self._monitor_task, timeout=2.0)
-                logger.debug("Main polling task cancelled successfully.")
             except asyncio.TimeoutError:
                 logger.warning("Main polling task did not stop within timeout.")
             except asyncio.CancelledError:
@@ -193,9 +188,7 @@ class ChromeMonitor:
         if tab_id in self._interaction_handlers:
             # logger.debug(f"Interaction handler already running for tab {tab_id}, skipping start.")
             return
-
         # Create and start handler
-        logger.debug(f"Starting interaction monitor for tab {tab_id} ({tab.url[:50]}...)")
         handler = TabInteractionHandler(
             tab=tab,  # Pass the full ChromeTab object
             interaction_callback=self._on_interaction_update_callback,

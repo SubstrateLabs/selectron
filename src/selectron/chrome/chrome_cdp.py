@@ -58,28 +58,23 @@ async def send_cdp_command(
     if session_id:
         command["sessionId"] = session_id
 
-    logger.debug(f"Sending CDP command (id={current_id}): {method} {params or ''}")
     await ws.send(json.dumps(command))
 
     try:
-        # Wait for the specific response matching the id
         while True:
-            message = await asyncio.wait_for(ws.recv(), timeout=30.0)
+            message = await asyncio.wait_for(ws.recv(), timeout=20.0)
             response = json.loads(message)
-            # logger.debug(f"Received CDP message: {response}") # Too verbose usually
             if response.get("id") == current_id:
                 if "error" in response:
                     logger.error(f"CDP command error (id={current_id}): {response['error']}")
                     return None
-                logger.debug(f"Received response for id={current_id}")
                 return response.get("result")
             elif "method" in response:
-                # Handle events or other messages if necessary in the future
-                logger.debug(f"Ignoring event/message: {response.get('method')}")
-                pass
+                response_method = response.get('method')
+                if response_method not in ["Runtime.executionContextCreated", "Runtime.consoleAPICalled"]:
+                    logger.debug(f"Ignoring event/message: {response_method}")
             else:
                 logger.warning(f"Received unexpected message format: {response}")
-
     except asyncio.TimeoutError:
         logger.error(f"Timeout waiting for response to command id {current_id} ({method})")
         return None
@@ -708,10 +703,6 @@ async def monitor_user_interactions(ws_url: str) -> AsyncGenerator[Dict[str, Any
     connection = None  # Keep track of the connection to close it reliably
     ws = None  # Initialize ws outside the try block
     try:
-        logger.debug(
-            f"[monitor_user_interactions] Attempting WebSocket connection to: {ws_url}"
-        )  # DEBUG
-        # --- Connection Attempt w/ Retry ---
         max_retries = 3
         retry_delay = 0.5  # Initial delay in seconds
         for attempt in range(max_retries):
@@ -722,8 +713,8 @@ async def monitor_user_interactions(ws_url: str) -> AsyncGenerator[Dict[str, Any
                     close_timeout=5.0,
                     max_size=20 * 1024 * 1024,
                 )
-                ws = connection  # Assign to ws if connection is successful
-                break  # Exit retry loop on success
+                ws = connection 
+                break  
             except (
                 OSError,
                 websockets.exceptions.InvalidMessage,

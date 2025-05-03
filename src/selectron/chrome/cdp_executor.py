@@ -132,24 +132,11 @@ class CdpBrowserExecutor(BrowserExecutor):
             # Simple serialization for basic args - beware of complex objects
             expression_with_arg = f"({expression})(JSON.parse('{json.dumps(arg)}'))"
             params["expression"] = expression_with_arg
-            # logger.debug(
-            #     f"Using Runtime.evaluate with serialized args: {expression_with_arg[:100]}..."
-            # ) # COMMENTED OUT - Suspected source of unwanted JS code log
             eval_result = await self._send_command("Runtime.evaluate", params)
-            # Log raw result immediately after call
-            logger.debug(
-                f"[evaluate/arg] Raw eval_result from _send_command: {str(eval_result)[:500]}..."
-            )
-
         else:
             # No arguments, use simple evaluate
             params = {"expression": expression, "awaitPromise": True, "returnByValue": True}
             eval_result = await self._send_command("Runtime.evaluate", params)
-            # Log raw result immediately after call
-            logger.debug(
-                f"[evaluate/no_arg] Raw eval_result from _send_command: {str(eval_result)[:500]}..."
-            )
-
         # Process result (common logic for both cases)
         if eval_result and "result" in eval_result:
             result_data = eval_result["result"]
@@ -181,11 +168,9 @@ class CdpBrowserExecutor(BrowserExecutor):
         if not active_ws or active_ws.state == State.CLOSED:
             logger.error("Cannot capture screenshot, WebSocket is not connected or closed.")
             return None
-
         try:
             # Ensure Page domain is enabled (might be redundant, but safe)
             # await self._send_command("Page.enable") # Enable might interfere if called elsewhere? Let's try without first.
-
             screenshot_params: dict[str, Any] = {"format": format}
             if (format == "jpeg" or format == "webp") and quality is not None:
                 screenshot_params["quality"] = max(0, min(100, quality))

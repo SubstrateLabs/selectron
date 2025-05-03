@@ -10,7 +10,6 @@ logger = get_logger(__name__)
 def open_log_file(log_path: Path) -> None:
     """Opens the specified log file using the default system application."""
     log_path_str = str(log_path.resolve())
-    logger.info(f"Attempting to open log file: {log_path_str}")
     try:
         if sys.platform == "win32":
             # Use 'start' command which implicitly handles spaces in paths well on Windows

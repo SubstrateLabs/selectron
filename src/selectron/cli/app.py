@@ -33,6 +33,7 @@ from selectron.ai.selector_tools import (
 from selectron.ai.types import (
     SelectorProposal,
 )
+from selectron.ai.types import AutoProposal
 from selectron.chrome import chrome_launcher
 from selectron.chrome.chrome_highlighter import ChromeHighlighter
 from selectron.chrome.chrome_monitor import ChromeMonitor, TabChangeEvent
@@ -52,10 +53,10 @@ DEFAULT_THEME = THEME_DARK
 class SelectronApp(App[None]):
     CSS_PATH = "styles.tcss"
     BINDINGS = [
-        Binding(key="ctrl+c", action="quit", description="Quit App", show=False),
-        Binding(key="ctrl+q", action="quit", description="Quit App", show=True),
-        Binding(key="ctrl+l", action="open_log_file", description="Open Logs", show=True),
-        Binding(key="ctrl+t", action="toggle_dark", description="Toggle Theme", show=True),
+        Binding(key="ctrl+c", action="quit", description="⣏ Quit App ⣹", show=False),
+        Binding(key="ctrl+q", action="quit", description="⣏ Quit App ⣹", show=True),
+        Binding(key="ctrl+l", action="open_log_file", description="⣏ Open Logs ⣹", show=True),
+        Binding(key="ctrl+t", action="toggle_dark", description="⣏ Light/Dark Theme ⣹", show=True),
     ]
     shutdown_event: asyncio.Event
     _active_tab_ref: Optional[TabReference] = None
@@ -76,17 +77,16 @@ class SelectronApp(App[None]):
         yield Header()
         with Container(id="main-container"):
             with TabbedContent(initial="home-tab"):
-                with TabPane("✦ Home ✧", id="home-tab"):
+                with TabPane("⣏ Home ⣹", id="home-tab"):
                     yield HomePanel(id="home-panel-widget")
-                with TabPane("✦ Logs ✧", id="logs-tab"):
+                with TabPane("⣏ Logs ⣹", id="logs-tab"):
                     yield LogPanel(log_file_path=LOG_PATH, id="log-panel-widget")
-                with TabPane("✦ Extracted Markdown ✧", id="markdown-tab"):
+                with TabPane("⣏ Selected Markdown ⣹", id="markdown-tab"):
                     yield ListView(id="markdown-list")
-                with TabPane("✦ Parsed Data ✧", id="table-tab"):
+                with TabPane("⣏ Parsed Data ⣹", id="table-tab"):
                     yield DataTable(id="data-table")
         with Horizontal(classes="input-bar"):
             yield Input(placeholder="Enter description or let AI propose...", id="prompt-input")
-            yield Button("Select", id="submit-button")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -111,12 +111,9 @@ class SelectronApp(App[None]):
         await self.action_check_chrome_status()
 
     async def _handle_polling_change(self, event: TabChangeEvent) -> None:
-        logger.info(
-            f"Monitor Polling Change: +{len(event.new_tabs)} -{len(event.closed_tabs)} ~{len(event.navigated_tabs)}"
-        )
+        pass
 
     async def _handle_interaction_update(self, tab_ref: TabReference) -> None:
-        logger.debug(f"Monitor Interaction Signal: Tab {tab_ref.id}")
         self._active_tab_ref = tab_ref
         await self._clear_list_view()
         await self._clear_table_view()
@@ -174,8 +171,16 @@ class SelectronApp(App[None]):
         except Exception as table_err:
             logger.error(f"Failed to update data table from monitor callback: {table_err}")
 
+        if self._agent_worker and self._agent_worker.is_running:
+            logger.info("Cancelling previous agent worker before auto-proposal.")
+            self._agent_worker.cancel()
+        self._agent_worker = self.run_worker(
+            self._run_auto_proposal_agent(tab_ref, self._active_tab_dom_string), # Use updated dom_string
+            exclusive=True,
+            group="agent_worker",
+        )
+
     async def _handle_rehighlight(self) -> None:
-        logger.debug("Monitor requesting rehighlight")
         await self.trigger_rehighlight()
 
     async def action_check_chrome_status(self) -> None:
@@ -272,22 +277,26 @@ class SelectronApp(App[None]):
             await self.action_launch_chrome()
         elif button_id == "restart-chrome":
             await self.action_restart_chrome()
-        elif button_id == "submit-button":
-            prompt_input = self.query_one(Input)
-            target_description = prompt_input.value.strip()
+        else:
+            logger.warning(f"Unhandled button press: {event.button.id}")
+
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "prompt-input":
+            target_description = event.value.strip()
             if not target_description:
                 return
+            logger.debug(f"Submit Check: active_tab_ref={bool(self._active_tab_ref)}, mon_exists={bool(self._chrome_monitor)}, mon_monitoring={self._chrome_monitor._monitoring if self._chrome_monitor else 'N/A'}")
             if (
                 not self._active_tab_ref
                 or not self._chrome_monitor
                 or not self._chrome_monitor._monitoring
             ):
                 logger.warning(
-                    "Submit clicked but monitor not connected or no active tab identified."
+                    "Submit attempted but monitor not connected or no active tab identified."
                 )
                 return
-            logger.info(f"Submit button pressed. Target: '{target_description}'")
-            prompt_input.value = ""
+            logger.info(f"Input submitted. Target: '{target_description}'")
+            event.input.value = ""  # Clear the input field
             if self._agent_worker and self._agent_worker.is_running:
                 logger.info("Cancelling previous agent worker.")
                 self._agent_worker.cancel()
@@ -296,8 +305,6 @@ class SelectronApp(App[None]):
                 exclusive=True,
                 group="agent_worker",
             )
-        else:
-            logger.warning(f"Unhandled button press: {event.button.id}")
 
     async def action_quit(self) -> None:
         self.shutdown_event.set()
@@ -500,7 +507,6 @@ class SelectronApp(App[None]):
         try:
             list_view = self.query_one("#markdown-list", ListView)
             await list_view.clear()
-            logger.debug("List view cleared.")
         except Exception as e:
             logger.error(f"Failed to query or clear list view: {e}")
 
@@ -508,9 +514,71 @@ class SelectronApp(App[None]):
         try:
             table = self.query_one(DataTable)
             table.clear()
-            logger.debug("Data table cleared.")
         except Exception as e:
             logger.error(f"Failed to query or clear data table: {e}")
+
+    async def _run_auto_proposal_agent(self, tab_ref: TabReference, dom_string: Optional[str]) -> None:
+        """Runs an agent to propose a target description based on page content."""
+        if not self._openai_client:
+            logger.error("Cannot run auto-proposal: OpenAI client not initialized.")
+            return
+        if not tab_ref.html:
+            logger.warning(f"Cannot run auto-proposal for tab {tab_ref.id}: HTML content missing.")
+            return
+
+        logger.info(f"Running AutoProposalAgent for tab {tab_ref.id}")
+
+        try:
+            # Simplified context for proposal
+            context_parts = [
+                f"URL: {tab_ref.url}",
+                f"Title: {tab_ref.title}",
+                "HTML Snippet (first 5000 chars):\n" + tab_ref.html[:5000],
+            ]
+            if dom_string:
+                context_parts.append("\n\nSimplified DOM Structure (first 3000 chars):\n" + dom_string[:3000])
+            
+            context = "\n".join(context_parts)
+
+            system_prompt = (
+                "You are an expert web analyst. Analyze the provided page context (URL, Title, HTML, DOM). "
+                "Your task is to identify the single most likely element a user would want to select or extract data from. "
+                "Propose a CONCISE natural language description for this element.\n"
+                "Examples: 'article title', 'main content body', 'login button', 'product price', 'first news headline'.\n"
+                "CRITICAL: Output ONLY the JSON object conforming to the AutoProposal schema."
+            )
+            
+            proposal_agent = Agent(
+                "openai:gpt-4.1",
+                output_type=AutoProposal, 
+                # No tools needed for this agent
+                system_prompt=system_prompt,
+            )
+
+            logger.debug("Starting auto-proposal agent run...")
+            agent_run_result = await proposal_agent.run(context)
+
+            if isinstance(agent_run_result.output, AutoProposal):
+                proposal = agent_run_result.output
+                logger.info(f"Auto-proposal finished. Proposed description: '{proposal.proposed_description}'")
+                
+                # Update the input field (use call_later for thread safety)
+                def update_input():
+                    try:
+                        prompt_input = self.query_one("#prompt-input", Input)
+                        prompt_input.value = proposal.proposed_description
+                    except Exception as e:
+                        logger.error(f"Error updating input field from auto-proposal: {e}")
+                
+                self.app.call_later(update_input)
+
+            else:
+                logger.error(
+                    f"Auto-proposal agent returned unexpected output type: {type(agent_run_result.output)} / {agent_run_result.output}"
+                )
+
+        except Exception as e:
+            logger.error(f"Error running AutoProposalAgent for tab {tab_ref.id}: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

@@ -96,3 +96,7 @@ class ProposalResult(BaseModel):
 
 
 # --- Selector Agent Types ---
+
+class AutoProposal(BaseModel):
+    "Represents a proposed natural language description for a likely target element."
+    proposed_description: str = Field(description="A concise natural language description of the likely target element (e.g., 'main article title', 'login button').")
