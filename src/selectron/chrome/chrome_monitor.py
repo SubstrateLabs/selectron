@@ -206,7 +206,6 @@ class ChromeMonitor:
         """Stops the interaction handler and cleans up resources for a single tab."""
         handler = self._interaction_handlers.pop(tab_id, None)
         if handler:
-            logger.debug(f"Stopping interaction monitor for tab {tab_id}")
             await handler.stop()
 
     async def _stop_all_interaction_monitors(self):

@@ -29,14 +29,12 @@ class ChromeHighlighter:
 
         if not tab_ref or not tab_ref.ws_url:
             logger.warning(
-                "[HighlightService] Cannot highlight selector: Missing active tab reference or websocket URL."
+                "Cannot highlight selector: Missing active tab reference or websocket URL."
             )
             self._highlights_active = False
             return False, None
 
-        logger.debug(
-            f"[HighlightService] Request to highlight: '{selector}' with color {color} on tab {tab_ref.id}"
-        )
+        logger.debug(f"Request to highlight: '{selector}' with color {color} on tab {tab_ref.id}")
 
         # --- Determine alternating color logic --- #
         current_color = color
@@ -46,13 +44,8 @@ class ChromeHighlighter:
             "red": "brown",
             "lime": "green",  # Final success highlight
         }
-        # Check if the requested color is a base color that should alternate
-        # and if the last highlight used that *same* base color.
         if color in alternate_color_map and self._last_highlight_color == color:
             current_color = alternate_color_map[color]
-            logger.debug(
-                f"[HighlightService] Alternating highlight from {color} to {current_color}."
-            )
         # --- End alternate color logic --- #
 
         # --- Store state for re-highlighting ---
@@ -63,7 +56,7 @@ class ChromeHighlighter:
 
         # --- Create Executor Once --- #
         if not tab_ref.ws_url:
-            logger.error("[HighlightService] Internal error: ws_url became None unexpectedly.")
+            logger.error("Internal error: ws_url became None unexpectedly.")
             return False, None
         executor = CdpBrowserExecutor(tab_ref.ws_url, tab_ref.url or "")
 
@@ -72,10 +65,6 @@ class ChromeHighlighter:
         # --- End clear previous ---
 
         tab_id = tab_ref.id
-        logger.info(
-            f"[HighlightService] Attempting to highlight selector '{selector}' on tab {tab_id} with color {current_color}"
-        )
-
         # Escape the selector string for use within the JS string literal
         escaped_selector = (
             selector.replace("\\", "\\\\")
@@ -156,7 +145,6 @@ class ChromeHighlighter:
 
         try:
             result = await executor.evaluate(js_code)
-            logger.info(f"[HighlightService] Highlight JS execution result: {result}")
             if result and (
                 "Highlighted" in result
                 or "container not found" in result
@@ -164,43 +152,16 @@ class ChromeHighlighter:
             ):
                 highlight_success = True
             else:
-                logger.warning(
-                    f"[HighlightService] Highlight JS returned unexpected value: {result}"
-                )
+                logger.warning(f"Highlight JS returned unexpected value: {result}")
                 highlight_success = False
 
-            # --- Capture Screenshot if Highlight JS succeeded --- #
-            if highlight_success:
-                try:
-                    logger.debug(
-                        "[HighlightService] Attempting screenshot after successful highlight."
-                    )
-                    screenshot_image = await executor.capture_screenshot(format="png")
-                    if not screenshot_image:
-                        logger.warning(
-                            "[HighlightService] Screenshot capture failed after highlight."
-                        )
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning(
-                        "[HighlightService] Connection closed during post-highlight screenshot attempt."
-                    )
-                    highlight_success = False
-                except Exception as ss_err:
-                    logger.error(
-                        f"[HighlightService] Error capturing screenshot after highlight: {ss_err}",
-                        exc_info=True,
-                    )
-            # --- End Screenshot Capture --- #
-
         except websockets.exceptions.WebSocketException as e:
-            logger.error(
-                f"[HighlightService] Highlight selector failed for tab {tab_id}: WebSocket error - {e}"
-            )
+            logger.error(f"Highlight selector failed for tab {tab_id}: WebSocket error - {e}")
             self._highlights_active = False
             return False, None
         except Exception as e:
             logger.error(
-                f"[HighlightService] Highlight selector failed for tab {tab_id}: Unexpected error - {e}",
+                f"Highlight selector failed for tab {tab_id}: Unexpected error - {e}",
                 exc_info=True,
             )
             self._highlights_active = False
@@ -222,7 +183,7 @@ class ChromeHighlighter:
             # Don't warn if called internally during highlight process
             if not called_internally:
                 logger.debug(
-                    "[HighlightService] Cannot clear highlights: Missing active tab reference or websocket URL."
+                    "Cannot clear highlights: Missing active tab reference or websocket URL."
                 )
             return
 
@@ -233,9 +194,7 @@ class ChromeHighlighter:
             self._last_highlight_color = None
         else:
             # If called internally (before highlighting), just perform the clear action
-            logger.debug(
-                f"[HighlightService] Clearing previous overlays for tab {tab_ref.id} before new highlight"
-            )
+            logger.debug(f"Clearing previous overlays for tab {tab_ref.id} before new highlight")
 
         ws_url = tab_ref.ws_url
         url = tab_ref.url
@@ -265,26 +224,21 @@ class ChromeHighlighter:
 
         try:
             if executor:
-                result = await executor.evaluate(js_code)
+                await executor.evaluate(js_code)
             else:
                 executor = CdpBrowserExecutor(ws_url, url or "")
-                result = await executor.evaluate(js_code)
-            logger.debug(f"[HighlightService] Clear highlights JS result: {result}")
+                await executor.evaluate(js_code)
         except websockets.exceptions.WebSocketException:
             # Ignore connection errors during cleanup, tab might be closed
             pass
         except Exception as e:
-            logger.warning(
-                f"[HighlightService] Non-critical error clearing highlights on tab {tab_id}: {e}"
-            )
+            logger.warning(f"Non-critical error clearing highlights on tab {tab_id}: {e}")
 
     async def rehighlight(self, tab_ref: Optional[TabReference]):
-        """Triggers a re-highlight using the last known selector and color, WITHOUT clearing first."""
         if not tab_ref:
-            logger.debug("[HighlightService] Skipping rehighlight: No active tab reference.")
             return
 
-        logger.debug(f"[HighlightService] Received trigger rehighlight for tab {tab_ref.id}")
+        logger.debug(f"Received trigger rehighlight for tab {tab_ref.id}")
         if self._highlights_active and self._last_highlight_selector and self._last_highlight_color:
             selector = self._last_highlight_selector
             current_color = self._last_highlight_color  # Use the stored color
@@ -297,10 +251,6 @@ class ChromeHighlighter:
                     f"[HighlightService] Cannot rehighlight on tab {tab_id}: Missing websocket URL."
                 )
                 return
-
-            logger.debug(
-                f"[HighlightService] Re-drawing highlight '{selector}' with {current_color} on tab {tab_id}"
-            )
 
             # --- Replicate JS execution logic from highlight() MINUS the clear() --- #
             escaped_selector = (
@@ -379,22 +329,18 @@ class ChromeHighlighter:
             """
             try:
                 executor = CdpBrowserExecutor(ws_url, url or "")
-                result = await executor.evaluate(js_code)
-                logger.debug(f"[HighlightService] Rehighlight JS execution result: {result}")
+                await executor.evaluate(js_code)
             except websockets.exceptions.WebSocketException as e:
                 logger.warning(
-                    f"[HighlightService] Rehighlight failed for tab {tab_id}: WebSocket error - {e}"
+                    f"Rehighlight failed for tab {tab_id}: WebSocket error - {e}"
                 )
             except Exception as e:
                 logger.error(
-                    f"[HighlightService] Rehighlight failed for tab {tab_id}: Unexpected error - {e}",
+                    f"Rehighlight failed for tab {tab_id}: Unexpected error - {e}",
                     exc_info=True,
                 )
-            # No longer calling self.highlight here
         else:
-            logger.debug(
-                "[HighlightService] Skipping rehighlight (not active or no selector/color)"
-            )
+            logger.debug("Skipping rehighlight (not active or no selector/color)")
 
     def is_active(self) -> bool:
         """Returns true if highlights are considered active."""

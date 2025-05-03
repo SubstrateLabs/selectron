@@ -29,8 +29,7 @@ class ModelConfig:
         maybe_provider = self._determine_provider()
         if not maybe_provider:
             raise ValueError(
-                "Missing required environment variable: "
-                "Set ANTHROPIC_API_KEY or OPENAI_API_KEY"
+                "Missing required environment variable: Set ANTHROPIC_API_KEY or OPENAI_API_KEY"
             )
         self.provider = maybe_provider
         # Set models directly based on provider

@@ -13,8 +13,6 @@ from selectron.util.time_execution import time_execution_async
 
 from .types import AutoProposal
 
-DEFAULT_MODEL = "gpt-4.1-nano"
-
 logger = get_logger(__name__)
 
 PROPOSAL_PROMPT = """You are an expert UI analyst. Analyze the provided screenshot.
@@ -32,8 +30,6 @@ Output ONLY a JSON object with a single key "description": `{"description": "You
 
 
 class _ProposalResponse(BaseModel):
-    """Internal model for parsing the LLM response."""
-
     description: str = Field(..., description="The proposed description for the main content area")
 
 
@@ -42,19 +38,6 @@ async def propose_selection(
     screenshot: Image.Image,
     model_config: ModelConfig,
 ) -> Optional[AutoProposal]:
-    """
-    Analyzes a screenshot using PydanticAI with an OpenAI vision model
-    to propose a UI description for potentially recurring elements.
-
-    Args:
-        client: An initialized AsyncOpenAI client.
-        screenshot: The PIL Image object of the tab content.
-        model: The OpenAI model to use (defaults to "gpt-4.1-nano").
-        tab_id_for_logging: An optional identifier for logging purposes.
-
-    Returns:
-        An AutoProposal object if successful, None otherwise.
-    """
     try:
         buffered = io.BytesIO()
         img_to_save = screenshot

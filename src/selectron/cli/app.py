@@ -1,22 +1,18 @@
 import asyncio
 from typing import Any, Optional
 
-from markdownify import markdownify
 from PIL import Image
 from pydantic_ai import Agent, Tool
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal
+from textual.containers import Container
 from textual.widgets import (
     Button,
     DataTable,
     Footer,
     Header,
     Input,
-    ListItem,
-    ListView,
-    Markdown,
-    Static,
+    Label,
     TabbedContent,
     TabPane,
 )
@@ -67,6 +63,8 @@ class SelectronApp(App[None]):
     _highlighter: ChromeHighlighter
     _last_proposed_selector: Optional[str] = None
     _chrome_monitor: Optional[ChromeMonitor] = None
+    _initial_monitor_fetch_done: bool = False
+    _vision_proposal_done_for_tab: Optional[str] = None
 
     def __init__(self, model_config: ModelConfig):
         super().__init__()
@@ -84,13 +82,12 @@ class SelectronApp(App[None]):
                     yield HomePanel(id="home-panel-widget")
                 with TabPane("⣏ Logs ⣹", id="logs-tab"):
                     yield LogPanel(log_file_path=LOG_PATH, id="log-panel-widget")
-                with TabPane("⣏ Selected Markdown ⣹", id="markdown-tab"):
-                    yield ListView(id="markdown-list")
                 with TabPane("⣏ Parsed Data ⣹", id="table-tab"):
                     yield DataTable(id="data-table")
         with Container(classes="input-bar"):
             yield Button("Start AI selection", id="submit-button")
             yield Input(placeholder="Enter prompt (or let AI propose...)", id="prompt-input")
+            yield Label("No active tab (interact to activate)", id="active-tab-url-label")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -115,12 +112,20 @@ class SelectronApp(App[None]):
 
     async def _handle_interaction_update(self, tab_ref: TabReference) -> None:
         self._active_tab_ref = tab_ref
-        await self._clear_list_view()
+        try:
+            url_label = self.query_one("#active-tab-url-label", Label)
+            if tab_ref and tab_ref.url:
+                url_label.update(tab_ref.url)
+        except Exception as label_err:
+            logger.error(f"Failed to update URL label on interaction: {label_err}")
+
         await self._clear_table_view()
         try:
             self.query_one("#prompt-input", Input).value = ""
+            self._vision_proposal_done_for_tab = None
         except Exception as e:
             logger.warning(f"Could not clear prompt input on navigation: {e}")
+        # Vision proposal now happens in _handle_content_fetched after the initial fetch
 
     async def _handle_content_fetched(
         self,
@@ -136,44 +141,52 @@ class SelectronApp(App[None]):
             logger.warning(
                 f"Monitor Content Fetched (Tab {tab_ref.id}): No HTML content in TabReference."
             )
-            await self._clear_list_view()
             await self._clear_table_view()
             return
 
-        logger.info(
-            f"Monitor Content Fetched (Tab {tab_ref.id}): HTML length {len(html_content)}, ScrollY: {scroll_y}"
-        )
         self._active_tab_ref = tab_ref
         self._active_tab_dom_string = dom_string
 
-        # TODO: Potentially use the screenshot image?
-        if screenshot:
-            logger.debug(f"Received screenshot of size {screenshot.size}")
-            # Example: Save screenshot?
-            # try:
-            #     screenshot.save(f"./screenshot_{tab_ref.id}.png")
-            # except Exception as save_err:
-            #     logger.error(f"Failed to save screenshot: {save_err}")
-
+        # Update URL label
         try:
-            page_markdown = markdownify(html_content, heading_style="ATX")
-            list_view = self.query_one("#markdown-list", ListView)
-            await list_view.clear()
-            md_widget = Markdown(page_markdown.strip(), classes="full-page-markdown")
-            list_item = ListItem(md_widget, classes="markdown-list-item full-page-item")
-            await list_view.append(list_item)
-        except Exception as md_err:
-            logger.error(f"Failed to update markdown view from monitor callback: {md_err}")
+            url_label = self.query_one("#active-tab-url-label", Label)
+            if tab_ref and tab_ref.url:
+                url_label.update(tab_ref.url)
+            else:
+                url_label.update("No active tab (interact to activate)")
+        except Exception as label_err:
+            logger.error(f"Failed to update URL label: {label_err}")
+
+        # TODO: Potentially use the screenshot image?
+        # Example: Save screenshot?
+        # try:
+        #     screenshot.save(f"./screenshot_{tab_ref.id}.png")
+        # except Exception as save_err:
+        #     logger.error(f"Failed to save screenshot: {save_err}")
+
+        # --- Markdown rendering removed ---
 
         try:
             table = self.query_one(DataTable)
             table.clear()
+            # Keep updating the data table
             table.add_row(
                 html_content[:5000] + "..." if len(html_content) > 5000 else html_content,
                 key=f"html_{tab_ref.id}",
             )
         except Exception as table_err:
             logger.error(f"Failed to update data table from monitor callback: {table_err}")
+
+        if not self._initial_monitor_fetch_done:
+            self._initial_monitor_fetch_done = True
+            logger.debug("Initial monitor fetch complete, skipping vision proposal this time.")
+            return  # Skip vision proposal on the very first fetch
+
+        if self._active_tab_ref and self._vision_proposal_done_for_tab == self._active_tab_ref.id:
+            logger.debug(
+                f"Vision proposal already done for tab {self._active_tab_ref.id}, skipping."
+            )
+            return
 
         if screenshot:
             if self._vision_worker and self._vision_worker.is_running:
@@ -184,16 +197,23 @@ class SelectronApp(App[None]):
                     proposal = await propose_selection(screenshot, self._model_config)
                     if isinstance(proposal, AutoProposal):
                         desc = proposal.proposed_description
+
+                        # 1. Define the function to update UI and set flag
                         def _update_input():
                             try:
                                 prompt_input = self.query_one("#prompt-input", Input)
                                 prompt_input.value = desc
                             except Exception as e:
                                 logger.error(f"Error updating input from vision proposal: {e}")
+
+                        # Schedule the UI update via call_later
                         self.app.call_later(_update_input)
+
                 except Exception as e:
                     logger.error(f"Error during vision proposal: {e}", exc_info=True)
 
+            if self._active_tab_ref:
+                self._vision_proposal_done_for_tab = self._active_tab_ref.id
             self._vision_worker = self.run_worker(
                 _do_vision_proposal(), exclusive=True, group="vision_proposal"
             )
@@ -301,7 +321,6 @@ class SelectronApp(App[None]):
                     "Submit attempted but monitor not connected or no active tab identified."
                 )
                 return
-            event.input.value = ""
             if self._agent_worker and self._agent_worker.is_running:
                 logger.info("Cancelling previous agent worker.")
                 self._agent_worker.cancel()
@@ -324,6 +343,12 @@ class SelectronApp(App[None]):
                 await asyncio.sleep(0.1)
             except Exception as e:
                 logger.warning(f"Error scheduling highlight clear on exit: {e}")
+        # Reset URL label on quit
+        try:
+            url_label = self.query_one("#active-tab-url-label", Label)
+            url_label.update("No active tab (interact to activate)")
+        except Exception as label_err:
+            logger.warning(f"Failed to reset URL label on quit: {label_err}")
         self.app.exit()
 
     def action_open_log_file(self) -> None:
@@ -367,28 +392,6 @@ class SelectronApp(App[None]):
         try:
             tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
 
-            async def _update_list_with_markdown(html_snippets: list[str], source_selector: str):
-                try:
-                    list_view = self.query_one("#markdown-list", ListView)
-                    await list_view.clear()
-                    if html_snippets:
-                        for html_content in html_snippets:
-                            try:
-                                md_content = markdownify(html_content, heading_style="ATX")
-                            except Exception as md_err:
-                                logger.warning(
-                                    f"Failed to convert HTML snippet to markdown: {md_err}"
-                                )
-                                md_content = f"_Error converting HTML:_\\n```html\\n{html_content[:200]}...\\n```"
-
-                            md_widget = Markdown(md_content.strip(), classes="markdown-snippet")
-                            list_item = ListItem(md_widget, classes="markdown-list-item")
-                            await list_view.append(list_item)
-                    else:
-                        await list_view.append(ListItem(Static("[No matching elements found]")))
-                except Exception as list_update_err:
-                    logger.error(f"Error updating list view: {list_update_err}")
-
             async def evaluate_selector_wrapper(selector: str, target_text_to_check: str, **kwargs):
                 nonlocal latest_screenshot
                 logger.debug(f"Agent calling evaluate_selector: '{selector}'")
@@ -398,9 +401,6 @@ class SelectronApp(App[None]):
                     **kwargs,
                     return_matched_html=True,
                 )
-                if result and not result.error:
-                    html_to_show = result.matched_html_snippets or []
-                    await _update_list_with_markdown(html_to_show, selector)
                 if result and result.element_count > 0 and not result.error:
                     logger.debug(f"Highlighting intermediate selector: '{selector}'")
                     success, img = await self._highlighter.highlight(
@@ -491,29 +491,23 @@ class SelectronApp(App[None]):
                     f"Agent returned unexpected output type: {type(agent_run_result.output)} / {agent_run_result.output}"
                 )
                 self._last_proposed_selector = None
-                self.call_later(self._clear_list_view)
+                self.call_later(self._clear_table_view)
         except Exception as e:
             logger.error(
                 f"Error running SelectorAgent for target '{target_description}': {e}", exc_info=True
             )
             self._last_proposed_selector = None
-            self.call_later(self._clear_list_view)
+            self.call_later(self._clear_table_view)
 
     async def trigger_rehighlight(self):
-        if self._active_tab_ref and self._last_proposed_selector:
-            logger.info(
-                f"Re-highlighting '{self._last_proposed_selector}' on tab {self._active_tab_ref.id}"
+        # Check if there's an active tab and if the highlighter state indicates highlights are active
+        if self._active_tab_ref and self._highlighter.is_active():
+            logger.debug(  # Changed level to debug as this might happen often during agent run
+                f"Attempting re-highlight on tab {self._active_tab_ref.id}"
             )
             await self._highlighter.rehighlight(self._active_tab_ref)
         else:
-            logger.debug("Re-highlight requested but no active tab or last selector.")
-
-    async def _clear_list_view(self) -> None:
-        try:
-            list_view = self.query_one("#markdown-list", ListView)
-            await list_view.clear()
-        except Exception as e:
-            logger.error(f"Failed to query or clear list view: {e}")
+            logger.debug("Skipping re-highlight: No active tab or highlights not active.")
 
     async def _clear_table_view(self) -> None:
         try:
@@ -521,4 +515,3 @@ class SelectronApp(App[None]):
             table.clear()
         except Exception as e:
             logger.error(f"Failed to query or clear data table: {e}")
-

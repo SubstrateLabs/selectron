@@ -109,7 +109,6 @@ class TabInteractionHandler:
     def _handle_monitor_completion(self, task: asyncio.Task):
         """Callback executed when the monitor task finishes (normally or abnormally)."""
         if self._is_running:  # If it stopped unexpectedly while we thought it was running
-            logger.warning(f"Interaction monitor task for {self.tab_id} completed unexpectedly.")
             try:
                 # Log exception if task failed
                 exc = task.exception()
@@ -147,7 +146,6 @@ class TabInteractionHandler:
                     scroll_y = event.get("data", {}).get("scrollY")
                     if isinstance(scroll_y, int):
                         self._last_interaction_scroll_y = scroll_y
-                        logger.debug(f"Tab {self.tab_id} scroll detected, scrollY: {scroll_y}")
                         self._handle_scroll_event()  # Trigger rehighlight debounce
                 elif event.get("type") == "click":
                     # Reset scrollY on click? Or keep the last known one?
@@ -161,6 +159,7 @@ class TabInteractionHandler:
                     url=self.tab.url,
                     title=self.tab.title,
                     html=None,  # HTML is not relevant for the interaction *trigger* callback
+                    ws_url=self.ws_url,  # Include the websocket URL
                 )
                 # Call the originally provided callback (e.g., to immediately indicate activity)
                 # Schedule the callback correctly, handling both sync and async cases
@@ -309,7 +308,6 @@ class TabInteractionHandler:
             latest_title = target_tab_obj.title  # Get latest title
 
             # --- Connect to WebSocket --- Need connection for multiple commands
-            logger.debug(f"Opening WebSocket connection for fetching content: {ws_url}")
             ws = await websockets.connect(
                 ws_url, max_size=30 * 1024 * 1024, open_timeout=10, close_timeout=10
             )
@@ -321,7 +319,6 @@ class TabInteractionHandler:
 
             # --- Fetch HTML --- #
             try:
-                logger.debug(f"Fetching HTML via executor for {self.tab_id}")
                 html_script = "document.documentElement.outerHTML"
                 html_content = await browser_executor.evaluate(html_script)
                 if html_content:
@@ -338,21 +335,13 @@ class TabInteractionHandler:
             # --- Fetch DOM State --- #
             if html_content:  # Only try getting DOM if we have HTML
                 try:
-                    logger.debug(f"Fetching DOM state via executor for {self.tab_id}")
                     # Create DomService instance
                     dom_service = DomService(browser_executor)
                     # Get DOM state
-                    logger.debug(f"Attempting dom_service.get_elements for {self.tab_id}")
                     dom_state = await dom_service.get_elements()
-                    logger.debug(
-                        f"Result of get_elements for {self.tab_id}: {'Exists' if dom_state else 'None'}, Tree: {'Exists' if dom_state and dom_state.element_tree else 'None'}"
-                    )
                     # Serialize the DOM tree
                     if dom_state and dom_state.element_tree:
                         # Generate DOM string WITH attributes
-                        logger.debug(
-                            f"Attempting element_tree.elements_to_string for {self.tab_id}"
-                        )
                         dom_string = dom_state.element_tree.elements_to_string(
                             include_attributes=DOM_STRING_INCLUDE_ATTRIBUTES
                         )
