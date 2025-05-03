@@ -99,9 +99,6 @@ class LogPanel(Container):
             open(self._log_file_path, "w", encoding="utf-8").close()
             self._last_log_position = 0  # Reset position after clearing
             logger.debug(f"Log file {self._log_file_path} cleared successfully.")
-            # Optionally write a marker to the panel
-            if self._rich_log:
-                self._rich_log.write(Text("--- Log Cleared ---\n", style="dim"))
         except Exception as e:
             err_msg = f"ERROR: Failed to clear log file {self._log_file_path} on mount: {e}"
             # Log to stderr as the logger might write to the file we just failed to clear

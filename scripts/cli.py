@@ -41,7 +41,10 @@ from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
 
 logger = get_logger(__name__)
-LOG_FILE = get_app_dir() / "selectron.log"
+LOG_PATH = get_app_dir() / "selectron.log"
+THEME_DARK = "nord"
+THEME_LIGHT = "solarized-light"
+DEFAULT_THEME = THEME_LIGHT
 
 
 class Selectron(App[None]):
@@ -50,6 +53,7 @@ class Selectron(App[None]):
         Binding(key="ctrl+c", action="quit", description="Quit App", show=False),
         Binding(key="ctrl+q", action="quit", description="Quit App", show=True),
         Binding(key="ctrl+l", action="open_log_file", description="Open Logs", show=True),
+        Binding(key="ctrl+t", action="toggle_dark", description="Toggle Theme", show=True),
     ]
 
     # Removed monitor and monitor_task, will be managed by ChromeTabManager
@@ -72,11 +76,7 @@ class Selectron(App[None]):
     def __init__(self):
         super().__init__()
         self.shutdown_event = asyncio.Event()
-        # Initialize log watching attributes
-        # Ensure log file exists (logger.py should also do this)
-        # LogPanel handles log file creation now
         self._highlighter = ChromeHighlighter()
-        # Tab manager will be initialized in on_mount
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -87,7 +87,7 @@ class Selectron(App[None]):
             with TabbedContent(initial="logs-tab"):
                 with TabPane("✦ Logs ✧", id="logs-tab"):
                     # Instantiate the new LogPanel widget
-                    yield LogPanel(log_file_path=LOG_FILE, id="log-panel-widget")
+                    yield LogPanel(log_file_path=LOG_PATH, id="log-panel-widget")
                 with TabPane("✦ Extracted Markdown ✧", id="markdown-tab"):
                     yield ListView(id="markdown-list")
                 with TabPane("✦ Parsed Data ✧", id="table-tab"):
@@ -100,28 +100,26 @@ class Selectron(App[None]):
         yield Footer()
 
     async def on_mount(self) -> None:
-        """Called when the app is mounted."""
         try:
             self._openai_client = openai.AsyncOpenAI()
-            logger.info("OpenAI client initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI client: {e}", exc_info=True)
         try:
             table = self.query_one(DataTable)
             table.cursor_type = "row"
             table.add_column("Raw HTML", key="html_content")
-            logger.debug("DataTable initialized with 'Raw HTML' column.")
         except Exception as table_init_err:
             logger.error(f"Failed to initialize DataTable: {table_init_err}", exc_info=True)
         self._tab_manager = ChromeTabManager(
             openai_client=self._openai_client,
-            on_active_tab_updated=self._handle_active_tab_update,  # New callback handler
-            on_page_content_ready=self._handle_page_content_update,  # New callback handler
-            on_proposal_ready=self._handle_proposal_update,  # New callback handler
+            on_active_tab_updated=self._handle_active_tab_update,
+            on_page_content_ready=self._handle_page_content_update,
+            on_proposal_ready=self._handle_proposal_update,
         )
         self.run_worker(
             self._tab_manager.run_monitoring_task(), exclusive=True, group="chrome_manager"
         )
+        self.theme = DEFAULT_THEME
         if not await ensure_chrome_connection():
             logger.error("Failed to establish Chrome connection.")
 
@@ -220,12 +218,17 @@ class Selectron(App[None]):
         self.app.exit()
 
     def action_open_log_file(self) -> None:
-        # Get the LogPanel instance and call its method
         try:
             log_panel_widget = self.query_one(LogPanel)
             log_panel_widget.open_log_in_editor()
         except Exception as e:
             logger.error(f"Failed to open log file via LogPanel: {e}", exc_info=True)
+
+    def action_toggle_dark(self) -> None:
+        if self.theme == THEME_LIGHT:
+            self.theme = THEME_DARK
+        else:
+            self.theme = THEME_LIGHT
 
     async def _run_agent_and_highlight(self, target_description: str) -> None:
         """Runs the SelectorAgent, captures screenshots on highlight, and highlights the final proposed selector."""
