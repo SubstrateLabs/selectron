@@ -1,5 +1,4 @@
 import asyncio
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -29,7 +28,6 @@ from textual.widgets import (
 )
 from textual.worker import Worker
 
-from selectron.ai.propose_select import propose_select
 from selectron.ai.selector_agent import (
     DOM_CONTEXT_PROMPT,
     SYSTEM_PROMPT_BASE,
@@ -38,25 +36,22 @@ from selectron.ai.selector_tools import (
     SelectorTools,
 )
 from selectron.ai.types import (
-    ProposalResult,
     SelectorProposal,
 )
 from selectron.chrome.cdp_executor import CdpBrowserExecutor
 from selectron.chrome.chrome_cdp import (
-    ChromeTab,
-    capture_tab_screenshot,
     get_final_url_and_title,
     get_html_via_ws,
     wait_for_page_load,
 )
 from selectron.chrome.chrome_highlighter import ChromeHighlighter
-from selectron.chrome.chrome_monitor import ChromeMonitor, TabChangeEvent
 from selectron.chrome.connect import ensure_chrome_connection
 from selectron.chrome.types import TabReference
 from selectron.dom.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES
 from selectron.dom.dom_service import DomService
 from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
+from selectron.util.open_log_file import open_log_file
 
 logger = get_logger(__name__)
 LOG_FILE = get_app_dir() / "selectron.log"
@@ -70,8 +65,7 @@ class Selectron(App[None]):
         Binding(key="ctrl+l", action="open_log_file", description="Open Logs", show=True),
     ]
 
-    monitor: Optional[ChromeMonitor] = None
-    monitor_task: Optional[Worker[None]] = None
+    # Removed monitor and monitor_task, will be managed by ChromeTabManager
     shutdown_event: asyncio.Event
 
     # Attributes for log file watching
@@ -82,8 +76,13 @@ class Selectron(App[None]):
     _agent_worker: Optional[Worker[None]] = None
     _highlighter: ChromeHighlighter
     _openai_client: Optional[openai.AsyncOpenAI] = None
-    _proposal_tasks: dict[str, asyncio.Task] = {}
+    # Removed _proposal_tasks
     _last_proposed_selector: Optional[str] = None
+
+    # Add instance for the new manager
+    _tab_manager: Optional["ChromeTabManager"] = (
+        None  # Forward reference if manager imports Selectron
+    )
 
     def __init__(self):
         super().__init__()
@@ -95,6 +94,7 @@ class Selectron(App[None]):
         self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
         self._log_file_path.touch(exist_ok=True)  # Explicitly create if doesn't exist
         self._highlighter = ChromeHighlighter()
+        # Tab manager will be initialized in on_mount
 
     @property
     def log_panel(self) -> RichLog:
@@ -152,9 +152,23 @@ class Selectron(App[None]):
             logger.error(f"Failed to initialize DataTable: {table_init_err}", exc_info=True)
         # --- End Setup DataTable --- #
 
-        logger.info("App mounted. Starting Chrome monitor...")  # This goes to file
-        # Run the monitor setup and main loop in the background
-        self.monitor_task = self.run_worker(self.run_monitoring(), exclusive=True)
+        logger.info("App mounted. Initializing Chrome tab manager...")
+        # Initialize and start the tab manager
+        self._tab_manager = ChromeTabManager(
+            openai_client=self._openai_client,
+            on_active_tab_updated=self._handle_active_tab_update,  # New callback handler
+            on_page_content_ready=self._handle_page_content_update,  # New callback handler
+            on_proposal_ready=self._handle_proposal_update,  # New callback handler
+        )
+        # Run the manager's monitoring loop in the background
+        self.run_worker(
+            self._tab_manager.run_monitoring_task(), exclusive=True, group="chrome_manager"
+        )
+
+        # Check connection (can be moved inside manager start later)
+        if not await ensure_chrome_connection():
+            logger.error("Failed to establish Chrome connection.")
+            # Consider exiting or notifying user
 
     # --- Log File Watching Methods ---
 
@@ -257,366 +271,103 @@ class Selectron(App[None]):
         )
         self._highlighter.set_active(False)
 
-    async def run_monitoring(self) -> None:
-        """Runs the main Chrome monitoring loop."""
-        if not await ensure_chrome_connection():
-            logger.error("Failed to establish Chrome connection.")
-            return
-        self.monitor = ChromeMonitor(
-            rehighlight_callback=self.trigger_rehighlight,
-            check_interval=1.5,
-        )
-        try:
-            logger.info("Initializing Chrome monitor...")
-            monitor_started = await self.monitor.start_monitoring(
-                on_polling_change_callback=self._handle_polling_change,
-                on_interaction_update_callback=self._handle_interaction_update,
-                on_content_fetched_callback=self._handle_content_fetched,
-            )
-            if not monitor_started:
-                logger.error("Failed to start monitor.")
-                return
-            logger.info("Monitor started successfully.")
-            await self.shutdown_event.wait()
-            logger.info("Shutdown signal received.")
-        except Exception as e:
-            logger.exception(f"Error in monitoring loop: {e}")
-            if not self.shutdown_event.is_set():
-                self.shutdown_event.set()
-        finally:
-            logger.info("Monitor worker shutting down...")
-            if self.monitor:
-                logger.info("Stopping Chrome monitor...")
-                await self.monitor.stop_monitoring()
-                logger.info("Monitor stopped.")
-            else:
-                logger.warning("Monitor object not initialized, skipping stop.")
-            logger.info("Monitor worker finished.")
-            self.app.exit()
-
-    async def _handle_polling_change(self, event: TabChangeEvent):
-        """Callback function for tab changes detected ONLY by polling."""
-        tasks = []
-        # Immediately clear highlights if the active tab is closed or navigates away
-        active_tab_closed_or_navigated = False
-        if self._active_tab_ref:
-            for closed_ref in event.closed_tabs:
-                if closed_ref.id == self._active_tab_ref.id:
-                    active_tab_closed_or_navigated = True
-                    break
-            if not active_tab_closed_or_navigated:
-                for _navigated_tab, old_ref in event.navigated_tabs:
-                    if old_ref.id == self._active_tab_ref.id:
-                        active_tab_closed_or_navigated = True
-                        break
-
-        # --- Cancel Stale Proposal Tasks ---
-        tabs_navigated_away_from_or_closed = list(event.closed_tabs) + [
-            old_ref for _, old_ref in event.navigated_tabs
-        ]
-        for ref in tabs_navigated_away_from_or_closed:
-            if ref.id in self._proposal_tasks:
-                task_to_cancel = self._proposal_tasks.pop(ref.id, None)  # Use pop with default None
-                if task_to_cancel and not task_to_cancel.done():
-                    logger.info(
-                        f"Polling detected navigation/closure for tab {ref.id}. Cancelling stale proposal task."
-                    )
-                    task_to_cancel.cancel()
-                elif task_to_cancel:  # Task existed but was already done
-                    logger.debug(
-                        f"Proposal task for navigated/closed tab {ref.id} was already finished."
-                    )
-
-        if active_tab_closed_or_navigated:
-            logger.info("Active tab closed or navigated, clearing highlights.")
-            await self._highlighter.clear(self._active_tab_ref)
-            self._highlighter.set_active(False)
-            # self._active_tab_ref = None # Consider clearing ref here?
-            # self._active_tab_dom_string = None
-
-        for new_tab in event.new_tabs:
-            if new_tab.webSocketDebuggerUrl:
-                logger.info(f"Polling: New Tab: {new_tab.title} ({new_tab.url})")
-                tasks.append(
-                    self._process_new_tab(new_tab)
-                )  # This will now create proposal tasks internally
-            else:
-                logger.warning(f"Polling: New tab {new_tab.id} missing websocket URL.")
-
-        for closed_ref in event.closed_tabs:
-            logger.info(f"Polling: Closed Tab: ID {closed_ref.id} ({closed_ref.url})")
-
-        for navigated_tab, old_ref in event.navigated_tabs:
-            logger.info(
-                f"Polling: Navigated Tab: ID {navigated_tab.id} from {old_ref.url} TO {navigated_tab.url}"
-            )
-            if navigated_tab.webSocketDebuggerUrl:
-                tasks.append(
-                    self._process_new_tab(navigated_tab)
-                )  # This will now create proposal tasks internally
-            else:
-                logger.warning(f"Polling: Navigated tab {navigated_tab.id} missing websocket URL.")
-
-        if tasks:
-            await asyncio.gather(*tasks)  # Run processing for new/navigated tabs
-
-    async def _handle_interaction_update(self, ref: TabReference):
-        logger.debug(f"Interaction Update: Tab {ref.id} ({ref.url})")
-        pass  # Placeholder
-
-    async def _handle_content_fetched(
-        self,
-        ref: TabReference,
-        image: Optional[Image.Image],
-        scroll_y: Optional[int],
-        dom_string: Optional[str],
+    # --- Callback Handlers for ChromeTabManager --- #
+    async def _handle_active_tab_update(
+        self, tab_ref: Optional[TabReference], dom_string: Optional[str]
     ):
-        logger.info(f"Interaction: Content Fetched: Tab {ref.id} ({ref.url}) ScrollY: {scroll_y}")
-        self._active_tab_ref = ref  # Keep updating active tab ref
-
-        # Log if DOM string was fetched
-        if dom_string:
-            logger.info(f"    Fetched DOM (Length: {len(dom_string)}) ")
-            self._active_tab_dom_string = dom_string  # Update DOM string based on interaction fetch
-        else:
-            logger.warning(f"    DOM string not fetched for {ref.url} after interaction.")
-
-        if ref.html:
-            try:
-                # Only update if this is the *currently active* tab visually
-                if self._active_tab_ref and self._active_tab_ref.id == ref.id:
-                    page_markdown = markdownify(ref.html, heading_style="ATX")
-                    list_view = self.query_one("#markdown-list", ListView)
-                    # Decide whether to clear or prepend/replace
-                    # For now, let's clear and set, assuming interaction fetch should refresh the base view
-                    await list_view.clear()
-                    md_widget = Markdown(page_markdown.strip(), classes="full-page-markdown")
-                    list_item = ListItem(md_widget, classes="markdown-list-item full-page-item")
-                    await list_view.append(list_item)
-                    logger.debug(
-                        f"Updated initial page markdown for tab {ref.id} via interaction fetch"
-                    )
-            except Exception as page_md_err:
-                logger.error(
-                    f"Failed to update initial page markdown for tab {ref.id} via interaction fetch: {page_md_err}"
-                )
-
-        if ref.html:
-            try:
-                # Only update if this is the *currently active* tab visually
-                if self._active_tab_ref and self._active_tab_ref.id == ref.id:
-                    table = self.query_one(DataTable)
-                    table.clear()
-                    table.add_row(ref.html, key=f"tab_{ref.id}_html")
-                    logger.debug(
-                        f"Updated HTML content in table for tab {ref.id} via interaction fetch"
-                    )
-            except Exception as table_update_err:
-                logger.error(
-                    f"Failed to update HTML in table for tab {ref.id} via interaction fetch: {table_update_err}"
-                )
-
-        if not ref.html:
-            logger.warning(f"    HTML not fetched for {ref.url}, skipping metadata/save.")
-
-    async def _process_new_tab(self, tab: ChromeTab):
-        """Fetches HTML, metadata, screenshot for a NEW or NAVIGATED tab and saves samples. (Instance Method)"""
-        html = screenshot_pil_image = ws = dom_string = None
-        final_url = final_title = None
-        if not tab.webSocketDebuggerUrl:
-            logger.warning(f"Tab {tab.id} missing ws url")
-            return
-        ws_url = tab.webSocketDebuggerUrl
-        try:
-            logger.debug(f"Connecting ws: {ws_url}")
-            ws = await websockets.connect(ws_url, max_size=20 * 1024 * 1024, open_timeout=10)
-            logger.debug(f"Connected ws for {tab.id}")
-            loaded = await wait_for_page_load(ws)
-            logger.debug(f"Page load status {tab.id}: {loaded}")
-            await asyncio.sleep(1.0)  # Settle delay
-            final_url, final_title = await get_final_url_and_title(
-                ws, tab.url, tab.title or "Unknown"
-            )
-            if final_url:
-                html = await get_html_via_ws(ws, final_url)
-                if html:
-                    try:
-                        browser_executor = CdpBrowserExecutor(ws_url, final_url, ws_connection=ws)
-                        dom_service = DomService(browser_executor)
-                        dom_state = await dom_service.get_elements()
-                        if dom_state and dom_state.element_tree:
-                            dom_string = dom_state.element_tree.elements_to_string(
-                                include_attributes=DOM_STRING_INCLUDE_ATTRIBUTES
-                            )
-                    except Exception as dom_e:
-                        logger.exception(f"Error fetching DOM for {final_url}: {dom_e}")
-                if final_title:
-                    screenshot_pil_image = await capture_tab_screenshot(
-                        ws_url=ws_url, ws_connection=ws
-                    )
-            else:
-                logger.warning(f"Could not get final URL for {tab.id}")
-        except Exception as e:
-            logger.exception(f"Error processing tab {tab.id} ({tab.url}): {e}")
-        finally:
-            await ws.close() if ws else None
-
-        if final_url:
-            new_tab_ref = TabReference(
-                id=tab.id, url=final_url, title=final_title, html=html, ws_url=ws_url
-            )
-            if self._active_tab_ref and self._active_tab_ref.id != new_tab_ref.id:
-                await self._highlighter.clear(self._active_tab_ref)
-            self._active_tab_ref = new_tab_ref
-            self._active_tab_dom_string = dom_string  # Store the DOM string we fetched
-            logger.info(f"Active tab UPDATED to: {tab.id} ({final_url})")
-            if html:
-                try:
-                    page_markdown = markdownify(html, heading_style="ATX")
-                    list_view = self.query_one("#markdown-list", ListView)
-                    await list_view.clear()  # Clear previous content
-                    md_widget = Markdown(page_markdown.strip(), classes="full-page-markdown")
-                    list_item = ListItem(md_widget, classes="markdown-list-item full-page-item")
-                    await list_view.append(list_item)
-                    logger.debug(f"Set initial page markdown for tab {tab.id}")
-                except Exception as page_md_err:
-                    logger.error(
-                        f"Failed to set initial page markdown for tab {tab.id}: {page_md_err}"
-                    )
+        """Handles updates to the active tab reference and DOM string from the manager."""
+        logger.debug(f"Callback: Active tab updated to {tab_ref.id if tab_ref else 'None'}")
+        self._active_tab_ref = tab_ref
+        self._active_tab_dom_string = dom_string
+        # If the tab is cleared, ensure highlights are cleared too.
+        # The highlighter state might need careful management between agent runs and tab changes.
+        if not tab_ref:
+            logger.info("Active tab cleared by manager, clearing highlights.")
+            await self._highlighter.clear(None)  # Clear generic highlights
             self._highlighter.set_active(False)
 
-        elif self._active_tab_ref and self._active_tab_ref.id == tab.id:
-            # If this tab *was* the active one but processing failed, clear it
-            logger.warning(f"Clearing active tab reference for {tab.id} due to processing failure.")
-            self._active_tab_ref = None
-            self._active_tab_dom_string = None
+    async def _handle_page_content_update(self, html_content: str):
+        """Handles updates to the page content (HTML) from the manager."""
+        logger.debug(
+            f"Callback: Page content update received (length: {len(html_content)}). Updating UI."
+        )
+        # Update Markdown View
+        try:
+            page_markdown = markdownify(html_content, heading_style="ATX")
+            list_view = self.query_one("#markdown-list", ListView)
+            await list_view.clear()
+            md_widget = Markdown(page_markdown.strip(), classes="full-page-markdown")
+            list_item = ListItem(md_widget, classes="markdown-list-item full-page-item")
+            await list_view.append(list_item)
+        except Exception as md_err:
+            logger.error(f"Failed to update markdown view from callback: {md_err}")
 
-        if self._openai_client and screenshot_pil_image:
-            # --- Cancel previous task for the SAME tab ID if it exists (e.g., rapid navigation) ---
-            if tab.id in self._proposal_tasks:
-                existing_task = self._proposal_tasks.pop(tab.id)
-                if not existing_task.done():
-                    logger.warning(
-                        f"Cancelling existing proposal task for tab {tab.id} due to new processing request."
-                    )
-                    existing_task.cancel()
-            proposal_task = asyncio.create_task(
-                self._run_proposal_generation(
-                    tab_id=tab.id, final_url=final_url, screenshot_pil_image=screenshot_pil_image
+        # Update Table View
+        try:
+            table = self.query_one(DataTable)
+            table.clear()
+            # Consider adding URL/Title if available in tab_ref when active tab updates?
+            table.add_row(html_content, key="current_tab_html")
+        except Exception as table_err:
+            logger.error(f"Failed to update data table from callback: {table_err}")
+
+    async def _handle_proposal_update(self, description: str):
+        """Handles the proposed description update from the manager."""
+        logger.debug(f"Callback: Proposal received: '{description}'. Updating input.")
+        # Update Input Widget only if the current tab is still active (manager doesn't know UI state)
+        if self._active_tab_ref:
+            try:
+                input_widget = self.query_one("#prompt-input", Input)
+                # Only update if the input is currently empty or hasn't been manually edited?
+                # Or just always update?
+                input_widget.value = description
+                logger.info(
+                    f"Updated prompt input with proposal for tab {self._active_tab_ref.id}."
                 )
-            )
-            self._proposal_tasks[tab.id] = proposal_task
-
-            def _proposal_done_callback(task: asyncio.Task, tab_id_cb: str):
-                try:
-                    # Check for cancellation FIRST to avoid noisy logs for expected cancellations
-                    if task.cancelled():
-                        logger.debug(f"Proposal task for tab {tab_id_cb} was cancelled (expected).")
-                        return  # Don't proceed further if cancelled
-                    # Log if the task raised an exception (other than cancellation)
-                    exc = task.exception()
-                    if exc:
-                        logger.error(
-                            f"Proposal task for tab {tab_id_cb} failed with exception: {exc}",
-                            exc_info=exc,
-                        )
-                finally:
-                    removed_task = self._proposal_tasks.pop(tab_id_cb, None)
-                    if removed_task:
-                        logger.debug(
-                            f"Removed completed/cancelled proposal task for tab {tab_id_cb} from tracking dict."
-                        )
-
-            # remove the task from the dictionary upon completion/cancellation
-            proposal_task.add_done_callback(lambda t: _proposal_done_callback(t, tab.id))
-
+                # input_widget.focus() # Optional focus
+            except Exception as input_err:
+                logger.error(f"Failed to update input widget from callback: {input_err}")
         else:
-            # Keep the logging for missing prerequisites
-            missing_for_proposal = []
-            if not self._openai_client:
-                missing_for_proposal.append("OpenAI client")
-            if not screenshot_pil_image:
-                missing_for_proposal.append("Screenshot")
-            if missing_for_proposal:
-                logger.warning(
-                    f"Skipping proposal generation task creation for {final_url or tab.url} due to missing: {', '.join(missing_for_proposal)}"
-                )
+            logger.info("Proposal received, but no active tab. Input not updated.")
 
     async def action_quit(self) -> None:
         """Action to quit the app."""
         logger.info("Shutdown requested...")
         self.shutdown_event.set()
 
-        # --- Cancel any outstanding proposal tasks ---
-        if self._proposal_tasks:
-            logger.info(f"Cancelling {len(self._proposal_tasks)} outstanding proposal tasks...")
-            tasks_to_cancel = list(self._proposal_tasks.values())  # Get tasks before clearing dict
-            self._proposal_tasks.clear()  # Clear the dict
-            for task in tasks_to_cancel:
-                if not task.done():
-                    task.cancel()
-            # Give cancellations a moment to propagate
-            await asyncio.sleep(0.1)
-        # --- End cancel proposal tasks ---
+        # Signal the tab manager to stop
+        if self._tab_manager:
+            logger.info("Stopping Chrome tab manager...")
+            await self._tab_manager.stop_monitoring()
+            logger.info("Chrome tab manager stopped.")
 
-        if self.monitor_task:
+        # Wait for the manager worker to finish
+        # This assumes stop_monitoring is effective and the worker group is set.
+        # Textual handles worker cleanup on exit, but explicit waiting can be safer.
+        workers = [w for w in self.workers if w.group == "chrome_manager"]
+        if workers:
+            logger.info("Waiting for manager worker...")
             try:
-                logger.info("Waiting for monitor worker...")
-                await self.monitor_task.wait()
-                logger.info("Monitor worker finished.")
+                await workers[0].wait()  # Wait for the first (should be only) manager worker
+                logger.info("Manager worker finished.")
             except Exception as e:
-                logger.error(f"Error during monitor shutdown wait: {e}")
-                if (
-                    self.monitor_task
-                    and not self.monitor_task.is_cancelled
-                    and not self.monitor_task.is_finished
-                ):
-                    try:
-                        logger.warning("Cancelling hung monitor worker...")
-                        self.monitor_task.cancel()
-                    except Exception as cancel_e:
-                        logger.error(f"Error cancelling monitor worker: {cancel_e}")
+                logger.error(f"Error waiting for manager worker: {e}")
 
         # --- Cancel agent worker, clear state, and clear highlights on exit --- #
         if self._agent_worker and self._agent_worker.is_running:
             logger.info("Cancelling agent worker on exit...")
             self._agent_worker.cancel()
-        # Clear highlight state via service
         self._highlighter.set_active(False)
-        # Clear highlights before exiting (fire and forget)
-        self.call_later(self._highlighter.clear, self._active_tab_ref)
-        await asyncio.sleep(0.1)  # Short delay to allow cleanup task to run
-        # --- End cleanup --- #
+        # Use call_later for fire-and-forget clear, happens before exit
+        if self._active_tab_ref:  # Only clear if there was an active tab
+            self.call_later(self._highlighter.clear, self._active_tab_ref)
+            await asyncio.sleep(0.1)  # Short delay for clear task
 
         logger.info("Exiting application.")
         self.app.exit()
 
     def action_open_log_file(self) -> None:
-        """Opens the log file using the default system application."""
-        log_path_str = str(self._log_file_path.resolve())
-        logger.info(f"Attempting to open log file: {log_path_str}")
-        try:
-            if sys.platform == "win32":
-                # os.startfile(log_path_str) # Alternative for windows
-                subprocess.run(["start", "", log_path_str], check=True, shell=True)
-            elif sys.platform == "darwin":
-                subprocess.run(["open", log_path_str], check=True)
-            else:  # Assume Linux/other Unix-like
-                subprocess.run(["xdg-open", log_path_str], check=True)
-            logger.info("Successfully launched command to open log file.")
-        except FileNotFoundError as e:
-            # Handle case where 'open', 'xdg-open', or 'start' isn't found
-            err_msg = f"Error: Could not find command to open log file. Command tried: {e.filename}"
-            logger.error(err_msg)
-            # self.notify(err_msg, title="Error Opening Log", severity="error") # Optional TUI notification
-        except subprocess.CalledProcessError as e:
-            err_msg = f"Error: Command to open log file failed (code {e.returncode}): {e}"
-            logger.error(err_msg)
-            # self.notify(err_msg, title="Error Opening Log", severity="error")
-        except Exception as e:
-            err_msg = f"An unexpected error occurred while opening log file: {e}"
-            logger.error(err_msg, exc_info=True)
-            # self.notify(err_msg, title="Error Opening Log", severity="error")
+        open_log_file(self._log_file_path)
 
     async def _run_agent_and_highlight(self, target_description: str) -> None:
         """Runs the SelectorAgent, captures screenshots on highlight, and highlights the final proposed selector."""
@@ -701,20 +452,15 @@ class Selectron(App[None]):
             finally:
                 if ws and ws.state != websockets.protocol.State.CLOSED:
                     await ws.close()
-        # --- End Fetch data --- #
 
         # Now we should have HTML, proceed with agent logic
         logger.info(
             f"Running SelectorAgent logic for target '{target_description}' on tab {tab_ref.id}"
         )
-
-        # If URL was updated during fetch, use the latest one
         base_url_for_agent = current_url  # Use the potentially updated current_url
         if not base_url_for_agent:
             logger.error(f"Cannot run agent: Base URL is missing for tab {tab_ref.id}")
             return
-
-        # Check HTML again just to be absolutely sure after fetch block
         if not current_html:
             logger.error(
                 f"Cannot run agent: HTML content is missing even after fetch attempt for tab {tab_ref.id}."
@@ -722,21 +468,12 @@ class Selectron(App[None]):
             return
 
         try:
-            # --- Setup Tools and Wrappers --- #
-            # Use the potentially updated html and url
             tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
-
-            # --- Helper to Update List View --- #
             async def _update_list_with_markdown(html_snippets: list[str], source_selector: str):
-                # Takes raw HTML snippets now
                 try:
                     list_view = self.query_one("#markdown-list", ListView)
                     await list_view.clear()
-
                     if html_snippets:
-                        logger.debug(
-                            f"Updating list view with {len(html_snippets)} HTML snippets for '{source_selector}', converting to markdown."
-                        )
                         for html_content in html_snippets:
                             try:
                                 md_content = markdownify(html_content, heading_style="ATX")
@@ -750,22 +487,19 @@ class Selectron(App[None]):
                             list_item = ListItem(md_widget, classes="markdown-list-item")
                             await list_view.append(list_item)
                     else:
-                        logger.debug(f"No HTML snippets to display for '{source_selector}'.")
                         await list_view.append(ListItem(Static("[No matching elements found]")))
                 except Exception as list_update_err:
                     logger.error(f"Error updating list view: {list_update_err}")
 
             async def evaluate_selector_wrapper(selector: str, target_text_to_check: str, **kwargs):
                 nonlocal latest_screenshot  # Allow modification
-                # Run the actual tool
                 logger.debug(f"Agent calling evaluate_selector: '{selector}'")
                 result = await tools_instance.evaluate_selector(
                     selector=selector,
                     target_text_to_check=target_text_to_check,
                     **kwargs,
-                    return_matched_html=True,  # Ensure we always request HTML
+                    return_matched_html=True, 
                 )
-
                 # Update list view with markdown from successful evaluations
                 if result and not result.error:
                     # Pass raw HTML snippets to the helper for conversion
@@ -803,7 +537,6 @@ class Selectron(App[None]):
                 result = await tools_instance.get_siblings(selector=selector, **kwargs)
                 # Highlight the element whose siblings are being checked
                 if result and result.element_found and not result.error:
-                    logger.debug(f"Highlighting element for get_siblings: '{selector}'")
                     success, img = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="blue"
                     )
@@ -813,18 +546,14 @@ class Selectron(App[None]):
 
             async def extract_data_from_element_wrapper(selector: str, **kwargs):
                 nonlocal latest_screenshot  # Allow modification
-                # This one we MIGHT want to highlight differently upon final success?
-                # For now, just log.
-                logger.debug(f"Agent calling extract_data_from_element: '{selector}'")
-                # Highlight this selector as potentially the final one
                 logger.debug(f"Highlighting potentially final selector: '{selector}'")
                 success, img = await self._highlighter.highlight(
                     self._active_tab_ref,
                     selector,
-                    color="lime",  # Use 'lime' for final/extraction step
+                    color="lime",  
                 )
                 if success and img:
-                    latest_screenshot = img  # Update latest screenshot if highlight succeeds
+                    latest_screenshot = img 
                 elif not success:
                     logger.warning(f"Highlight failed for extraction selector: '{selector}'")
                 return await tools_instance.extract_data_from_element(selector=selector, **kwargs)
@@ -865,13 +594,8 @@ class Selectron(App[None]):
                 "This JSON object MUST include values for the fields: 'proposed_selector' (string) and 'reasoning' (string). "
                 "DO NOT include other fields like 'final_verification' or 'extraction_result' in the final JSON output."
             )
-            # --- End explicit output instruction ---
             query = " ".join(query_parts)
-
-            # --- Prepare Agent Input (Text + Optional Image) --- #
-            # Initialize with text query as default
             agent_input: Any = query
-            # --- End Prepare Agent Input --- #
 
             # Use the prepared agent_input (which could be str or list)
             agent_run_result = await agent.run(agent_input)
@@ -903,61 +627,6 @@ class Selectron(App[None]):
     async def trigger_rehighlight(self):
         await self._highlighter.rehighlight(self._active_tab_ref)
 
-    async def _run_proposal_generation(
-        self, tab_id: str, final_url: Optional[str], screenshot_pil_image: Image.Image
-    ):
-        """Handles the OpenAI call for proposal using the extracted function and updates UI/state."""
-        if not self._openai_client:  # Re-check client just in case
-            logger.error("OpenAI client not available for proposal generation.")
-            return
-
-        logger.info(
-            f"Starting proposal generation task for tab {tab_id} ({final_url}) via extracted function."
-        )
-        try:
-            # Call the extracted function
-            proposal_result: ProposalResult = await propose_select(
-                client=self._openai_client,
-                screenshot=screenshot_pil_image,
-            )
-
-            if proposal_result.description:
-                proposed_description = proposal_result.description
-                logger.info(f"Proposal found (Tab: {tab_id}). Desc: '{proposed_description}'")
-                try:
-                    # Check if this tab is STILL the active tab before updating input
-                    if self._active_tab_ref and self._active_tab_ref.id == tab_id:
-                        log_input_widget = self.query_one("#prompt-input", Input)
-                        log_input_widget.value = proposed_description
-                        # Optionally move focus back to the input
-                    else:
-                        logger.info(
-                            f"Proposal for tab {tab_id} succeeded, but it's no longer the active tab. Input not updated."
-                        )
-                except Exception as e:
-                    logger.error(
-                        f"Failed to get log input widget to update value for tab {tab_id}: {e}",
-                        exc_info=True,
-                    )
-            elif proposal_result.error_message:
-                logger.error(
-                    f"Proposal generation failed for tab {tab_id}. Error: {proposal_result.error_message}"
-                )
-            else:
-                logger.error(
-                    f"Proposal generation for tab {tab_id} returned unexpected empty result."
-                )
-
-        except asyncio.CancelledError:
-            logger.debug(f"Proposal generation task for tab {tab_id} cancelled (expected).")
-            # Don't change status if cancelled, allows retry based on previous status
-            raise  # Re-raise cancellation
-        except Exception as proposal_err:  # Catch potential errors in the call itself
-            logger.error(
-                f"Unexpected error during proposal task execution for tab {tab_id}: {proposal_err}",
-                exc_info=True,
-            )
-
     async def _clear_list_view(self) -> None:
         """Helper method to safely clear the list view."""
         try:
@@ -971,5 +640,8 @@ class Selectron(App[None]):
 if __name__ == "__main__":
     # Ensure logger is initialized (and file created) before app runs
     get_logger("__main__")  # Initial call to setup file logging
+    # Import manager here to avoid circular dependency if manager needs Selectron types
+    from selectron.chrome.chrome_tab_manager import ChromeTabManager
+
     app = Selectron()
     app.run()
