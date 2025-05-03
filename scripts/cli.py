@@ -1,14 +1,10 @@
 import asyncio
-import sys
-from pathlib import Path
 from typing import Any, Optional
 
 import openai
-import websockets
 from markdownify import markdownify
 from PIL import Image
 from pydantic_ai import Agent, Tool
-from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal
@@ -21,16 +17,15 @@ from textual.widgets import (
     ListItem,
     ListView,
     Markdown,
-    RichLog,
     Static,
     TabbedContent,
     TabPane,
 )
 from textual.worker import Worker
 
-from selectron.ai.selector_agent import (
-    DOM_CONTEXT_PROMPT,
-    SYSTEM_PROMPT_BASE,
+from selectron.ai.selector_prompt import (
+    SELECTOR_PROMPT_BASE,
+    SELECTOR_PROMPT_DOM_TEMPLATE,
 )
 from selectron.ai.selector_tools import (
     SelectorTools,
@@ -38,20 +33,12 @@ from selectron.ai.selector_tools import (
 from selectron.ai.types import (
     SelectorProposal,
 )
-from selectron.chrome.cdp_executor import CdpBrowserExecutor
-from selectron.chrome.chrome_cdp import (
-    get_final_url_and_title,
-    get_html_via_ws,
-    wait_for_page_load,
-)
 from selectron.chrome.chrome_highlighter import ChromeHighlighter
 from selectron.chrome.connect import ensure_chrome_connection
 from selectron.chrome.types import TabReference
-from selectron.dom.dom_attributes import DOM_STRING_INCLUDE_ATTRIBUTES
-from selectron.dom.dom_service import DomService
+from selectron.cli.log_panel import LogPanel
 from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
-from selectron.util.open_log_file import open_log_file
 
 logger = get_logger(__name__)
 LOG_FILE = get_app_dir() / "selectron.log"
@@ -69,8 +56,6 @@ class Selectron(App[None]):
     shutdown_event: asyncio.Event
 
     # Attributes for log file watching
-    _log_file_path: Path
-    _last_log_position: int
     _active_tab_ref: Optional[TabReference] = None
     _active_tab_dom_string: Optional[str] = None
     _agent_worker: Optional[Worker[None]] = None
@@ -88,18 +73,10 @@ class Selectron(App[None]):
         super().__init__()
         self.shutdown_event = asyncio.Event()
         # Initialize log watching attributes
-        self._log_file_path = LOG_FILE
-        self._last_log_position = 0
         # Ensure log file exists (logger.py should also do this)
-        self._log_file_path.parent.mkdir(parents=True, exist_ok=True)
-        self._log_file_path.touch(exist_ok=True)  # Explicitly create if doesn't exist
+        # LogPanel handles log file creation now
         self._highlighter = ChromeHighlighter()
         # Tab manager will be initialized in on_mount
-
-    @property
-    def log_panel(self) -> RichLog:
-        """Convenience property to access the RichLog widget."""
-        return self.query_one("#log-panel", RichLog)
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -109,7 +86,8 @@ class Selectron(App[None]):
             # TabbedContent takes up the main area
             with TabbedContent(initial="logs-tab"):
                 with TabPane("✦ Logs ✧", id="logs-tab"):
-                    yield RichLog(highlight=True, markup=False, id="log-panel", wrap=True)
+                    # Instantiate the new LogPanel widget
+                    yield LogPanel(log_file_path=LOG_FILE, id="log-panel-widget")
                 with TabPane("✦ Extracted Markdown ✧", id="markdown-tab"):
                     yield ListView(id="markdown-list")
                 with TabPane("✦ Parsed Data ✧", id="table-tab"):
@@ -123,26 +101,11 @@ class Selectron(App[None]):
 
     async def on_mount(self) -> None:
         """Called when the app is mounted."""
-        # Manually clear log file at the start of mounting to ensure clean slate
-        try:
-            # Opening with 'w' mode truncates the file.
-            open(self._log_file_path, "w").close()  # Open in write mode and immediately close.
-            self._last_log_position = 0  # Reset position after clearing
-        except Exception as e:
-            print(
-                f"ERROR: Failed to clear log file {self._log_file_path} on mount: {e}",
-                file=sys.stderr,
-            )
-
         try:
             self._openai_client = openai.AsyncOpenAI()
             logger.info("OpenAI client initialized successfully.")
         except Exception as e:
             logger.error(f"Failed to initialize OpenAI client: {e}", exc_info=True)
-        self._load_initial_logs()
-        self.set_interval(0.5, self._watch_log_file)  # Check every 500ms
-
-        # --- Setup DataTable --- #
         try:
             table = self.query_one(DataTable)
             table.cursor_type = "row"
@@ -150,128 +113,18 @@ class Selectron(App[None]):
             logger.debug("DataTable initialized with 'Raw HTML' column.")
         except Exception as table_init_err:
             logger.error(f"Failed to initialize DataTable: {table_init_err}", exc_info=True)
-        # --- End Setup DataTable --- #
-
-        logger.info("App mounted. Initializing Chrome tab manager...")
-        # Initialize and start the tab manager
         self._tab_manager = ChromeTabManager(
             openai_client=self._openai_client,
             on_active_tab_updated=self._handle_active_tab_update,  # New callback handler
             on_page_content_ready=self._handle_page_content_update,  # New callback handler
             on_proposal_ready=self._handle_proposal_update,  # New callback handler
         )
-        # Run the manager's monitoring loop in the background
         self.run_worker(
             self._tab_manager.run_monitoring_task(), exclusive=True, group="chrome_manager"
         )
-
-        # Check connection (can be moved inside manager start later)
         if not await ensure_chrome_connection():
             logger.error("Failed to establish Chrome connection.")
-            # Consider exiting or notifying user
 
-    # --- Log File Watching Methods ---
-
-    def _is_info_or_higher(self, log_line: str) -> bool:
-        """Check if a log line string appears to be INFO level or higher."""
-        # Simple check based on standard format: YYYY-MM-DD HH:MM:SS [LEVEL] ...
-        # Look for the level marker after the timestamp.
-        if (
-            "[INFO ]" in log_line
-            or "[WARN ]" in log_line
-            or "[ERROR]" in log_line
-            or "[CRIT ]" in log_line
-        ):
-            return True
-        # Also consider lines that might not have the standard prefix (e.g., tracebacks)
-        # For now, let's assume non-prefixed lines might be important (like parts of tracebacks)
-        # or are INFO level if they don't match DEBUG
-        if "[DEBUG]" not in log_line:
-            return True  # Show if not explicitly DEBUG
-        return False
-
-    def _load_initial_logs(self) -> None:
-        """Load existing content from the log file into the panel, filtering for INFO+."""
-        try:
-            log_panel = self.query_one("#log-panel", RichLog)
-            if self._log_file_path.exists():
-                with open(self._log_file_path, "r", encoding="utf-8") as f:
-                    # Read all content first
-                    log_content = f.read()
-                    # Get position AFTER reading
-                    self._last_log_position = f.tell()
-
-                    # Now filter the lines from the read content
-                    lines_to_write = []
-                    for line in log_content.splitlines(keepends=True):
-                        if self._is_info_or_higher(line):
-                            lines_to_write.append(line)
-                    log_panel.write("".join(lines_to_write))
-            else:
-                log_panel.write(f"Log file not found: {self._log_file_path}")
-                self._last_log_position = 0
-        except Exception as e:
-            err_msg = f"Error loading initial log file {self._log_file_path}: {e}"
-            try:
-                self.query_one("#log-panel", RichLog).write(f"[red]{err_msg}[/red]")
-            except Exception:
-                pass
-            logger.error(err_msg, exc_info=True)  # Log error to file
-
-    def _watch_log_file(self) -> None:
-        """Periodically check the log file for new content, filter for INFO+, and append it."""
-        try:
-            if not self._log_file_path.exists():
-                return
-
-            log_panel = self.query_one("#log-panel", RichLog)
-            with open(self._log_file_path, "r", encoding="utf-8") as f:
-                f.seek(self._last_log_position)
-                new_content = f.read()
-                if new_content:
-                    # Filter new lines before writing
-                    lines_to_write = []
-                    # Split potentially multiple new lines, filter, then join
-                    for line in new_content.splitlines(keepends=True):
-                        if self._is_info_or_higher(line):
-                            lines_to_write.append(line)
-                    if lines_to_write:
-                        log_panel.write("".join(lines_to_write))
-                    # Update position regardless of filtering
-                    self._last_log_position = f.tell()
-        except Exception as e:
-            logger.error(
-                f"Error reading log file {self._log_file_path}: {e}", exc_info=True
-            )  # Log error to file
-
-    @on(Input.Submitted, "#prompt-input")
-    def handle_prompt_submitted(self, event: Input.Submitted) -> None:
-        if event.value:
-            description = event.value
-            self.call_later(self._trigger_agent_run, description)
-            event.input.clear()
-
-    @on(Button.Pressed, "#submit-button")
-    async def handle_submit_button_pressed(self, event: Button.Pressed) -> None:
-        input_widget = self.query_one("#prompt-input", Input)
-        description = input_widget.value
-        if description:
-            await self._trigger_agent_run(description)
-            input_widget.clear()
-
-    async def _trigger_agent_run(self, description: str):
-        if self._agent_worker and self._agent_worker.is_running:
-            logger.debug("Cancelling previous agent worker.")
-            self._agent_worker.cancel()
-        self._highlighter.set_active(False)
-        self.call_later(self._highlighter.clear, self._active_tab_ref)
-        logger.debug(f"Starting new agent worker for '{description}'.")
-        self._agent_worker = self.run_worker(
-            self._run_agent_and_highlight(description), exclusive=False
-        )
-        self._highlighter.set_active(False)
-
-    # --- Callback Handlers for ChromeTabManager --- #
     async def _handle_active_tab_update(
         self, tab_ref: Optional[TabReference], dom_string: Optional[str]
     ):
@@ -367,108 +220,45 @@ class Selectron(App[None]):
         self.app.exit()
 
     def action_open_log_file(self) -> None:
-        open_log_file(self._log_file_path)
+        # Get the LogPanel instance and call its method
+        try:
+            log_panel_widget = self.query_one(LogPanel)
+            log_panel_widget.open_log_in_editor()
+        except Exception as e:
+            logger.error(f"Failed to open log file via LogPanel: {e}", exc_info=True)
 
     async def _run_agent_and_highlight(self, target_description: str) -> None:
         """Runs the SelectorAgent, captures screenshots on highlight, and highlights the final proposed selector."""
-        if not self._active_tab_ref or not self._active_tab_ref.ws_url:
-            logger.warning("Cannot run agent: No active tab reference with ws_url.")
+        if not self._active_tab_ref or not self._active_tab_ref.html:
+            logger.warning("Cannot run agent: No active tab reference with html.")
             return
 
         latest_screenshot: Optional[Image.Image] = None  # Variable to hold the latest screenshot
         tab_ref = self._active_tab_ref
-        ws_url = tab_ref.ws_url  # We know this exists now
         current_html = tab_ref.html
         current_dom_string = self._active_tab_dom_string
         current_url = tab_ref.url
 
-        # --- Fetch data if missing --- #
+        # --- Check if data is available before proceeding --- #
         if not current_html:
-            logger.warning(f"HTML missing for tab {tab_ref.id}. Attempting re-fetch...")
-            ws = None
-            try:
-                # <<< Check ws_url before connecting >>>
-                if not ws_url:
-                    logger.error(f"Cannot re-fetch for tab {tab_ref.id}: WebSocket URL is missing.")
-                    return
+            logger.error(
+                f"Cannot run agent: HTML content is missing for tab {tab_ref.id}. Aborting."
+            )
+            return
 
-                # Establish connection
-                ws = await websockets.connect(
-                    ws_url, max_size=30 * 1024 * 1024, open_timeout=10, close_timeout=10
-                )
-                # Wait for load (best effort)
-                await wait_for_page_load(ws)
-                # Get latest URL/Title (title not used here but good practice)
-                latest_url, _ = await get_final_url_and_title(
-                    ws, tab_ref.url or "", tab_ref.title or "", tab_ref.id
-                )
-                current_url = latest_url  # Update URL
-
-                # Fetch HTML
-                fetched_html = await get_html_via_ws(ws, latest_url)
-                if not fetched_html:
-                    logger.error(
-                        f"Failed to re-fetch HTML for tab {tab_ref.id}. Aborting agent run."
-                    )
-                    await ws.close()
-                    return
-                current_html = fetched_html
-                # Fetch DOM String using the same connection
-                try:
-                    if not latest_url:
-                        logger.error(
-                            f"Cannot fetch DOM for tab {tab_ref.id}: Latest URL is missing after fetch."
-                        )
-                        current_dom_string = None  # Ensure it's None
-                    else:
-                        executor = CdpBrowserExecutor(ws_url, latest_url, ws_connection=ws)
-                        dom_service = DomService(executor)
-                        dom_state = await dom_service.get_elements()
-                        if dom_state and dom_state.element_tree:
-                            current_dom_string = dom_state.element_tree.elements_to_string(
-                                include_attributes=DOM_STRING_INCLUDE_ATTRIBUTES
-                            )
-                            self._active_tab_dom_string = current_dom_string  # Update stored DOM
-                            logger.info(f"Successfully re-fetched DOM string for tab {tab_ref.id}.")
-                        else:
-                            logger.warning(f"Failed to re-fetch DOM string for tab {tab_ref.id}.")
-                            current_dom_string = None  # Ensure it's None if fetch fails
-                except Exception as dom_e:
-                    logger.error(
-                        f"Error re-fetching DOM string for tab {tab_ref.id}: {dom_e}", exc_info=True
-                    )
-                    current_dom_string = None
-
-                logger.info(f"Successfully re-fetched HTML for tab {tab_ref.id}.")
-
-            except websockets.exceptions.WebSocketException as e:
-                logger.error(f"WebSocket error during re-fetch for tab {tab_ref.id}: {e}")
-                return  # Cannot proceed without connection
-            except Exception as e:
-                logger.error(
-                    f"Unexpected error during re-fetch for tab {tab_ref.id}: {e}", exc_info=True
-                )
-                return  # Cannot proceed
-            finally:
-                if ws and ws.state != websockets.protocol.State.CLOSED:
-                    await ws.close()
-
-        # Now we should have HTML, proceed with agent logic
+        # Now we assume HTML is present, proceed with agent logic
         logger.info(
             f"Running SelectorAgent logic for target '{target_description}' on tab {tab_ref.id}"
         )
         base_url_for_agent = current_url  # Use the potentially updated current_url
         if not base_url_for_agent:
+            # This check might still be relevant if url fetch failed in manager somehow
             logger.error(f"Cannot run agent: Base URL is missing for tab {tab_ref.id}")
-            return
-        if not current_html:
-            logger.error(
-                f"Cannot run agent: HTML content is missing even after fetch attempt for tab {tab_ref.id}."
-            )
             return
 
         try:
             tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
+
             async def _update_list_with_markdown(html_snippets: list[str], source_selector: str):
                 try:
                     list_view = self.query_one("#markdown-list", ListView)
@@ -498,18 +288,13 @@ class Selectron(App[None]):
                     selector=selector,
                     target_text_to_check=target_text_to_check,
                     **kwargs,
-                    return_matched_html=True, 
+                    return_matched_html=True,
                 )
-                # Update list view with markdown from successful evaluations
                 if result and not result.error:
-                    # Pass raw HTML snippets to the helper for conversion
                     html_to_show = result.matched_html_snippets or []
                     await _update_list_with_markdown(html_to_show, selector)
-                # Do not clear list view on evaluation error, keep previous state
-
                 if result and result.element_count > 0 and not result.error:
                     logger.debug(f"Highlighting intermediate selector: '{selector}'")
-                    # Await highlight and capture result
                     success, img = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="yellow"
                     )
@@ -550,10 +335,10 @@ class Selectron(App[None]):
                 success, img = await self._highlighter.highlight(
                     self._active_tab_ref,
                     selector,
-                    color="lime",  
+                    color="lime",
                 )
                 if success and img:
-                    latest_screenshot = img 
+                    latest_screenshot = img
                 elif not success:
                     logger.warning(f"Highlight failed for extraction selector: '{selector}'")
                 return await tools_instance.extract_data_from_element(selector=selector, **kwargs)
@@ -565,10 +350,12 @@ class Selectron(App[None]):
                 Tool(extract_data_from_element_wrapper),
             ]
 
-            system_prompt = SYSTEM_PROMPT_BASE
+            system_prompt = SELECTOR_PROMPT_BASE
             if current_dom_string:
-                system_prompt += DOM_CONTEXT_PROMPT.format(dom_representation=current_dom_string)
-            elif not self._active_tab_dom_string:  # Log only if it was never fetched
+                system_prompt += SELECTOR_PROMPT_DOM_TEMPLATE.format(
+                    dom_representation=current_dom_string
+                )
+            elif not self._active_tab_dom_string:
                 logger.warning(f"Proceeding without DOM string representation for tab {tab_ref.id}")
 
             agent = Agent(
@@ -579,16 +366,10 @@ class Selectron(App[None]):
             )
 
             logger.info("Starting agent.run()...")
-            # Construct the agent query (similar to SelectorAgent.find_and_extract)
             query_parts = [
-                f"Generate the most STABLE CSS selector for the element described as '{target_description}'."
+                f"Generate the most STABLE CSS selector to target '{target_description}'."
+                "Prioritize stable attributes and classes.",
             ]
-            # Add other parts based on extraction needs later if desired
-            query_parts.append(
-                "Prioritize stable attributes and classes, AVOIDING generated IDs/classes like 'emberXXX' or random strings."
-            )
-            query_parts.append("Follow the mandatory workflow strictly.")
-            # --- Add explicit output format instruction ---
             query_parts.append(
                 "CRITICAL: Your FINAL output MUST be a single JSON object conforming EXACTLY to the SelectorProposal schema. "
                 "This JSON object MUST include values for the fields: 'proposed_selector' (string) and 'reasoning' (string). "
@@ -596,11 +377,7 @@ class Selectron(App[None]):
             )
             query = " ".join(query_parts)
             agent_input: Any = query
-
-            # Use the prepared agent_input (which could be str or list)
             agent_run_result = await agent.run(agent_input)
-
-            # --- Process Result --- #
             if isinstance(agent_run_result.output, SelectorProposal):
                 proposal = agent_run_result.output
                 logger.info(
@@ -611,16 +388,13 @@ class Selectron(App[None]):
                 logger.error(
                     f"Agent returned unexpected output type: {type(agent_run_result.output)} / {agent_run_result.output}"
                 )
-                # Clear selector and list view if agent fails
                 self._last_proposed_selector = None
                 self.call_later(self._clear_list_view)
-
         except Exception as e:
             logger.error(
                 f"Error running SelectorAgent for target '{target_description}': {e}",
                 exc_info=True,
             )
-            # Clear selector and list view on general agent error
             self._last_proposed_selector = None
             self.call_later(self._clear_list_view)
 
@@ -628,7 +402,6 @@ class Selectron(App[None]):
         await self._highlighter.rehighlight(self._active_tab_ref)
 
     async def _clear_list_view(self) -> None:
-        """Helper method to safely clear the list view."""
         try:
             list_view = self.query_one("#markdown-list", ListView)
             await list_view.clear()

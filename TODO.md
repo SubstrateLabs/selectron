@@ -1,5 +1,4 @@
 - refactoring
-  - chrome tab manager
   - extract pieces of selector agent
 - generate python to parse
 - prompt to connect (chrome_launcher)
