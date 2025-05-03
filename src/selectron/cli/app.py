@@ -33,10 +33,11 @@ from selectron.ai.selector_tools import (
 from selectron.ai.types import (
     SelectorProposal,
 )
+from selectron.chrome import chrome_launcher
 from selectron.chrome.chrome_highlighter import ChromeHighlighter
-from selectron.chrome.chrome_tab_manager import ChromeTabManager
-from selectron.chrome.connect import ensure_chrome_connection
+from selectron.chrome.chrome_monitor import ChromeMonitor, TabChangeEvent
 from selectron.chrome.types import TabReference
+from selectron.cli.home_panel import ChromeStatus, HomePanel
 from selectron.cli.log_panel import LogPanel
 from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
@@ -63,7 +64,7 @@ class SelectronApp(App[None]):
     _highlighter: ChromeHighlighter
     _openai_client: Optional[openai.AsyncOpenAI] = None
     _last_proposed_selector: Optional[str] = None
-    _tab_manager: Optional[ChromeTabManager] = None
+    _chrome_monitor: Optional[ChromeMonitor] = None
 
     def __init__(self):
         super().__init__()
@@ -73,22 +74,19 @@ class SelectronApp(App[None]):
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
         yield Header()
-        # # Main container holds the TabbedContent
-        # with Container(id="main-container"):  # Give the container an ID for potential styling
-        #     # TabbedContent takes up the main area
-        #     with TabbedContent(initial="logs-tab"):
-        #         with TabPane("✦ Logs ✧", id="logs-tab"):
-        #             # Instantiate the new LogPanel widget
-        #             yield LogPanel(log_file_path=LOG_PATH, id="log-panel-widget")
-        #         with TabPane("✦ Extracted Markdown ✧", id="markdown-tab"):
-        #             yield ListView(id="markdown-list")
-        #         with TabPane("✦ Parsed Data ✧", id="table-tab"):
-        #             yield DataTable(id="data-table")
-        # # Input bar remains docked at the bottom, outside the main container
-        # with Horizontal(classes="input-bar"):  # Container for input and submit
-        #     yield Input(placeholder="Enter description or let AI propose...", id="prompt-input")
-        #     yield Button("Select", id="submit-button")
-
+        with Container(id="main-container"):
+            with TabbedContent(initial="home-tab"):
+                with TabPane("✦ Home ✧", id="home-tab"):
+                    yield HomePanel(id="home-panel-widget")
+                with TabPane("✦ Logs ✧", id="logs-tab"):
+                    yield LogPanel(log_file_path=LOG_PATH, id="log-panel-widget")
+                with TabPane("✦ Extracted Markdown ✧", id="markdown-tab"):
+                    yield ListView(id="markdown-list")
+                with TabPane("✦ Parsed Data ✧", id="table-tab"):
+                    yield DataTable(id="data-table")
+        with Horizontal(classes="input-bar"):
+            yield Input(placeholder="Enter description or let AI propose...", id="prompt-input")
+            yield Button("Select", id="submit-button")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -102,39 +100,60 @@ class SelectronApp(App[None]):
             table.add_column("Raw HTML", key="html_content")
         except Exception as table_init_err:
             logger.error(f"Failed to initialize DataTable: {table_init_err}", exc_info=True)
-        self._tab_manager = ChromeTabManager(
-            openai_client=self._openai_client,
-            on_active_tab_updated=self._handle_active_tab_update,
-            on_page_content_ready=self._handle_page_content_update,
-            on_proposal_ready=self._handle_proposal_update,
-        )
-        # self.run_worker(
-        #     self._tab_manager.run_monitoring_task(), exclusive=True, group="chrome_manager"
-        # )
         self.theme = DEFAULT_THEME
-        # if not await ensure_chrome_connection():
-        #     logger.error("Failed to establish Chrome connection.")
 
-    async def _handle_active_tab_update(
-        self, tab_ref: Optional[TabReference], dom_string: Optional[str]
-    ):
-        """Handles updates to the active tab reference and DOM string from the manager."""
-        logger.debug(f"Callback: Active tab updated to {tab_ref.id if tab_ref else 'None'}")
+        self._chrome_monitor = ChromeMonitor(
+            rehighlight_callback=self._handle_rehighlight,
+            check_interval=2.0,
+            interaction_debounce=0.7,
+        )
+
+        await self.action_check_chrome_status()
+
+    async def _handle_polling_change(self, event: TabChangeEvent) -> None:
+        logger.info(
+            f"Monitor Polling Change: +{len(event.new_tabs)} -{len(event.closed_tabs)} ~{len(event.navigated_tabs)}"
+        )
+
+    async def _handle_interaction_update(self, tab_ref: TabReference) -> None:
+        logger.debug(f"Monitor Interaction Signal: Tab {tab_ref.id}")
+        self._active_tab_ref = tab_ref
+        await self._clear_list_view()
+        await self._clear_table_view()
+
+    async def _handle_content_fetched(
+        self,
+        tab_ref: TabReference,
+        screenshot: Optional[Image.Image],
+        scroll_y: Optional[int],
+        dom_string: Optional[str],
+    ) -> None:
+        """Handles callback from monitor after content (HTML, screenshot, DOM) is fetched."""
+        html_content = tab_ref.html  # HTML is now part of the TabReference passed
+
+        if not html_content:
+            logger.warning(
+                f"Monitor Content Fetched (Tab {tab_ref.id}): No HTML content in TabReference."
+            )
+            await self._clear_list_view()
+            await self._clear_table_view()
+            return
+
+        logger.info(
+            f"Monitor Content Fetched (Tab {tab_ref.id}): HTML length {len(html_content)}, ScrollY: {scroll_y}"
+        )
         self._active_tab_ref = tab_ref
         self._active_tab_dom_string = dom_string
-        # If the tab is cleared, ensure highlights are cleared too.
-        # The highlighter state might need careful management between agent runs and tab changes.
-        if not tab_ref:
-            logger.info("Active tab cleared by manager, clearing highlights.")
-            await self._highlighter.clear(None)  # Clear generic highlights
-            self._highlighter.set_active(False)
 
-    async def _handle_page_content_update(self, html_content: str):
-        """Handles updates to the page content (HTML) from the manager."""
-        logger.debug(
-            f"Callback: Page content update received (length: {len(html_content)}). Updating UI."
-        )
-        # Update Markdown View
+        # TODO: Potentially use the screenshot image?
+        if screenshot:
+            logger.debug(f"Received screenshot of size {screenshot.size}")
+            # Example: Save screenshot?
+            # try:
+            #     screenshot.save(f"./screenshot_{tab_ref.id}.png")
+            # except Exception as save_err:
+            #     logger.error(f"Failed to save screenshot: {save_err}")
+
         try:
             page_markdown = markdownify(html_content, heading_style="ATX")
             list_view = self.query_one("#markdown-list", ListView)
@@ -143,70 +162,156 @@ class SelectronApp(App[None]):
             list_item = ListItem(md_widget, classes="markdown-list-item full-page-item")
             await list_view.append(list_item)
         except Exception as md_err:
-            logger.error(f"Failed to update markdown view from callback: {md_err}")
+            logger.error(f"Failed to update markdown view from monitor callback: {md_err}")
 
-        # Update Table View
         try:
             table = self.query_one(DataTable)
             table.clear()
-            # Consider adding URL/Title if available in tab_ref when active tab updates?
-            table.add_row(html_content, key="current_tab_html")
+            table.add_row(
+                html_content[:5000] + "..." if len(html_content) > 5000 else html_content,
+                key=f"html_{tab_ref.id}",
+            )
         except Exception as table_err:
-            logger.error(f"Failed to update data table from callback: {table_err}")
+            logger.error(f"Failed to update data table from monitor callback: {table_err}")
 
-    async def _handle_proposal_update(self, description: str):
-        """Handles the proposed description update from the manager."""
-        logger.debug(f"Callback: Proposal received: '{description}'. Updating input.")
-        # Update Input Widget only if the current tab is still active (manager doesn't know UI state)
-        if self._active_tab_ref:
-            try:
-                input_widget = self.query_one("#prompt-input", Input)
-                # Only update if the input is currently empty or hasn't been manually edited?
-                # Or just always update?
-                input_widget.value = description
-                logger.info(
-                    f"Updated prompt input with proposal for tab {self._active_tab_ref.id}."
+    async def _handle_rehighlight(self) -> None:
+        logger.debug("Monitor requesting rehighlight")
+        await self.trigger_rehighlight()
+
+    async def action_check_chrome_status(self) -> None:
+        home_panel = self.query_one(HomePanel)
+        home_panel.status = "checking"
+        await asyncio.sleep(0.1)
+
+        new_status: ChromeStatus = "error"
+        try:
+            is_running = await chrome_launcher.is_chrome_process_running()
+            if not is_running:
+                new_status = "not_running"
+            else:
+                debug_active = await chrome_launcher.is_chrome_debug_port_active()
+                if not debug_active:
+                    new_status = "no_debug_port"
+                else:
+                    new_status = "ready_to_connect"
+        except Exception as e:
+            logger.error(f"Error checking Chrome status: {e}", exc_info=True)
+            new_status = "error"
+        
+        home_panel.status = new_status
+        logger.info(f"Chrome status check result: {new_status}")
+
+        # --- Automatically connect if ready ---
+        if new_status == "ready_to_connect":
+            logger.info("Chrome is ready, automatically attempting to connect monitor...")
+            # Use call_later to avoid potential blocking/re-entrancy issues 
+            # if action_connect_monitor takes time or updates status itself.
+            self.app.call_later(self.action_connect_monitor)
+
+    async def action_launch_chrome(self) -> None:
+        logger.info("Action: Launching Chrome...")
+        home_panel = self.query_one(HomePanel)
+        home_panel.status = "checking"
+        success = await chrome_launcher.launch_chrome()
+        if not success:
+            logger.error("Failed to launch Chrome via launcher.")
+            home_panel.status = "error"
+            return
+        await asyncio.sleep(1.0)
+        await self.action_check_chrome_status()
+
+    async def action_restart_chrome(self) -> None:
+        logger.info("Action: Restarting Chrome...")
+        home_panel = self.query_one(HomePanel)
+        home_panel.status = "checking"
+        success = await chrome_launcher.restart_chrome_with_debug_port()
+        if not success:
+            logger.error("Failed to restart Chrome via launcher.")
+            home_panel.status = "error"
+            return
+        await asyncio.sleep(1.0)
+        await self.action_check_chrome_status()
+
+    async def action_connect_monitor(self) -> None:
+        logger.info("Action: Connecting monitor...")
+        home_panel = self.query_one(HomePanel)
+        home_panel.status = "connecting"
+        await asyncio.sleep(0.1)
+
+        if not self._chrome_monitor:
+            logger.error("Monitor not initialized, cannot connect.")
+            home_panel.status = "error"
+            return
+
+        if not await chrome_launcher.is_chrome_debug_port_active():
+            logger.error("Debug port became inactive before monitor could start.")
+            await self.action_check_chrome_status()
+            return
+
+        try:
+            success = await self._chrome_monitor.start_monitoring(
+                on_polling_change_callback=self._handle_polling_change,
+                on_interaction_update_callback=self._handle_interaction_update,
+                on_content_fetched_callback=self._handle_content_fetched,
+            )
+            if success:
+                logger.info("Chrome Monitor started successfully.")
+                home_panel.status = "connected"
+            else:
+                logger.error("Failed to start Chrome Monitor.")
+                home_panel.status = "error"
+        except Exception as e:
+            logger.error(f"Error starting Chrome Monitor: {e}", exc_info=True)
+            home_panel.status = "error"
+
+    async def on_button_pressed(self, event: Button.Pressed) -> None:
+        button_id = event.button.id
+        if button_id == "check-chrome-status":
+            await self.action_check_chrome_status()
+        elif button_id == "launch-chrome":
+            await self.action_launch_chrome()
+        elif button_id == "restart-chrome":
+            await self.action_restart_chrome()
+        elif button_id == "submit-button":
+            prompt_input = self.query_one(Input)
+            target_description = prompt_input.value.strip()
+            if not target_description:
+                return
+            if (
+                not self._active_tab_ref
+                or not self._chrome_monitor
+                or not self._chrome_monitor._monitoring
+            ):
+                logger.warning(
+                    "Submit clicked but monitor not connected or no active tab identified."
                 )
-                # input_widget.focus() # Optional focus
-            except Exception as input_err:
-                logger.error(f"Failed to update input widget from callback: {input_err}")
+                return
+            logger.info(f"Submit button pressed. Target: '{target_description}'")
+            prompt_input.value = ""
+            if self._agent_worker and self._agent_worker.is_running:
+                logger.info("Cancelling previous agent worker.")
+                self._agent_worker.cancel()
+            self._agent_worker = self.run_worker(
+                self._run_agent_and_highlight(target_description),
+                exclusive=True,
+                group="agent_worker",
+            )
         else:
-            logger.info("Proposal received, but no active tab. Input not updated.")
+            logger.warning(f"Unhandled button press: {event.button.id}")
 
     async def action_quit(self) -> None:
-        """Action to quit the app."""
-        logger.info("Shutdown requested...")
         self.shutdown_event.set()
-
-        # Signal the tab manager to stop
-        if self._tab_manager:
-            logger.info("Stopping Chrome tab manager...")
-            await self._tab_manager.stop_monitoring()
-            logger.info("Chrome tab manager stopped.")
-
-        # Wait for the manager worker to finish
-        # This assumes stop_monitoring is effective and the worker group is set.
-        # Textual handles worker cleanup on exit, but explicit waiting can be safer.
-        workers = [w for w in self.workers if w.group == "chrome_manager"]
-        if workers:
-            logger.info("Waiting for manager worker...")
-            try:
-                await workers[0].wait()  # Wait for the first (should be only) manager worker
-                logger.info("Manager worker finished.")
-            except Exception as e:
-                logger.error(f"Error waiting for manager worker: {e}")
-
-        # --- Cancel agent worker, clear state, and clear highlights on exit --- #
+        if self._chrome_monitor:
+            await self._chrome_monitor.stop_monitoring()
         if self._agent_worker and self._agent_worker.is_running:
-            logger.info("Cancelling agent worker on exit...")
             self._agent_worker.cancel()
         self._highlighter.set_active(False)
-        # Use call_later for fire-and-forget clear, happens before exit
-        if self._active_tab_ref:  # Only clear if there was an active tab
-            self.call_later(self._highlighter.clear, self._active_tab_ref)
-            await asyncio.sleep(0.1)  # Short delay for clear task
-
-        logger.info("Exiting application.")
+        if self._active_tab_ref:
+            try:
+                self.call_later(self._highlighter.clear, self._active_tab_ref)
+                await asyncio.sleep(0.1)
+            except Exception as e:
+                logger.warning(f"Error scheduling highlight clear on exit: {e}")
         self.app.exit()
 
     def action_open_log_file(self) -> None:
@@ -223,33 +328,29 @@ class SelectronApp(App[None]):
             self.theme = THEME_LIGHT
 
     async def _run_agent_and_highlight(self, target_description: str) -> None:
-        """Runs the SelectorAgent, captures screenshots on highlight, and highlights the final proposed selector."""
         if not self._active_tab_ref or not self._active_tab_ref.html:
             logger.warning("Cannot run agent: No active tab reference with html.")
             return
 
-        latest_screenshot: Optional[Image.Image] = None  # Variable to hold the latest screenshot
+        latest_screenshot: Optional[Image.Image] = None
         tab_ref = self._active_tab_ref
         current_html = tab_ref.html
         current_dom_string = self._active_tab_dom_string
         current_url = tab_ref.url
 
-        # --- Check if data is available before proceeding --- #
         if not current_html:
             logger.error(
-                f"Cannot run agent: HTML content is missing for tab {tab_ref.id}. Aborting."
+                f"Cannot run agent: HTML content missing in active tab ref {tab_ref.id}. Aborting."
             )
             return
+        if not current_url:
+            logger.error(f"Cannot run agent: URL missing in active tab ref {tab_ref.id}. Aborting.")
+            return
 
-        # Now we assume HTML is present, proceed with agent logic
         logger.info(
             f"Running SelectorAgent logic for target '{target_description}' on tab {tab_ref.id}"
         )
-        base_url_for_agent = current_url  # Use the potentially updated current_url
-        if not base_url_for_agent:
-            # This check might still be relevant if url fetch failed in manager somehow
-            logger.error(f"Cannot run agent: Base URL is missing for tab {tab_ref.id}")
-            return
+        base_url_for_agent = current_url
 
         try:
             tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
@@ -277,7 +378,7 @@ class SelectronApp(App[None]):
                     logger.error(f"Error updating list view: {list_update_err}")
 
             async def evaluate_selector_wrapper(selector: str, target_text_to_check: str, **kwargs):
-                nonlocal latest_screenshot  # Allow modification
+                nonlocal latest_screenshot
                 logger.debug(f"Agent calling evaluate_selector: '{selector}'")
                 result = await tools_instance.evaluate_selector(
                     selector=selector,
@@ -294,43 +395,39 @@ class SelectronApp(App[None]):
                         self._active_tab_ref, selector, color="yellow"
                     )
                     if success and img:
-                        latest_screenshot = img  # Update latest screenshot
+                        latest_screenshot = img
                 return result
 
             async def get_children_tags_wrapper(selector: str, **kwargs):
-                nonlocal latest_screenshot  # Allow modification
+                nonlocal latest_screenshot
                 logger.debug(f"Agent calling get_children_tags: '{selector}'")
                 result = await tools_instance.get_children_tags(selector=selector, **kwargs)
-                # Highlight the parent element being inspected
                 if result and result.parent_found and not result.error:
                     logger.debug(f"Highlighting parent for get_children_tags: '{selector}'")
                     success, img = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="red"
                     )
                     if success and img:
-                        latest_screenshot = img  # Update latest screenshot
+                        latest_screenshot = img
                 return result
 
             async def get_siblings_wrapper(selector: str, **kwargs):
-                nonlocal latest_screenshot  # Allow modification
+                nonlocal latest_screenshot
                 logger.debug(f"Agent calling get_siblings: '{selector}'")
                 result = await tools_instance.get_siblings(selector=selector, **kwargs)
-                # Highlight the element whose siblings are being checked
                 if result and result.element_found and not result.error:
                     success, img = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="blue"
                     )
                     if success and img:
-                        latest_screenshot = img  # Update latest screenshot
+                        latest_screenshot = img
                 return result
 
             async def extract_data_from_element_wrapper(selector: str, **kwargs):
-                nonlocal latest_screenshot  # Allow modification
+                nonlocal latest_screenshot
                 logger.debug(f"Highlighting potentially final selector: '{selector}'")
                 success, img = await self._highlighter.highlight(
-                    self._active_tab_ref,
-                    selector,
-                    color="lime",
+                    self._active_tab_ref, selector, color="lime"
                 )
                 if success and img:
                     latest_screenshot = img
@@ -350,7 +447,7 @@ class SelectronApp(App[None]):
                 system_prompt += SELECTOR_PROMPT_DOM_TEMPLATE.format(
                     dom_representation=current_dom_string
                 )
-            elif not self._active_tab_dom_string:
+            else:
                 logger.warning(f"Proceeding without DOM string representation for tab {tab_ref.id}")
 
             agent = Agent(
@@ -362,14 +459,12 @@ class SelectronApp(App[None]):
 
             logger.info("Starting agent.run()...")
             query_parts = [
-                f"Generate the most STABLE CSS selector to target '{target_description}'."
+                f"Generate the most STABLE CSS selector to target '{target_description}'.",
                 "Prioritize stable attributes and classes.",
-            ]
-            query_parts.append(
                 "CRITICAL: Your FINAL output MUST be a single JSON object conforming EXACTLY to the SelectorProposal schema. "
                 "This JSON object MUST include values for the fields: 'proposed_selector' (string) and 'reasoning' (string). "
-                "DO NOT include other fields like 'final_verification' or 'extraction_result' in the final JSON output."
-            )
+                "DO NOT include other fields like 'final_verification' or 'extraction_result' in the final JSON output.",
+            ]
             query = " ".join(query_parts)
             agent_input: Any = query
             agent_run_result = await agent.run(agent_input)
@@ -387,14 +482,19 @@ class SelectronApp(App[None]):
                 self.call_later(self._clear_list_view)
         except Exception as e:
             logger.error(
-                f"Error running SelectorAgent for target '{target_description}': {e}",
-                exc_info=True,
+                f"Error running SelectorAgent for target '{target_description}': {e}", exc_info=True
             )
             self._last_proposed_selector = None
             self.call_later(self._clear_list_view)
 
     async def trigger_rehighlight(self):
-        await self._highlighter.rehighlight(self._active_tab_ref)
+        if self._active_tab_ref and self._last_proposed_selector:
+            logger.info(
+                f"Re-highlighting '{self._last_proposed_selector}' on tab {self._active_tab_ref.id}"
+            )
+            await self._highlighter.rehighlight(self._active_tab_ref)
+        else:
+            logger.debug("Re-highlight requested but no active tab or last selector.")
 
     async def _clear_list_view(self) -> None:
         try:
@@ -404,11 +504,16 @@ class SelectronApp(App[None]):
         except Exception as e:
             logger.error(f"Failed to query or clear list view: {e}")
 
+    async def _clear_table_view(self) -> None:
+        try:
+            table = self.query_one(DataTable)
+            table.clear()
+            logger.debug("Data table cleared.")
+        except Exception as e:
+            logger.error(f"Failed to query or clear data table: {e}")
+
 
 if __name__ == "__main__":
-    # Ensure logger is initialized (and file created) before app runs
-    get_logger("__main__")  # Initial call to setup file logging
-    # Import manager here to avoid circular dependency if manager needs Selectron types
-
+    get_logger("__main__")
     app = SelectronApp()
     app.run()
