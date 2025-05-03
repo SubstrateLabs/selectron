@@ -125,10 +125,6 @@ class ChromeMonitor:
                 )
                 new_tab_refs.add(tab_ref)
                 await self._start_interaction_monitor(tab)
-                # Trigger initial fetch after starting monitor
-                handler = self._interaction_handlers.get(tab.id)
-                if handler:
-                    asyncio.create_task(handler.trigger_immediate_fetch())
 
             self.previous_tab_refs = new_tab_refs
 
@@ -296,132 +292,72 @@ class ChromeMonitor:
         }
         current_polled_tabs_map: Dict[str, ChromeTab] = {tab.id: tab for tab in filtered_tabs}
 
-        # --- Identify Changes & Manage Interaction Monitors --- #
         added_tabs, removed_refs, navigated_pairs = diff_tabs(
             current_polled_tabs_map, current_tab_refs_map
         )
 
-        # --- Prepare data for the event and update internal state --- #
-        updated_refs = set(self.previous_tab_refs)
-
         # Process Added Tabs
         for tab in added_tabs:
-            # Start interaction monitor
-            # logger.debug(f"Polling: Starting monitor for new tab {tab.id}") # DEBUG
             await self._start_interaction_monitor(tab)
-            # Add ref with None HTML
-            if tab.id and tab.url and tab.webSocketDebuggerUrl:
-                updated_refs.add(
-                    TabReference(
-                        id=tab.id,
-                        url=tab.url,
-                        title=tab.title,
-                        ws_url=tab.webSocketDebuggerUrl,
-                        html=None,
-                    )
-                )
-                # Trigger initial fetch for new tab
-                handler = self._interaction_handlers.get(tab.id)
-                if handler:
-                    asyncio.create_task(handler.trigger_immediate_fetch())
+            # NOTE: Trigger immediate fetch for newly added tabs as well.
+            handler = self._interaction_handlers.get(tab.id)
+            if handler:
+                logger.debug(f"Polling: Triggering immediate fetch for new tab {tab.id}")
+                asyncio.create_task(handler.trigger_immediate_fetch())
 
         # Process Removed Tabs
-        closed_ids = set()
+        closed_ids = set()  # Keep track for event reporting if needed
         for ref in removed_refs:
             # logger.debug(f"Polling: Stopping monitor for closed tab {ref.id}") # DEBUG
             await self._stop_interaction_monitor(ref.id)
             closed_ids.add(ref.id)
-        # Remove refs from state
-        updated_refs = {ref for ref in updated_refs if ref.id not in closed_ids}
 
         # Process Navigated Tabs
-        navigated_ids_to_update = set()
         for new_tab, _ in navigated_pairs:
             tab_id = new_tab.id
             # logger.debug(f"Polling: Handling navigation for tab {tab_id} to {new_tab.url}") # DEBUG
             # 1. Stop interaction monitor for old context
             await self._stop_interaction_monitor(tab_id)
 
-            # 2. Update internal state immediately (placeholder HTML)
-            navigated_ids_to_update.add(tab_id)
-            # Add new ref (will remove the old one below)
-            if new_tab.id and new_tab.url and new_tab.webSocketDebuggerUrl:
-                updated_refs.add(
-                    TabReference(
-                        id=new_tab.id,
-                        url=new_tab.url,
-                        title=new_tab.title,
-                        ws_url=new_tab.webSocketDebuggerUrl,
-                        html=None,  # Mark HTML as stale/None
-                    )
-                )
-                # Trigger initial fetch for navigated tab
-                handler = self._interaction_handlers.get(new_tab.id)
-                if handler:
-                    asyncio.create_task(handler.trigger_immediate_fetch())
-
-            # 3. Start interaction monitor for new context (maybe add small delay?)
-            # await asyncio.sleep(0.1) # Optional small delay
+            # 2. Start interaction monitor for new context
             await self._start_interaction_monitor(new_tab)
 
-        # Remove old refs for navigated tabs
-        updated_refs = {
-            ref
-            for ref in updated_refs
-            if ref.id not in navigated_ids_to_update
-            or ref.id in {pair[0].id for pair in navigated_pairs}
-        }  # Keep the newly added ref
-        # Simplified logic: Directly construct the updated set based on current state after changes
-        current_refs_after_changes = set()
-        current_polled_tab_ids = {t.id for t in filtered_tabs}
-        for ref in self.previous_tab_refs:
-            if ref.id in current_polled_tab_ids:
-                # Check if it navigated
-                navigated_match = next(
-                    (pair for pair in navigated_pairs if pair[1].id == ref.id), None
-                )
-                if navigated_match:
-                    # Add the *new* tab reference for navigated tabs
-                    new_nav_tab = navigated_match[0]
-                    if new_nav_tab.id and new_nav_tab.url and new_nav_tab.webSocketDebuggerUrl:
-                        current_refs_after_changes.add(
-                            TabReference(
-                                id=new_nav_tab.id,
-                                url=new_nav_tab.url,
-                                title=new_nav_tab.title,
-                                ws_url=new_nav_tab.webSocketDebuggerUrl,
-                                html=None,
-                            )
-                        )
-                else:
-                    # Keep existing reference if not closed or navigated
-                    current_refs_after_changes.add(ref)
-        # Add references for newly added tabs
-        for tab in added_tabs:
+            # 3. Trigger initial fetch for navigated tab's new content
+            handler = self._interaction_handlers.get(tab_id)  # Use tab_id which is same for new_tab
+            if handler:
+                logger.debug(f"Polling: Triggering immediate fetch for navigated tab {tab_id}")
+                asyncio.create_task(handler.trigger_immediate_fetch())
+
+        # --- Update State ---
+        # Create the new set of references directly from the current filtered tabs
+        new_tab_refs = set()
+        for tab in filtered_tabs:
+            # Ensure essential properties exist before creating ref
             if tab.id and tab.url and tab.webSocketDebuggerUrl:
-                current_refs_after_changes.add(
+                new_tab_refs.add(
                     TabReference(
                         id=tab.id,
                         url=tab.url,
                         title=tab.title,
                         ws_url=tab.webSocketDebuggerUrl,
-                        html=None,
+                        html=None,  # HTML is fetched on demand by handler
                     )
                 )
 
         # Atomically update the main state
-        self.previous_tab_refs = current_refs_after_changes
+        self.previous_tab_refs = new_tab_refs
 
         # --- Construct and return event --- #
         polling_detected_changes = bool(added_tabs or removed_refs or navigated_pairs)
 
         if polling_detected_changes:
             # logger.debug(f"Polling changes detected: +{len(added_tabs)} / -{len(removed_refs)} / ~{len(navigated_pairs)}") # DEBUG
+            # Note: removed_refs contains TabReference objects, consistent with original TabChangeEvent expectation
             return TabChangeEvent(
-                new_tabs=added_tabs,  # Report ChromeTab objects for new tabs
-                closed_tabs=list(removed_refs),  # Report TabReference objects for closed tabs
-                navigated_tabs=navigated_pairs,  # Report (ChromeTab, TabReference) pairs
-                current_tabs=filtered_tabs,  # Report current filtered ChromeTab list
+                new_tabs=added_tabs,
+                closed_tabs=list(removed_refs),
+                navigated_tabs=navigated_pairs,
+                current_tabs=filtered_tabs,
             )
         else:
             return None

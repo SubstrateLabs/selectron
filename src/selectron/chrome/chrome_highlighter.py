@@ -331,9 +331,7 @@ class ChromeHighlighter:
                 executor = CdpBrowserExecutor(ws_url, url or "")
                 await executor.evaluate(js_code)
             except websockets.exceptions.WebSocketException as e:
-                logger.warning(
-                    f"Rehighlight failed for tab {tab_id}: WebSocket error - {e}"
-                )
+                logger.warning(f"Rehighlight failed for tab {tab_id}: WebSocket error - {e}")
             except Exception as e:
                 logger.error(
                     f"Rehighlight failed for tab {tab_id}: Unexpected error - {e}",

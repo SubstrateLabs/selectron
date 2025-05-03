@@ -44,7 +44,7 @@ logger = get_logger(__name__)
 LOG_PATH = get_app_dir() / "selectron.log"
 THEME_DARK = "nord"
 THEME_LIGHT = "solarized-light"
-DEFAULT_THEME = THEME_DARK
+DEFAULT_THEME = THEME_LIGHT
 
 
 class SelectronApp(App[None]):
@@ -52,7 +52,7 @@ class SelectronApp(App[None]):
     BINDINGS = [
         Binding(key="ctrl+c", action="quit", description="⣏ Quit ⣹", show=False),
         Binding(key="ctrl+q", action="quit", description="⣏ Quit ⣹", show=True),
-        Binding(key="ctrl+t", action="toggle_dark", description="⣏ Light/Dark Theme ⣹", show=True),
+        Binding(key="ctrl+t", action="toggle_dark", description="⣏ Light/Dark Mode ⣹", show=True),
         Binding(key="ctrl+l", action="open_log_file", description="⣏ .log file ⣹", show=True),
     ]
     shutdown_event: asyncio.Event
@@ -63,7 +63,6 @@ class SelectronApp(App[None]):
     _highlighter: ChromeHighlighter
     _last_proposed_selector: Optional[str] = None
     _chrome_monitor: Optional[ChromeMonitor] = None
-    _initial_monitor_fetch_done: bool = False
     _vision_proposal_done_for_tab: Optional[str] = None
 
     def __init__(self, model_config: ModelConfig):
@@ -108,7 +107,15 @@ class SelectronApp(App[None]):
         await self.action_check_chrome_status()
 
     async def _handle_polling_change(self, event: TabChangeEvent) -> None:
-        pass
+        # Reset vision proposal flag for any tab that navigated
+        navigated_ids = {new_tab.id for new_tab, _ in event.navigated_tabs}
+        if navigated_ids:
+            logger.debug(f"Polling detected navigation for tabs: {navigated_ids}. Resetting vision flag.")
+            # We only track one flag, so if *any* navigation occurs, reset it.
+            # This assumes the user interaction/focus will align with one of the navigated tabs soon.
+            # A more complex approach might involve checking if the *currently active* tab navigated,
+            # but let's start simple.
+            self._vision_proposal_done_for_tab = None
 
     async def _handle_interaction_update(self, tab_ref: TabReference) -> None:
         self._active_tab_ref = tab_ref
@@ -120,12 +127,22 @@ class SelectronApp(App[None]):
             logger.error(f"Failed to update URL label on interaction: {label_err}")
 
         await self._clear_table_view()
+        # Reset vision proposal flag only if the interacted tab is NEW
+        current_active_id = self._active_tab_ref.id if self._active_tab_ref else None
+        if tab_ref and tab_ref.id != current_active_id:
+            logger.debug(
+                f"Interaction detected on DIFFERENT tab {tab_ref.id} (current: {current_active_id}). Priming vision proposal."
+            )
+            self._vision_proposal_done_for_tab = (
+                None  # Allow proposal for this tab upon next content fetch
+            )
+
         try:
             self.query_one("#prompt-input", Input).value = ""
-            self._vision_proposal_done_for_tab = None
+            # Clear prompt regardless of tab match
         except Exception as e:
-            logger.warning(f"Could not clear prompt input on navigation: {e}")
-        # Vision proposal now happens in _handle_content_fetched after the initial fetch
+            logger.warning(f"Could not clear prompt input on interaction: {e}")
+        # Vision proposal logic moved entirely to _handle_content_fetched
 
     async def _handle_content_fetched(
         self,
@@ -144,61 +161,60 @@ class SelectronApp(App[None]):
             await self._clear_table_view()
             return
 
+        # Always update the active ref and DOM string first
         self._active_tab_ref = tab_ref
         self._active_tab_dom_string = dom_string
 
-        # Update URL label
+        # Update UI Label using the latest fetched info
         try:
             url_label = self.query_one("#active-tab-url-label", Label)
             if tab_ref and tab_ref.url:
                 url_label.update(tab_ref.url)
             else:
-                url_label.update("No active tab (interact to activate)")
+                url_label.update("No active tab URL")
         except Exception as label_err:
-            logger.error(f"Failed to update URL label: {label_err}")
-
-        # TODO: Potentially use the screenshot image?
-        # Example: Save screenshot?
-        # try:
-        #     screenshot.save(f"./screenshot_{tab_ref.id}.png")
-        # except Exception as save_err:
-        #     logger.error(f"Failed to save screenshot: {save_err}")
-
-        # --- Markdown rendering removed ---
+            logger.error(f"Failed to update URL label on content fetch: {label_err}")
 
         try:
             table = self.query_one(DataTable)
             table.clear()
             # Keep updating the data table
+            # Guard against potentially missing html
+            html_to_display = "(No HTML content)"
+            if html_content:
+                html_to_display = (
+                    html_content[:5000] + "..." if len(html_content) > 5000 else html_content
+                )
+
             table.add_row(
-                html_content[:5000] + "..." if len(html_content) > 5000 else html_content,
+                html_to_display,
                 key=f"html_{tab_ref.id}",
             )
         except Exception as table_err:
             logger.error(f"Failed to update data table from monitor callback: {table_err}")
 
-        if not self._initial_monitor_fetch_done:
-            self._initial_monitor_fetch_done = True
-            logger.debug("Initial monitor fetch complete, skipping vision proposal this time.")
-            return  # Skip vision proposal on the very first fetch
-
-        if self._active_tab_ref and self._vision_proposal_done_for_tab == self._active_tab_ref.id:
-            logger.debug(
-                f"Vision proposal already done for tab {self._active_tab_ref.id}, skipping."
-            )
-            return
-
-        if screenshot:
+        # Vision proposal trigger logic (relies on _vision_proposal_done_for_tab flag)
+        # Only trigger if screenshot is available AND the flag indicates proposal is needed for this tab
+        if (
+            screenshot
+            and self._active_tab_ref
+            and self._vision_proposal_done_for_tab != self._active_tab_ref.id
+        ):
+            logger.debug(f"Proceeding with vision proposal for tab {self._active_tab_ref.id}")
             if self._vision_worker and self._vision_worker.is_running:
+                logger.debug("Cancelling previous vision worker.")
                 self._vision_worker.cancel()
 
             async def _do_vision_proposal():
                 try:
                     proposal = await propose_selection(screenshot, self._model_config)
+                    # Set the flag *before* updating UI to prevent potential race conditions
+                    if self._active_tab_ref:
+                        self._vision_proposal_done_for_tab = self._active_tab_ref.id
+
                     if isinstance(proposal, AutoProposal):
                         desc = proposal.proposed_description
 
-                        # 1. Define the function to update UI and set flag
                         def _update_input():
                             try:
                                 prompt_input = self.query_one("#prompt-input", Input)
@@ -206,17 +222,26 @@ class SelectronApp(App[None]):
                             except Exception as e:
                                 logger.error(f"Error updating input from vision proposal: {e}")
 
-                        # Schedule the UI update via call_later
                         self.app.call_later(_update_input)
 
                 except Exception as e:
                     logger.error(f"Error during vision proposal: {e}", exc_info=True)
+                    # Potentially reset the flag on error? Or leave it set to prevent retries?
+                    # Let's leave it set for now.
 
-            if self._active_tab_ref:
-                self._vision_proposal_done_for_tab = self._active_tab_ref.id
             self._vision_worker = self.run_worker(
                 _do_vision_proposal(), exclusive=True, group="vision_proposal"
             )
+        elif (
+            screenshot
+            and self._active_tab_ref
+            and self._vision_proposal_done_for_tab == self._active_tab_ref.id
+        ):
+            logger.debug(
+                f"Vision proposal already done or running for tab {self._active_tab_ref.id}, skipping."
+            )
+        elif not screenshot:
+            logger.debug("Skipping vision proposal: No screenshot available.")
 
     async def _handle_rehighlight(self) -> None:
         await self.trigger_rehighlight()
@@ -468,8 +493,6 @@ class SelectronApp(App[None]):
                 tools=wrapped_tools,
                 system_prompt=system_prompt,
             )
-
-            logger.info("Starting agent.run()...")
             query_parts = [
                 f"Generate the most STABLE CSS selector to target '{target_description}'.",
                 "Prioritize stable attributes and classes.",
