@@ -1,9 +1,13 @@
+# == selectron ==
+.selectron/
+
+
+# == github python template ==
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 .pytest_logs/
-samples/
 
 # C extensions
 *.so

@@ -35,7 +35,7 @@ async def save_debug_elements(
     """
     # Set default dir if None
     if output_dir is None:
-        output_dir = Path.cwd() / "debug_outputs"
+        output_dir = Path.cwd() / ".selectron"
 
     # Create the output directory if it doesn't exist
     try:

@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Any, Optional
 
 from pydantic_ai import Agent, Tool
@@ -48,8 +49,7 @@ DEFAULT_THEME = THEME_LIGHT
 
 
 class SelectronApp(App[None]):
-    # TODO: Make this configurable (e.g., via CLI flag or env var)
-    _debug_write_html: bool = True  # Flag to enable debug output
+    _debug_write_selection: bool = os.getenv("SLT_DBG_WRITE_SELECTION", "false").lower() == "true"
     CSS_PATH = "styles.tcss"
     BINDINGS = [
         Binding(key="ctrl+c", action="quit", description="⣏ Quit ⣹", show=False),
@@ -371,18 +371,14 @@ class SelectronApp(App[None]):
             await self._update_ui_status(
                 "Agent Error: Missing URL", state="received_error", show_spinner=False
             )
-            # No need to hide badge explicitly, finally block handles button reset
             return
 
-        tool_call_count = 0  # Initialize tool call counter
+        tool_call_count = 0
         logger.info(
             f"Running SelectorAgent logic for target '{target_description}' on tab {tab_ref.id}"
         )
         base_url_for_agent = current_url
-
         try:
-            # --- Removed initial status update here, moved above try block ---
-
             tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
 
             async def evaluate_selector_wrapper(selector: str, target_text_to_check: str, **kwargs):
@@ -394,21 +390,15 @@ class SelectronApp(App[None]):
                     state="sending",
                     show_spinner=True,
                 )
-                # Extract only known args from kwargs for the underlying tool
                 known_args_for_tool = {
                     "anchor_selector": kwargs.get("anchor_selector"),
                     "max_html_length": kwargs.get("max_html_length"),
-                    "max_matches_to_detail": kwargs.get(
-                        "max_matches_to_detail", None
-                    ),  # Use default if LLM omits
-                    # Hardcode return_matched_html as True based on wrapper logic
-                    "return_matched_html": True,
+                    "max_matches_to_detail": kwargs.get("max_matches_to_detail", None),
+                    "return_matched_html": True,  # NOTE: hardcoded?
                 }
-                # Filter out any keys where the value is None to avoid passing them unnecessarily
                 filtered_args_for_tool = {
                     k: v for k, v in known_args_for_tool.items() if v is not None
                 }
-
                 result = await tools_instance.evaluate_selector(
                     selector=selector,
                     target_text_to_check=target_text_to_check,
@@ -441,7 +431,7 @@ class SelectronApp(App[None]):
                         state="received_error",  # Salmon: Error
                         show_spinner=True,
                     )
-                # Implicit else (result is None) - should not happen with current tool structure
+                # NOTE: Implicit else (result is None) - should not happen
                 return result
 
             async def get_children_tags_wrapper(selector: str, **kwargs):
@@ -453,14 +443,12 @@ class SelectronApp(App[None]):
                     state="sending",
                     show_spinner=True,
                 )
-                # Extract known args
                 known_args_for_tool = {
                     "anchor_selector": kwargs.get("anchor_selector"),
                 }
                 filtered_args_for_tool = {
                     k: v for k, v in known_args_for_tool.items() if v is not None
                 }
-
                 result = await tools_instance.get_children_tags(
                     selector=selector, **filtered_args_for_tool
                 )
@@ -470,7 +458,7 @@ class SelectronApp(App[None]):
                     )
                     await self._update_ui_status(
                         f"{status_prefix} get_children_tags OK ({len(result.children_details or [])} children)",
-                        state="received_success",  # Green: Parent found
+                        state="received_success",
                         show_spinner=True,
                     )
                     if success:
@@ -478,18 +466,18 @@ class SelectronApp(App[None]):
                 elif result and not result.parent_found and not result.error:
                     await self._update_ui_status(
                         f"{status_prefix} Parent selector found 0 elements",
-                        state="received_no_results",  # Orange: Parent not found
+                        state="received_no_results",
                         show_spinner=True,
                     )
-                    # Still highlight the selector even if parent not found
+                    # NOTE: Still highlight the selector even if parent not found?
                     await self._highlighter.highlight(self._active_tab_ref, selector, color="red")
                 elif result and result.error:
                     await self._update_ui_status(
                         f"{status_prefix} get_children_tags Error: {result.error[:50]}...",
-                        state="received_error",  # Salmon: Error
+                        state="received_error",
                         show_spinner=True,
                     )
-                # Implicit else (result is None)
+                # NOTE: Implicit else (result is None)
                 return result
 
             async def get_siblings_wrapper(selector: str, **kwargs):
@@ -501,14 +489,12 @@ class SelectronApp(App[None]):
                     state="sending",
                     show_spinner=True,
                 )
-                # Extract known args
                 known_args_for_tool = {
                     "anchor_selector": kwargs.get("anchor_selector"),
                 }
                 filtered_args_for_tool = {
                     k: v for k, v in known_args_for_tool.items() if v is not None
                 }
-
                 result = await tools_instance.get_siblings(
                     selector=selector, **filtered_args_for_tool
                 )
@@ -518,7 +504,7 @@ class SelectronApp(App[None]):
                     )
                     await self._update_ui_status(
                         f"{status_prefix} get_siblings OK ({len(result.siblings or [])} siblings)",
-                        state="received_success",  # Green: Element found
+                        state="received_success",
                         show_spinner=True,
                     )
                     if success:
@@ -526,18 +512,18 @@ class SelectronApp(App[None]):
                 elif result and not result.element_found and not result.error:
                     await self._update_ui_status(
                         f"{status_prefix} Element selector found 0 elements",
-                        state="received_no_results",  # Orange: Element not found
+                        state="received_no_results",
                         show_spinner=True,
                     )
-                    # Still highlight the selector even if element not found
+                    # NOTE: Still highlight the selector even if element not found?
                     await self._highlighter.highlight(self._active_tab_ref, selector, color="blue")
                 elif result and result.error:
                     await self._update_ui_status(
                         f"{status_prefix} get_siblings Error: {result.error[:50]}...",
-                        state="received_error",  # Salmon: Error
+                        state="received_error",
                         show_spinner=True,
                     )
-                # Implicit else (result is None)
+                # NOTE: Implicit else (result is None)
                 return result
 
             async def extract_data_from_element_wrapper(selector: str, **kwargs):
@@ -549,23 +535,22 @@ class SelectronApp(App[None]):
                     state="sending",
                     show_spinner=True,
                 )
-                # Extract known args
                 known_args_for_tool = {
                     "attribute_to_extract": kwargs.get("attribute_to_extract"),
-                    "extract_text": kwargs.get("extract_text", False),  # Default if LLM omits
+                    "extract_text": kwargs.get(
+                        "extract_text", False
+                    ),  # NOTE: default false if LLM omits
                     "anchor_selector": kwargs.get("anchor_selector"),
                 }
                 filtered_args_for_tool = {
                     k: v for k, v in known_args_for_tool.items() if v is not None
                 }
-
-                # No highlight here anymore, final highlight happens after agent completion.
+                # NOTE: No highlight here anymore, final highlight happens after agent completion.
                 result = await tools_instance.extract_data_from_element(
                     selector=selector, **filtered_args_for_tool
                 )
                 # Check for error first. If no error, extraction was attempted (element likely found).
                 if result and not result.error:
-                    # Check if any data was actually extracted
                     extracted_count = sum(
                         1
                         for val in [
@@ -579,22 +564,22 @@ class SelectronApp(App[None]):
                     if extracted_count > 0:
                         await self._update_ui_status(
                             f"{status_prefix} extract_data OK ({extracted_count} fields populated)",
-                            state="received_success",  # Green: Data extracted
+                            state="received_success",
                             show_spinner=True,
                         )
                     else:
                         await self._update_ui_status(
                             f"{status_prefix} extract_data OK (No specific data extracted)",
-                            state="received_no_results",  # Orange: Element found, but no data extracted
+                            state="received_no_results",
                             show_spinner=True,
                         )
                 elif result and result.error:
                     await self._update_ui_status(
                         f"{status_prefix} extract_data Error: {result.error[:50]}...",
-                        state="received_error",  # Salmon: Error
+                        state="received_error",
                         show_spinner=True,
                     )
-                # Implicit else (result is None)
+                # NOTE: Implicit else (result is None)
                 return result
 
             wrapped_tools = [
@@ -603,7 +588,6 @@ class SelectronApp(App[None]):
                 Tool(get_siblings_wrapper),
                 Tool(extract_data_from_element_wrapper),
             ]
-
             system_prompt = SELECTOR_PROMPT_BASE
             if current_dom_string:
                 system_prompt += SELECTOR_PROMPT_DOM_TEMPLATE.format(
@@ -612,9 +596,7 @@ class SelectronApp(App[None]):
             else:
                 logger.warning(f"Proceeding without DOM string representation for tab {tab_ref.id}")
 
-            # Update status before agent run
             await self._update_ui_status("Thinking...", state="thinking", show_spinner=True)
-
             agent = Agent(
                 self._model_config.selector_agent_model,
                 output_type=SelectorProposal,
@@ -646,7 +628,7 @@ class SelectronApp(App[None]):
                 self._last_proposed_selector = proposal.proposed_selector
 
                 # --- DEBUG: Write selected HTML to JSON using the utility function ---
-                if self._debug_write_html:
+                if self._debug_write_selection:
                     await save_debug_elements(
                         tools_instance=tools_instance,
                         selector=proposal.proposed_selector,

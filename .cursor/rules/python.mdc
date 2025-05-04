@@ -8,6 +8,7 @@ alwaysApply: false
 ## General rules
 - You can *always* assume we have all libraries installed, NO CONDITIONAL IMPORTS.
 - Prefer using Pydantic models to dataclasses or TypedDicts
+- Use set literals and avoid unnecessary list literals: {1,2}, not set([1,2])
 
 ## For-else statements
 

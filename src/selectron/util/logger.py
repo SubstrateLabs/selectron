@@ -1,5 +1,7 @@
 import logging
 
+from rich.logging import RichHandler
+
 from selectron.util.get_app_dir import get_app_dir
 
 _initialized = False
@@ -28,6 +30,10 @@ def get_logger(name: str) -> logging.Logger:
         _file_handler.setFormatter(log_formatter)
         _file_handler.setLevel(logging.DEBUG)
         root_logger.addHandler(_file_handler)
+
+        # stream handler (for terminal visibility, using rich)
+        stream_handler = RichHandler(level=logging.INFO, rich_tracebacks=True, show_path=False)
+        root_logger.addHandler(stream_handler)
 
         # Set library levels
         logging.getLogger("websockets").setLevel(logging.WARNING)
