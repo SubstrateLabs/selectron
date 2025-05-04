@@ -50,7 +50,7 @@ async def propose_selection(
             BinaryContent(data=image_bytes, media_type="image/jpeg"),
         ]
         agent = Agent[None, _ProposalResponse](
-            model=model_config.propose_selector_model,
+            model=model_config.analyze_model,
             output_type=_ProposalResponse,
         )
         result = await agent.run(agent_input)

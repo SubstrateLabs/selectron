@@ -598,7 +598,7 @@ class SelectronApp(App[None]):
 
             await self._update_ui_status("Thinking...", state="thinking", show_spinner=True)
             agent = Agent(
-                self._model_config.selector_agent_model,
+                self._model_config.agent_model,
                 output_type=SelectorProposal,
                 tools=wrapped_tools,
                 system_prompt=system_prompt,
@@ -627,8 +627,7 @@ class SelectronApp(App[None]):
                 )
                 self._last_proposed_selector = proposal.proposed_selector
 
-                # --- DEBUG: Write selected HTML to JSON using the utility function ---
-                if self._debug_write_selection:
+                if self._debug_write_selection:  # NOTE: for codegen dev script
                     await save_debug_elements(
                         tools_instance=tools_instance,
                         selector=proposal.proposed_selector,
@@ -636,14 +635,11 @@ class SelectronApp(App[None]):
                         url=current_url,
                         reasoning=proposal.reasoning,
                     )
-                # --- End DEBUG section ---
 
-                # Highlight the final proposed selector in lime
                 success = await self._highlighter.highlight(
                     self._active_tab_ref, proposal.proposed_selector, color="lime"
                 )
-                # Keep success badge briefly, then hide? Or hide immediately? Let's hide after a short delay.
-                self.app.call_later(self._delayed_hide_status)
+                # self.app.call_later(self._delayed_hide_status) # NOTE: maybe hide the succdone badge?
 
                 if success:
                     pass
@@ -667,21 +663,18 @@ class SelectronApp(App[None]):
             logger.error(
                 f"Error running SelectorAgent for target '{target_description}': {e}", exc_info=True
             )
-            # --- Status update on agent exception ---
-            if tab_ref:  # Check if tab_ref is still valid
+            if tab_ref:
                 error_msg = f"Agent Error: {type(e).__name__}"
                 await self._update_ui_status(error_msg, state="received_error", show_spinner=False)
-                if self.app:  # Ensure app context is available
+                if self.app:
                     self.app.call_later(self._delayed_hide_status)
-
             self._last_proposed_selector = None
             self.call_later(self._clear_table_view)
         finally:
-            # --- Reset button state --- ALWAYS reset the button in finally
             if submit_button:
                 submit_button.label = "Start AI selection"
                 submit_button.disabled = False
-            # Ensure the badge is eventually hidden if not handled by success/error paths with delays
+            # NOTE: Ensure the badge is eventually hidden if not handled by success/error paths with delays
             # This is a fallback in case the worker is cancelled or ends unexpectedly
             if self._active_tab_ref:
                 # Let the delayed hides handle it. If cancelled, action_quit handles it.
@@ -702,35 +695,30 @@ class SelectronApp(App[None]):
     async def on_input_changed(self, event: Input.Changed) -> None:
         """Handle changes in the prompt input using a timer for debouncing."""
         if event.input.id == "prompt-input":
-            # Cancel existing timer if it exists
             if self._input_debounce_timer:
                 self._input_debounce_timer.stop()
 
-            # Define the action to perform after debounce timeout
             async def _update_status_after_debounce():
-                current_value = event.value.strip()  # Use event value captured by closure
+                current_value = event.value.strip()
                 if self._active_tab_ref:
                     if current_value:
-                        # Display the current input value in the badge AND label
                         await self._update_ui_status(current_value, state="idle")
-                    # else: # What to do if input is cleared? Revert to default?
+                    # else: # NOTE: maybe handle if input is cleared
                     #     await self._update_ui_status("No active tab (interact to activate)", state="idle")
-                self._input_debounce_timer = None  # Clear timer ref after execution
+                self._input_debounce_timer = None
 
-            # Start a new timer
             self._input_debounce_timer = self.set_timer(
                 0.5, _update_status_after_debounce, name="input_debounce"
             )
 
     async def _delayed_hide_status(self) -> None:
         """Helper method called via call_later to hide the status badge after a delay."""
-        await asyncio.sleep(3.0)  # Handle the delay internally
+        await asyncio.sleep(3.0)
         if self._active_tab_ref:
             logger.debug("Hiding agent status badge after delay.")
             await self._highlighter.hide_agent_status(self._active_tab_ref)
-        # Also reset the terminal AGENT STATUS label
         try:
             status_label = self.query_one("#agent-status-label", Label)
-            status_label.update("")  # Reset agent status label to empty
+            status_label.update("")
         except Exception as e:
             logger.warning(f"Failed to reset status label after delay: {e}")

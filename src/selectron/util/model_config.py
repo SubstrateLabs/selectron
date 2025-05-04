@@ -8,9 +8,9 @@ CLAUDE_3_7_SONNET = "anthropic:claude-3-7-sonnet-latest"
 OPENAI_GPT_4_1_MINI = "openai:gpt-4.1-mini"
 OPENAI_GPT_4_1_NANO = "openai:gpt-4.1-nano"
 OPENAI_GPT_4_1 = "openai:gpt-4.1"
-ANTHROPIC_PROPOSE_MODEL = CLAUDE_3_5_SONNET
+ANTHROPIC_ANALYZE_MODEL = CLAUDE_3_5_SONNET
 ANTHROPIC_AGENT_MODEL = CLAUDE_3_7_SONNET
-OPENAI_PROPOSE_MODEL = OPENAI_GPT_4_1_NANO
+OPENAI_ANALYZE_MODEL = OPENAI_GPT_4_1_NANO
 OPENAI_AGENT_MODEL = OPENAI_GPT_4_1
 
 
@@ -35,10 +35,10 @@ class ModelConfig:
         self.provider = maybe_provider
         # Set models directly based on provider
         if self.provider == "anthropic":
-            self._propose_model = ANTHROPIC_PROPOSE_MODEL
+            self._propose_model = ANTHROPIC_ANALYZE_MODEL
             self._agent_model = ANTHROPIC_AGENT_MODEL
         elif self.provider == "openai":
-            self._propose_model = OPENAI_PROPOSE_MODEL
+            self._propose_model = OPENAI_ANALYZE_MODEL
             self._agent_model = OPENAI_AGENT_MODEL
 
     def _determine_provider(self) -> Optional[Provider]:
@@ -50,11 +50,11 @@ class ModelConfig:
             return None
 
     @property
-    def propose_selector_model(self) -> str:
+    def analyze_model(self) -> str:
         return self._propose_model
 
     @property
-    def selector_agent_model(self) -> str:
+    def agent_model(self) -> str:
         return self._agent_model
 
     @property
