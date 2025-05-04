@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
@@ -46,6 +46,9 @@ class CodegenAgent:
             ..., description="The current evaluation iteration number (starting from 1)."
         )
 
+    # Type alias for the async status callback
+    StatusCallback = Callable[[str, str, bool], Coroutine[Any, Any, None]]
+
     def __init__(
         self,
         *,
@@ -55,6 +58,7 @@ class CodegenAgent:
         base_url: Optional[str] = None,
         input_selector: Optional[str] = None,
         input_selector_description: Optional[str] = None,
+        status_cb: Optional[StatusCallback] = None,  # <-- Add status callback
     ):
         if not html_samples:
             raise ValueError("html_samples must be a non-empty list")
@@ -67,6 +71,7 @@ class CodegenAgent:
         self.base_url = base_url
         self.input_selector = input_selector
         self.input_selector_description = input_selector_description
+        self.status_cb = status_cb  # <-- Store status callback
 
         # Determine the correct directory to save parsers
         self.parser_save_dir: Optional[Path] = None
@@ -155,6 +160,10 @@ class CodegenAgent:
             logger.info(
                 f"Tool evaluate_and_sample_code called with iteration_count: {iteration_count}"
             )
+            if self.status_cb:
+                await self.status_cb(
+                    f"Evaluating code (Iteration {iteration_count})...", "thinking", True
+                )
             cleaned_code = clean_agent_code(code)
 
             success, feedback, outputs = self._exec_candidate(cleaned_code, self.html_samples)
@@ -201,6 +210,10 @@ class CodegenAgent:
                         f"Sample Input/Output Pair:\n{sampled_output_str}"
                     )
                     logger.info("Raising ModelRetry: Forcing mandatory iteration 2 due to policy…")
+                    if self.status_cb:
+                        await self.status_cb(
+                            "Refining code (Mandatory Iteration 2)...", "thinking", True
+                        )
                     raise ModelRetry(retry_message)
             else:
                 logger.warning(f"Raising ModelRetry: Code validation failed: {feedback}")

@@ -416,7 +416,6 @@ class SelectronApp(App[None]):
             proposal = await agent.run(selector_description)
 
             if proposal:
-                logger.info(f"Worker FINISHED. Proposal: {proposal.proposed_selector}")
                 await self._update_ui_status(
                     "Done",
                     state="final_success",
@@ -661,9 +660,7 @@ class SelectronApp(App[None]):
         self._set_parser_button_enabled(False)
 
         # Update UI status
-        await self._update_ui_status(
-            "Generating parser via AI…", state="thinking", show_spinner=True
-        )
+        await self._update_ui_status("Generating parser code…", state="thinking", show_spinner=True)
 
         # Run CodegenAgent
         try:
@@ -674,6 +671,7 @@ class SelectronApp(App[None]):
                 base_url=tab_ref.url or "",
                 input_selector=selector,
                 input_selector_description=selector_description,
+                status_cb=self._update_ui_status,
             )
 
             logger.info(f"Starting CodegenAgent for url '{tab_ref.url}' with selector '{selector}'")
