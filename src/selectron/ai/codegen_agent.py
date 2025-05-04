@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import typing
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
@@ -79,7 +80,7 @@ class CodegenAgent:
             src_parsers_dir = Path("src/selectron/parsers")
             if src_parsers_dir.is_dir():
                 self.parser_save_dir = src_parsers_dir
-                logger.info(f"Using source parser directory for saving: {self.parser_save_dir}")
+                logger.info(f"Saving to source directory: {self.parser_save_dir}")
             else:
                 app_parsers_dir = get_app_dir() / "parsers"
                 self.parser_save_dir = app_parsers_dir
@@ -90,7 +91,6 @@ class CodegenAgent:
             if self.parser_save_dir:
                 try:
                     self.parser_save_dir.mkdir(parents=True, exist_ok=True)
-                    logger.info(f"Ensured parser save directory exists: {self.parser_save_dir}")
                 except Exception as e:
                     logger.error(
                         f"Failed to create parser save directory {self.parser_save_dir}: {e}",
@@ -143,11 +143,11 @@ class CodegenAgent:
                 feedback = f"invalid return value for sample {idx}: {msg}"
                 logger.warning(feedback)
                 return False, feedback, []
-            outputs.append(result)
+            # Ensure pyright understands the type after validation
+            outputs.append(typing.cast(Dict[str, Any], result))
         return True, "success", outputs
 
     async def run(self) -> Tuple[str, List[Dict[str, Any]]]:
-        logger.info("Starting CodegenAgent...")
         agent = Agent(
             self.model_cfg.codegen_model,
             system_prompt=CODEGEN_PROMPT,

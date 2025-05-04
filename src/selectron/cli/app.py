@@ -2,6 +2,8 @@ import asyncio
 import os
 from typing import Optional
 
+from pydantic_ai import UnexpectedModelBehavior, capture_run_messages
+from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
@@ -318,7 +320,7 @@ class SelectronApp(App[None]):
         """Helper to update both the terminal label and the browser badge."""
         try:
             status_label = self.query_one("HomePanel #agent-status-label", Label)
-            status_label.update(message)
+            status_label.update(escape(message))
         except Exception as e:
             logger.error(f"Failed to update status label: {e}", exc_info=True)
 
@@ -657,10 +659,18 @@ class SelectronApp(App[None]):
             selector_description = ""
 
         # Disable parser button while running
-        self._set_parser_button_enabled(False)
+        try:
+            parser_button = self.query_one("#generate-parser-button", Button)
+            parser_button.label = "Running AI..."
+            parser_button.disabled = True
+        except Exception as e:
+            logger.error(f"Failed to update parser button state at start: {e}", exc_info=True)
+            parser_button = None  # Ensure it's None if query fails
 
         # Update UI status
-        await self._update_ui_status("Generating parser code…", state="thinking", show_spinner=True)
+        await self._update_ui_status(
+            "Generating parser code… (this may take a minute)", state="thinking", show_spinner=True
+        )
 
         # Run CodegenAgent
         try:
@@ -676,11 +686,25 @@ class SelectronApp(App[None]):
 
             logger.info(f"Starting CodegenAgent for url '{tab_ref.url}' with selector '{selector}'")
 
-            generated_code, outputs = await codegen_agent.run()
+            # Capture agent messages
+            with capture_run_messages() as messages:
+                generated_code, outputs = await codegen_agent.run()
 
             _ = (generated_code, outputs)  # silence unused variable lints
 
-            logger.info("CodegenAgent finished successfully.")
+            logger.info("CodegenAgent finished successfully. Triggering parser reload.")
+
+            if self._monitor_handler:
+                try:
+                    self._monitor_handler._parser_registry.rescan_parsers()
+                    # Schedule the check/apply for the current tab
+                    if self._active_tab_ref:
+                        active_ref_capture = self._active_tab_ref  # Capture for closure
+                        self.call_later(
+                            self._monitor_handler._maybe_apply_parser_highlight, active_ref_capture
+                        )
+                except Exception as reload_err:
+                    logger.error(f"Error rescanning/applying parser: {reload_err}", exc_info=True)
 
             await self._update_ui_status(
                 "Parser generated and saved.",
@@ -690,6 +714,21 @@ class SelectronApp(App[None]):
 
             # Optionally, re-enable parser button if we want to regenerate again
             self._set_parser_button_enabled(True)
+
+        except UnexpectedModelBehavior as e:
+            logger.error(f"CodegenAgent failed with UnexpectedModelBehavior: {e}", exc_info=True)
+            logger.error("Captured Agent Messages (on failure):")
+            # Log each message for better readability in the log file
+            for msg in messages:
+                role = getattr(msg, "role", "unknown")
+                content = getattr(msg, "content", "")
+                logger.error(f"  - {role}: {str(content)[:500]}...")  # Log truncated message
+            await self._update_ui_status(
+                f"Parser generation failed: {e}",  # Show error to user
+                state="received_error",
+                show_spinner=False,
+            )
+            # Keep button disabled on error
 
         except Exception as e:
             logger.error(f"CodegenAgent failed: {e}", exc_info=True)
@@ -703,4 +742,11 @@ class SelectronApp(App[None]):
         finally:
             # Ensure spinner/badge gets hidden eventually
             self.call_later(self._delayed_hide_status)
-            # Finished: enable button state managed above
+            # Finished: Reset button state
+            if parser_button:
+                parser_button.label = "Start AI parser generation"
+                # Enable state is handled within try/except blocks above
+                # For success: self._set_parser_button_enabled(True)
+                # For error: remains disabled (no explicit enable)
+                # If we want to ALWAYS re-enable, we'd do it here.
+                # Let's stick to re-enabling only on success for now.

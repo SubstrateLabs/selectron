@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import traceback
-from typing import Any, Optional, Protocol
+from typing import Any, Callable, Coroutine, Optional, Protocol
 
 from pydantic_ai import Agent, Tool
 from pydantic_ai.exceptions import AgentRunError
@@ -17,6 +19,10 @@ from selectron.util.logger import get_logger
 from selectron.util.model_config import ModelConfig
 
 logger = get_logger(__name__)
+
+
+# Type alias for the async status callback
+StatusCallback = Callable[[str, str, bool], Coroutine[Any, Any, None]]
 
 
 class ToolStatus(Protocol):
@@ -51,6 +57,9 @@ class SelectorAgent:
     and highlighting, allowing it to be embedded in different environments (TUI, web, tests).
     """
 
+    # Type alias for the async status callback (duplicated for clarity within class)
+    StatusCallback = Callable[[str, str, bool], Coroutine[Any, Any, None]]
+
     def __init__(
         self,
         *,
@@ -58,7 +67,7 @@ class SelectorAgent:
         dom_string: Optional[str],
         base_url: str,
         model_cfg: ModelConfig,
-        status_cb: Optional[ToolStatus] = None,
+        status_cb: Optional[StatusCallback] = None,
         highlighter: Optional[Highlighter] = None,
         debug_dump: bool = False,
     ):
@@ -76,11 +85,7 @@ class SelectorAgent:
     async def _safe_status_update(self, message: str, state: str, show_spinner: bool) -> None:
         if self.status_cb:
             try:
-                # Escape brackets for Textual markup
-                escaped_message = message.replace("[", "[[").replace("]", "]]")
-                await self.status_cb(
-                    message=escaped_message, state=state, show_spinner=show_spinner
-                )
+                await self.status_cb(message, state, show_spinner)
             except Exception as e:
                 logger.error(f"Error in status callback: {e}", exc_info=True)
 
@@ -340,7 +345,7 @@ class SelectorAgent:
             await self._safe_status_update("Thinking...", state="thinking", show_spinner=True)
 
             agent = Agent(
-                self.model_cfg.agent_model,
+                self.model_cfg.selector_model,
                 output_type=SelectorProposal,
                 tools=wrapped_tools,
                 system_prompt=system_prompt,

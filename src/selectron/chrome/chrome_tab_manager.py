@@ -63,7 +63,7 @@ class ChromeTabManager:
         # Instantiate the monitor
         self.monitor = ChromeMonitor(
             # Pass a no-op async lambda for the required callback
-            rehighlight_callback=lambda: asyncio.sleep(0),  # No-op async lambda
+            rehighlight_callback=lambda _: asyncio.sleep(0),  # Accept one arg (_)
             check_interval=1.5,  # Or make configurable
         )
 

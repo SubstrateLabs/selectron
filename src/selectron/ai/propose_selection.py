@@ -23,7 +23,7 @@ PROPOSAL_PROMPT = """You are an expert UI analyst. Analyze the provided screensh
 
 2.  **Generate Description:** Provide ONE concise, generic description suitable for selecting the **best** main content region based on the page type:
     *   (1) For recurring items, describe the container (e.g., "All posts in the main feed", "All listing items in the search results", "All comments in the comments section").
-    *   (2) For single blocks, describe the primary section containing informational text content, focusing on metadata like title, author, date, etc. Examples: "The container with the video title, author, and description", "The article heading containing the title, author, and date".
+    *   (2) For single blocks, describe the primary section containing informational text content, focusing on metadata like title, author, date, etc. 
         *   Important: DO NOT select the main content, your goal is to select the best region for extracting metadata.
 
 Output ONLY a JSON object with a single key "description": `{"description": "Your description here"}`. No other text, labels, formatting, or explanation."""

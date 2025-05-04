@@ -143,9 +143,6 @@ class MonitorEventHandler:
                             self._app._input_debounce_timer = None  # Clear the reference
                         self._prompt_input.value = selector_description  # Now set the value
                         # Update status immediately and mark proposal as 'done' for this tab
-                        await self._app._update_ui_status(
-                            f'Parser found: "{selector_description}"', "idle", False
-                        )
                         self._app._propose_selection_done_for_tab = tab_ref.id
                         parser_found_and_handled = True
                     else:
@@ -340,14 +337,24 @@ class MonitorEventHandler:
             return
 
         # Execute parser on each element and collect results
-        results_data: list[dict | None] = []  # Store only parsed dicts
+        results_data: list[dict[str, Any] | None] = []  # Explicit key/value type
         for idx, outer_html in enumerate(element_htmls):
-            parsed_dict = None
+            parsed_dict: dict[str, Any] | None = None  # Initialize with explicit type
             try:
-                parsed_dict = parse_fn(outer_html)
+                result = parse_fn(outer_html)
+                # Validate the result is a dictionary before assigning
+                if isinstance(result, dict):
+                    parsed_dict = result
+                else:
+                    logger.error(
+                        f"parse_element for element {idx} returned non-dict type: {type(result).__name__}"
+                    )
+                    # Keep parsed_dict as None
             except Exception as e:
                 logger.error(f"Error running parse_element for element {idx}: {e}", exc_info=True)
-            results_data.append(parsed_dict)  # Append only the dict
+                # parsed_dict remains None
+
+            results_data.append(parsed_dict)
 
         # Determine columns from the first valid result dictionary
         column_keys: list[str] = []

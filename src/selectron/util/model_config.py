@@ -9,11 +9,11 @@ OPENAI_GPT_4_1_MINI = "openai:gpt-4.1-mini"
 OPENAI_GPT_4_1_NANO = "openai:gpt-4.1-nano"
 OPENAI_GPT_4_1 = "openai:gpt-4.1"
 ANTHROPIC_ANALYZE_MODEL = CLAUDE_3_5_SONNET
-ANTHROPIC_AGENT_MODEL = CLAUDE_3_7_SONNET
+ANTHROPIC_SELECTOR_MODEL = CLAUDE_3_7_SONNET
 ANTHROPIC_CODEGEN_MODEL = CLAUDE_3_7_SONNET
-OPENAI_ANALYZE_MODEL = OPENAI_GPT_4_1_NANO
-OPENAI_AGENT_MODEL = OPENAI_GPT_4_1
-OPENAI_CODEGEN_MODEL = OPENAI_GPT_4_1_MINI
+OPENAI_ANALYZE_MODEL = OPENAI_GPT_4_1_MINI
+OPENAI_SELECTOR_MODEL = OPENAI_GPT_4_1
+OPENAI_CODEGEN_MODEL = OPENAI_GPT_4_1
 
 
 class ModelConfig:
@@ -23,7 +23,8 @@ class ModelConfig:
     openai_key: Optional[str]
     provider: Provider
     _propose_model: str
-    _agent_model: str
+    _selector_model: str
+    _codegen_model: str
 
     def __init__(self):
         self.anthropic_key = os.getenv("ANTHROPIC_API_KEY")
@@ -38,11 +39,11 @@ class ModelConfig:
         # Set models directly based on provider
         if self.provider == "anthropic":
             self._propose_model = ANTHROPIC_ANALYZE_MODEL
-            self._agent_model = ANTHROPIC_AGENT_MODEL
+            self._selector_model = ANTHROPIC_SELECTOR_MODEL
             self._codegen_model = ANTHROPIC_CODEGEN_MODEL
         elif self.provider == "openai":
             self._propose_model = OPENAI_ANALYZE_MODEL
-            self._agent_model = OPENAI_AGENT_MODEL
+            self._selector_model = OPENAI_SELECTOR_MODEL
             self._codegen_model = OPENAI_CODEGEN_MODEL
 
     def _determine_provider(self) -> Optional[Provider]:
@@ -58,8 +59,8 @@ class ModelConfig:
         return self._propose_model
 
     @property
-    def agent_model(self) -> str:
-        return self._agent_model
+    def selector_model(self) -> str:
+        return self._selector_model
 
     @property
     def codegen_model(self) -> str:
