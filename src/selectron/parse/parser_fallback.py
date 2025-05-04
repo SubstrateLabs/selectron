@@ -46,9 +46,9 @@ def find_fallback_parser(
         origin, resource, file_path = available_parsers[url_slug]
         parser_dict = _load_parser_content(resource)
         if parser_dict:
-            logger.debug(
-                f"Found exact parser match for '{url}' (slug: '{url_slug}', origin: {origin}) - Adding as candidate"
-            )
+            # logger.debug(
+            #     f"Found exact parser match for '{url}' (slug: '{url_slug}', origin: {origin}) - Adding as candidate"
+            # )
             candidates.append((parser_dict, origin, file_path, url_slug))
             found_slugs.add(url_slug)
         else:
@@ -147,7 +147,8 @@ def find_fallback_parser(
 
     # If loop completes, return all found and loaded candidates
     if not candidates:
-        logger.debug(f"No fallback parser candidates found or loaded for URL '{url}'")
+        pass
+        # logger.debug(f"No fallback parser candidates found or loaded for URL '{url}'")
     return candidates
 
 

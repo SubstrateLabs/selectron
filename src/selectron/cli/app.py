@@ -1,7 +1,10 @@
 import asyncio
 import os
+import webbrowser
 from typing import Optional
 
+# Add duckdb import
+import duckdb
 from pydantic_ai import UnexpectedModelBehavior, capture_run_messages
 from rich.markup import escape
 from textual.app import App, ComposeResult
@@ -38,6 +41,7 @@ from selectron.chrome.types import TabReference
 from selectron.cli.home_panel import ChromeStatus, HomePanel
 from selectron.cli.log_panel import LogPanel
 from selectron.cli.monitor_handler import MonitorEventHandler
+from selectron.cli.settings_panel import SettingsPanel
 from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
 from selectron.util.model_config import ModelConfig
@@ -71,6 +75,9 @@ class SelectronApp(App[None]):
     _propose_selection_done_for_tab: Optional[str] = None
     _input_debounce_timer: Optional[Timer] = None
     _monitor_handler: Optional[MonitorEventHandler] = None
+    _duckdb_ui_conn: Optional[duckdb.DuckDBPyConnection] = (
+        None  # ADDED: Store connection for DuckDB UI
+    )
 
     def __init__(self, model_config: ModelConfig):
         super().__init__()
@@ -89,6 +96,8 @@ class SelectronApp(App[None]):
                     yield DataTable(id="data-table")
                 with TabPane("⣏ Logs ⣹", id="logs-tab"):
                     yield LogPanel(log_file_path=LOG_PATH, id="log-panel-widget")
+                with TabPane("⣏ Settings ⣹", id="settings-tab"):
+                    yield SettingsPanel(id="settings-panel-widget")
         with Container(classes="input-bar"):
             with Container(id="button-row", classes="button-status-row"):
                 yield Button("Start AI selection", id="submit-button")
@@ -285,10 +294,46 @@ class SelectronApp(App[None]):
                 else:
                     logger.error(f"Failed to delete parser with slug: {slug_to_delete}")
                     await self._update_ui_status("Failed to delete parser.", state="received_error")
-            else:
-                logger.warning(
-                    "Delete parser button pressed, but no current parser slug identified in handler."
-                )
+        elif button_id == "drop-all-tables":
+            # --- Handle Drop All Tables Action --- #
+            logger.info("User requested to drop all DuckDB tables.")
+            try:
+                from selectron.cli.duckdb_utils import delete_all_tables
+
+                # Run the deletion in a background thread to avoid blocking UI
+                # (though it should be fast, good practice)
+                async def _run_delete():
+                    await asyncio.to_thread(delete_all_tables)
+                    await self._update_ui_status("All tables dropped.", state="idle")
+
+                self.run_worker(_run_delete(), exclusive=True, group="db_admin")
+            except Exception as e:
+                logger.error(f"Failed to run drop_all_tables: {e}", exc_info=True)
+                await self._update_ui_status("Failed to drop tables", state="received_error")
+        elif button_id == "open-duckdb":
+            # --- Handle Open DuckDB UI Action --- #
+            if self._duckdb_ui_conn:
+                logger.info("DuckDB UI may already be running. Focusing existing browser window.")
+                # Try to just open the URL again, browser might handle it
+                webbrowser.open("http://localhost:4213")
+                return
+
+            try:
+                from selectron.cli.duckdb_utils import get_db_path, launch_duckdb_ui
+
+                db_path_str = str(get_db_path())
+                conn = launch_duckdb_ui(db_path_str)
+                if conn:
+                    self._duckdb_ui_conn = conn  # Store the connection
+                    logger.info("Stored DuckDB UI connection.")
+                else:
+                    logger.error("launch_duckdb_ui failed to return a connection.")
+                    # Optionally show error to user
+                    await self._update_ui_status("Failed to start DB UI", state="received_error")
+
+            except Exception as e:
+                logger.error(f"Failed to launch DuckDB UI: {e}", exc_info=True)
+                await self._update_ui_status("Failed to start DB UI", state="received_error")
         else:
             logger.warning(f"Unhandled button press: {event.button.id}")
 
@@ -344,6 +389,22 @@ class SelectronApp(App[None]):
         if self._agent_worker and self._agent_worker.is_running:
             logger.info("Cancelling agent worker on quit.")
             self._agent_worker.cancel()
+
+        # --- Stop DuckDB UI Server --- #
+        if self._duckdb_ui_conn:
+            logger.info("Stopping DuckDB UI server...")
+            try:
+                self._duckdb_ui_conn.execute("CALL stop_ui_server();")
+                logger.info("DuckDB UI server stop command issued.")
+            except Exception as stop_err:
+                logger.error(f"Failed to stop DuckDB UI server: {stop_err}", exc_info=True)
+            finally:
+                try:
+                    self._duckdb_ui_conn.close()
+                    logger.info("Closed DuckDB UI connection.")
+                except Exception as close_err:
+                    logger.error(f"Failed to close DuckDB UI connection: {close_err}")
+                self._duckdb_ui_conn = None
 
         self._highlighter.set_active(False)
         if self._active_tab_ref:

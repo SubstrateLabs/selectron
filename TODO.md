@@ -1,4 +1,4 @@
-- save results to duckdb (app dir)
+- function without AI?
 - sdk? 
   - parse(url)
   - test parse on a single example in script

@@ -150,7 +150,7 @@ class TabInteractionHandler:
                 elif event.get("type") == "click":
                     # Reset scrollY on click? Or keep the last known one?
                     # Let's keep the last known one for now, might be relevant if click triggers fetch
-                    logger.debug(f"Tab {self.tab_id} click detected.")
+                    # logger.debug(f"Tab {self.tab_id} click detected.")
                     pass
 
                 # Create a TabReference for the callback using the initially known tab info

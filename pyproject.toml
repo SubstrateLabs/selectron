@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "selectron"
 dynamic = ["version"]
-description = 'autonomous web parsing'
+description = 'AI-compiled web parsing (library & CLI)'
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
@@ -21,12 +21,14 @@ classifiers = [
 dependencies = [
     "beautifulsoup4>=4.13.4",
     "bs4>=0.0.2",
+    "duckdb>=1.2.2",
     "httpx>=0.28.1",
-    "imagehash>=4.3.2",
     "lxml>=5.4.0",
     "markdownify>=1.1.0",
     "pillow>=10.4.0",
+    "polars>=1.29.0",
     "psutil>=7.0.0",
+    "pyarrow>=20.0.0",
     "pydantic-ai>=0.1.9",
     "pydantic>=2.11.4",
     "python-dateutil>=2.9.0.post0",

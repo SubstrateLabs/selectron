@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
+from bs4 import BeautifulSoup
 from PIL import Image
 from textual.widgets import Button, DataTable, Input, Label
 
@@ -12,6 +13,7 @@ from selectron.ai.types import AutoProposal
 from selectron.chrome.chrome_highlighter import ChromeHighlighter
 from selectron.chrome.chrome_monitor import TabChangeEvent
 from selectron.chrome.types import TabReference
+from selectron.cli.duckdb_utils import save_parsed_results
 from selectron.parse.parser_registry import ParserRegistry
 from selectron.util.logger import get_logger
 
@@ -251,7 +253,6 @@ class MonitorEventHandler:
             candidates = []
 
         if not candidates:
-            logger.debug(f"No parser candidates found for {tab_ref.url} after fallback search.")
             await self.app._clear_table_view()  # Ensure table is clear if no candidates
             return  # Exit early if no candidates
 
@@ -333,8 +334,6 @@ class MonitorEventHandler:
         import json
         import reprlib
 
-        from bs4 import BeautifulSoup
-
         selector = parser_dict.get("selector")
         python_code = parser_dict.get("python")
 
@@ -360,13 +359,10 @@ class MonitorEventHandler:
 
         # Get element HTML directly from the browser
         try:
-            logger.debug(f"Fetching HTML for elements matching selector: '{selector}'")
             element_htmls = await self._highlighter.get_elements_html(
                 tab_ref, selector, max_elements=100
             )
-            if element_htmls is not None:
-                logger.debug(f"Successfully fetched HTML for {len(element_htmls)} elements.")
-            else:
+            if element_htmls is None:
                 logger.warning("get_elements_html returned None unexpectedly.")
         except Exception as e:
             logger.error(f"Error getting element HTML via CDP: {e}", exc_info=True)
@@ -378,27 +374,39 @@ class MonitorEventHandler:
             await self.app._clear_table_view()  # clear table if no results
             return
 
-        # Execute parser on each element and collect results
-        results_data: list[dict[str, Any] | None] = []  # Explicit key/value type
-        for idx, outer_html in enumerate(element_htmls):
-            parsed_dict: dict[str, Any] | None = None  # Initialize with explicit type
+        # Execute parser on each element and collect results without blocking event loop
+        results_data: list[dict[str, Any] | None] = []
+
+        async def _run_parse(html: str, idx: int):
+            """Run parse_fn in a background thread for a single element."""
             try:
-                result = parse_fn(outer_html)
-                # Validate the result is a dictionary before assigning
+                result = await asyncio.to_thread(parse_fn, html)
                 if isinstance(result, dict):
-                    parsed_dict = result
-                else:
-                    logger.error(
-                        f"parse_element for element {idx + 1} returned non-dict type: {type(result).__name__}"
-                    )
-                    # Keep parsed_dict as None
+                    return result
+                logger.error(
+                    f"parse_element for element {idx + 1} returned non-dict type: {type(result).__name__}"
+                )
+                return None
             except Exception as e:
                 logger.error(
                     f"Error running parse_element for element {idx + 1}: {e}", exc_info=True
                 )
-                # parsed_dict remains None
+                return None
 
-            results_data.append(parsed_dict)
+        # Kick off parse tasks concurrently to avoid long sync loop
+        parse_tasks = [_run_parse(html, i) for i, html in enumerate(element_htmls)]
+        results_data = await asyncio.gather(*parse_tasks)
+
+        # Persist parsed dicts to DuckDB
+        try:
+            rows_to_save = [d for d in results_data if isinstance(d, dict)]
+            if rows_to_save:
+                # Offload duckdb IO to background thread without blocking UI
+                asyncio.create_task(
+                    asyncio.to_thread(save_parsed_results, tab_ref.url or "", rows_to_save)
+                )
+        except Exception as e:
+            logger.error(f"Failed to save parsed results to DuckDB: {e}", exc_info=True)
 
         # Determine columns from the first valid result dictionary
         column_keys: list[str] = []
@@ -410,9 +418,6 @@ class MonitorEventHandler:
         # Update data table
         try:
             table = self._data_table
-            logger.debug(
-                f"Clearing data table. Found {len(column_keys)} columns for {len(results_data)} results."
-            )
             table.clear(columns=True)
 
             # Add columns
