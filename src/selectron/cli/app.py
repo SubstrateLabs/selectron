@@ -1,8 +1,7 @@
 import asyncio
 import os
-from typing import Any, Optional
+from typing import Optional
 
-from pydantic_ai import Agent, Tool
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container
@@ -19,12 +18,12 @@ from textual.widgets import (
 )
 from textual.worker import Worker
 
-from selectron.ai.selector_prompt import (
-    SELECTOR_PROMPT_BASE,
-    SELECTOR_PROMPT_DOM_TEMPLATE,
+from selectron.ai.selector_agent import (
+    Highlighter as HighlighterProtocol,
 )
-from selectron.ai.selector_tools import (
-    SelectorTools,
+from selectron.ai.selector_agent import (
+    SelectorAgent,
+    SelectorAgentError,
 )
 from selectron.ai.types import (
     SelectorProposal,
@@ -36,7 +35,6 @@ from selectron.chrome.types import TabReference
 from selectron.cli.home_panel import ChromeStatus, HomePanel
 from selectron.cli.log_panel import LogPanel
 from selectron.cli.monitor_handler import MonitorEventHandler
-from selectron.util.debug_helpers import save_debug_elements
 from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
 from selectron.util.model_config import ModelConfig
@@ -198,9 +196,9 @@ class SelectronApp(App[None]):
                 return
 
             success = await self._chrome_monitor.start_monitoring(
-                on_polling_change_callback=self._monitor_handler.handle_polling_change,  # Use handler method
-                on_interaction_update_callback=self._monitor_handler.handle_interaction_update,  # Use handler method
-                on_content_fetched_callback=self._monitor_handler.handle_content_fetched,  # Use handler method
+                on_polling_change_callback=self._monitor_handler.handle_polling_change,
+                on_interaction_update_callback=self._monitor_handler.handle_interaction_update,
+                on_content_fetched_callback=self._monitor_handler.handle_content_fetched,
             )
             if success:
                 home_panel.status = "connected"
@@ -227,13 +225,9 @@ class SelectronApp(App[None]):
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "prompt-input":
-            # When submitted, the agent will start and show its own status, overriding "Ready"
             target_description = event.value.strip()
             if not target_description:
                 return
-            # Clear previous highlights before starting a new selection
-            if self._active_tab_ref:
-                await self._highlighter.clear(self._active_tab_ref)
 
             if (
                 not self._active_tab_ref
@@ -243,11 +237,13 @@ class SelectronApp(App[None]):
                 logger.warning(
                     "Submit attempted but monitor not connected or no active tab identified."
                 )
-                # Optionally update UI status here if desired
-                # await self._update_ui_status("Error: Not connected", state="received_error")
+                await self._update_ui_status("Error: Not connected", state="received_error")
                 return
 
-            # Update UI status immediately to clear any debounce text
+            # Clear previous highlights before starting a new agent run for this tab
+            await self._highlighter.clear(self._active_tab_ref)
+
+            # Update UI status immediately
             await self._update_ui_status("Preparing agent...", state="thinking")
 
             if self._agent_worker and self._agent_worker.is_running:
@@ -255,7 +251,7 @@ class SelectronApp(App[None]):
                 self._agent_worker.cancel()
 
             self._agent_worker = self.run_worker(
-                self._run_agent_and_highlight(target_description),
+                self._run_agent_worker(target_description),
                 exclusive=True,
                 group="agent_worker",
             )
@@ -267,7 +263,6 @@ class SelectronApp(App[None]):
         if self._agent_worker and self._agent_worker.is_running:
             logger.info("Cancelling agent worker on quit.")
             self._agent_worker.cancel()
-            # Badge hiding is handled below, ensuring it happens even if agent wasn't running
 
         self._highlighter.set_active(False)
         if self._active_tab_ref:
@@ -329,9 +324,10 @@ class SelectronApp(App[None]):
         else:
             self.theme = THEME_LIGHT
 
-    async def _run_agent_and_highlight(self, target_description: str) -> None:
+    async def _run_agent_worker(self, target_description: str) -> None:
+        """Worker task to run the SelectorAgent and handle UI updates."""
         if not self._active_tab_ref or not self._active_tab_ref.html:
-            logger.warning("Cannot run agent: No active tab reference with html.")
+            logger.warning("Cannot run agent worker: No active tab reference with html.")
             await self._update_ui_status(
                 "Agent Error: Missing HTML", state="received_error", show_spinner=False
             )
@@ -342,284 +338,67 @@ class SelectronApp(App[None]):
         current_dom_string = self._active_tab_dom_string
         current_url = tab_ref.url
 
-        # --- Get UI elements --- Needed for status updates and button disabling
+        # --- Get UI elements --- Needed for button disabling/enabling
         try:
             submit_button = self.query_one("#submit-button", Button)
         except Exception as e:
             logger.error(f"Failed to query submit button: {e}", exc_info=True)
-            submit_button = None  # Proceed without button control if query fails
+            submit_button = None
 
-        # --- Disable button and show initial status --- BEFORE the main try block
+        # --- Disable button --- BEFORE the main try block
         if submit_button:
             submit_button.label = "Running AI..."
             submit_button.disabled = True
 
-        # Use the new helper for initial status
-        await self._update_ui_status("Agent starting...", state="thinking", show_spinner=True)
+        # --- Create Status Callback (Lambda) --- #
+        async def status_callback(message: str, state: str, show_spinner: bool):
+            await self._update_ui_status(message, state, show_spinner)
 
-        if not current_html:
-            logger.error(
-                f"Cannot run agent: HTML content missing in active tab ref {tab_ref.id}. Aborting."
-            )
+        # --- Create Highlighter Adapter --- #
+        highlighter_adapter = self._ChromeHighlighterAdapter(self._highlighter, tab_ref)
+
+        # --- Check for essential data before creating agent --- #
+        if current_html is None:
+            logger.error("Cannot run agent worker: HTML content is missing in tab ref.")
             await self._update_ui_status(
                 "Agent Error: Missing HTML", state="received_error", show_spinner=False
             )
-            # No need to hide badge explicitly, finally block handles button reset
+            # Need to re-enable button in this error case before returning
+            if submit_button:
+                submit_button.label = "Start AI selection"
+                submit_button.disabled = False
             return
-        if not current_url:
-            logger.error(f"Cannot run agent: URL missing in active tab ref {tab_ref.id}. Aborting.")
+        if current_url is None:
+            logger.error("Cannot run agent worker: URL is missing in tab ref.")
             await self._update_ui_status(
                 "Agent Error: Missing URL", state="received_error", show_spinner=False
             )
+            if submit_button:
+                submit_button.label = "Start AI selection"
+                submit_button.disabled = False
             return
 
-        tool_call_count = 0
-        logger.info(
-            f"Running SelectorAgent logic for target '{target_description}' on tab {tab_ref.id}"
-        )
-        base_url_for_agent = current_url
+        proposal: Optional[SelectorProposal] = None
         try:
-            tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
-
-            async def evaluate_selector_wrapper(selector: str, target_text_to_check: str, **kwargs):
-                nonlocal tool_call_count
-                tool_call_count += 1
-                status_prefix = f"Tool #{tool_call_count} |"
-                await self._update_ui_status(
-                    f"{status_prefix} evaluate_selector('{selector[:30]}...')",
-                    state="sending",
-                    show_spinner=True,
-                )
-                known_args_for_tool = {
-                    "anchor_selector": kwargs.get("anchor_selector"),
-                    "max_html_length": kwargs.get("max_html_length"),
-                    "max_matches_to_detail": kwargs.get("max_matches_to_detail", None),
-                    "return_matched_html": True,  # NOTE: hardcoded?
-                }
-                filtered_args_for_tool = {
-                    k: v for k, v in known_args_for_tool.items() if v is not None
-                }
-                result = await tools_instance.evaluate_selector(
-                    selector=selector,
-                    target_text_to_check=target_text_to_check,
-                    **filtered_args_for_tool,  # Pass only the filtered, known arguments
-                )
-                if result and result.element_count > 0 and not result.error:
-                    success = await self._highlighter.highlight(
-                        self._active_tab_ref, selector, color="yellow"
-                    )
-                    await self._update_ui_status(
-                        f"{status_prefix} evaluate_selector OK ({result.element_count} found)",
-                        state="received_success",
-                        show_spinner=True,
-                    )
-                    if success:
-                        pass
-                elif result and result.element_count == 0 and not result.error:
-                    await self._update_ui_status(
-                        f"{status_prefix} Selector found 0 elements",
-                        state="received_no_results",  # Orange: 0 found
-                        show_spinner=True,
-                    )
-                    # Still try to highlight (might clear previous) even if 0 found now
-                    await self._highlighter.highlight(
-                        self._active_tab_ref, selector, color="yellow"
-                    )
-                elif result and result.error:
-                    await self._update_ui_status(
-                        f"{status_prefix} evaluate_selector Error: {result.error[:50]}...",
-                        state="received_error",  # Salmon: Error
-                        show_spinner=True,
-                    )
-                # NOTE: Implicit else (result is None) - should not happen
-                return result
-
-            async def get_children_tags_wrapper(selector: str, **kwargs):
-                nonlocal tool_call_count
-                tool_call_count += 1
-                status_prefix = f"[Tool #{tool_call_count}]"
-                await self._update_ui_status(
-                    f"{status_prefix} get_children_tags('{selector[:30]}...')",
-                    state="sending",
-                    show_spinner=True,
-                )
-                known_args_for_tool = {
-                    "anchor_selector": kwargs.get("anchor_selector"),
-                }
-                filtered_args_for_tool = {
-                    k: v for k, v in known_args_for_tool.items() if v is not None
-                }
-                result = await tools_instance.get_children_tags(
-                    selector=selector, **filtered_args_for_tool
-                )
-                if result and result.parent_found and not result.error:
-                    success = await self._highlighter.highlight(
-                        self._active_tab_ref, selector, color="red"
-                    )
-                    await self._update_ui_status(
-                        f"{status_prefix} get_children_tags OK ({len(result.children_details or [])} children)",
-                        state="received_success",
-                        show_spinner=True,
-                    )
-                    if success:
-                        pass
-                elif result and not result.parent_found and not result.error:
-                    await self._update_ui_status(
-                        f"{status_prefix} Parent selector found 0 elements",
-                        state="received_no_results",
-                        show_spinner=True,
-                    )
-                    # NOTE: Still highlight the selector even if parent not found?
-                    await self._highlighter.highlight(self._active_tab_ref, selector, color="red")
-                elif result and result.error:
-                    await self._update_ui_status(
-                        f"{status_prefix} get_children_tags Error: {result.error[:50]}...",
-                        state="received_error",
-                        show_spinner=True,
-                    )
-                # NOTE: Implicit else (result is None)
-                return result
-
-            async def get_siblings_wrapper(selector: str, **kwargs):
-                nonlocal tool_call_count
-                tool_call_count += 1
-                status_prefix = f"[Tool #{tool_call_count}]"
-                await self._update_ui_status(
-                    f"{status_prefix} get_siblings('{selector[:30]}...')",
-                    state="sending",
-                    show_spinner=True,
-                )
-                known_args_for_tool = {
-                    "anchor_selector": kwargs.get("anchor_selector"),
-                }
-                filtered_args_for_tool = {
-                    k: v for k, v in known_args_for_tool.items() if v is not None
-                }
-                result = await tools_instance.get_siblings(
-                    selector=selector, **filtered_args_for_tool
-                )
-                if result and result.element_found and not result.error:
-                    success = await self._highlighter.highlight(
-                        self._active_tab_ref, selector, color="blue"
-                    )
-                    await self._update_ui_status(
-                        f"{status_prefix} get_siblings OK ({len(result.siblings or [])} siblings)",
-                        state="received_success",
-                        show_spinner=True,
-                    )
-                    if success:
-                        pass
-                elif result and not result.element_found and not result.error:
-                    await self._update_ui_status(
-                        f"{status_prefix} Element selector found 0 elements",
-                        state="received_no_results",
-                        show_spinner=True,
-                    )
-                    # NOTE: Still highlight the selector even if element not found?
-                    await self._highlighter.highlight(self._active_tab_ref, selector, color="blue")
-                elif result and result.error:
-                    await self._update_ui_status(
-                        f"{status_prefix} get_siblings Error: {result.error[:50]}...",
-                        state="received_error",
-                        show_spinner=True,
-                    )
-                # NOTE: Implicit else (result is None)
-                return result
-
-            async def extract_data_from_element_wrapper(selector: str, **kwargs):
-                nonlocal tool_call_count
-                tool_call_count += 1
-                status_prefix = f"[Tool #{tool_call_count}]"
-                await self._update_ui_status(
-                    f"{status_prefix} extract_data_from_element('{selector[:30]}...')",
-                    state="sending",
-                    show_spinner=True,
-                )
-                known_args_for_tool = {
-                    "attribute_to_extract": kwargs.get("attribute_to_extract"),
-                    "extract_text": kwargs.get(
-                        "extract_text", False
-                    ),  # NOTE: default false if LLM omits
-                    "anchor_selector": kwargs.get("anchor_selector"),
-                }
-                filtered_args_for_tool = {
-                    k: v for k, v in known_args_for_tool.items() if v is not None
-                }
-                # NOTE: No highlight here anymore, final highlight happens after agent completion.
-                result = await tools_instance.extract_data_from_element(
-                    selector=selector, **filtered_args_for_tool
-                )
-                # Check for error first. If no error, extraction was attempted (element likely found).
-                if result and not result.error:
-                    extracted_count = sum(
-                        1
-                        for val in [
-                            result.extracted_text,
-                            result.extracted_attribute_value,
-                            result.extracted_markdown,
-                            result.extracted_html,
-                        ]
-                        if val is not None
-                    )
-                    if extracted_count > 0:
-                        await self._update_ui_status(
-                            f"{status_prefix} extract_data OK ({extracted_count} fields populated)",
-                            state="received_success",
-                            show_spinner=True,
-                        )
-                    else:
-                        await self._update_ui_status(
-                            f"{status_prefix} extract_data OK (No specific data extracted)",
-                            state="received_no_results",
-                            show_spinner=True,
-                        )
-                elif result and result.error:
-                    await self._update_ui_status(
-                        f"{status_prefix} extract_data Error: {result.error[:50]}...",
-                        state="received_error",
-                        show_spinner=True,
-                    )
-                # NOTE: Implicit else (result is None)
-                return result
-
-            wrapped_tools = [
-                Tool(evaluate_selector_wrapper),
-                Tool(get_children_tags_wrapper),
-                Tool(get_siblings_wrapper),
-                Tool(extract_data_from_element_wrapper),
-            ]
-            system_prompt = SELECTOR_PROMPT_BASE
-            if current_dom_string:
-                system_prompt += SELECTOR_PROMPT_DOM_TEMPLATE.format(
-                    dom_representation=current_dom_string
-                )
-            else:
-                logger.warning(f"Proceeding without DOM string representation for tab {tab_ref.id}")
-
-            await self._update_ui_status("Thinking...", state="thinking", show_spinner=True)
-            agent = Agent(
-                self._model_config.agent_model,
-                output_type=SelectorProposal,
-                tools=wrapped_tools,
-                system_prompt=system_prompt,
+            # --- Instantiate and run the agent --- #
+            agent = SelectorAgent(
+                html_content=current_html,
+                dom_string=current_dom_string,
+                base_url=current_url,
+                model_cfg=self._model_config,
+                status_cb=status_callback,
+                highlighter=highlighter_adapter,
+                debug_dump=self._debug_write_selection,
             )
-            query_parts = [
-                f"Generate the most STABLE CSS selector to target '{target_description}'.",
-                "Prioritize stable attributes and classes.",
-                "CRITICAL: Your FINAL output MUST be a single JSON object conforming EXACTLY to the SelectorProposal schema. "
-                "This JSON object MUST include values for the fields: 'proposed_selector' (string) and 'reasoning' (string). "
-                "DO NOT include other fields like 'final_verification' or 'extraction_result' in the final JSON output.",
-            ]
-            query = " ".join(query_parts)
-            agent_input: Any = query
-            agent_run_result = await agent.run(agent_input)
 
-            # --- Status update after agent run ---
-            if isinstance(agent_run_result.output, SelectorProposal):
-                proposal = agent_run_result.output
-                logger.info(
-                    f"FINISHED. Proposal: {proposal.proposed_selector}\nREASONING: {proposal.reasoning}"
-                )
+            logger.info(
+                f"Running SelectorAgent for target '{target_description}' on tab {tab_ref.id}"
+            )
+            proposal = await agent.run(target_description)
+
+            # --- Handle Successful Proposal --- #
+            if proposal:
+                logger.info(f"Worker FINISHED. Proposal: {proposal.proposed_selector}")
                 await self._update_ui_status(
                     "Done",
                     state="final_success",
@@ -627,58 +406,41 @@ class SelectronApp(App[None]):
                 )
                 self._last_proposed_selector = proposal.proposed_selector
 
-                if self._debug_write_selection:  # NOTE: for codegen dev script
-                    await save_debug_elements(
-                        tools_instance=tools_instance,
-                        selector=proposal.proposed_selector,
-                        target_description=target_description,
-                        url=current_url,
-                        reasoning=proposal.reasoning,
-                    )
-
+                # Final highlight with the concrete highlighter
                 success = await self._highlighter.highlight(
                     self._active_tab_ref, proposal.proposed_selector, color="lime"
                 )
-                # self.app.call_later(self._delayed_hide_status) # NOTE: maybe hide the succdone badge?
-
-                if success:
-                    pass
-                elif not success:
+                if not success:
                     logger.warning(
                         f"Final highlight failed for selector: '{proposal.proposed_selector}'"
                     )
-            else:
-                logger.error(
-                    f"Agent returned unexpected output type: {type(agent_run_result.output)}"
-                )
-                await self._update_ui_status(
-                    "Agent Error: Unexpected output type",
-                    state="received_error",
-                    show_spinner=False,
-                )
-                self._last_proposed_selector = None
-                self.call_later(self._clear_table_view)
-                self.app.call_later(self._delayed_hide_status)  # Hide error badge too
-        except Exception as e:
-            logger.error(
-                f"Error running SelectorAgent for target '{target_description}': {e}", exc_info=True
-            )
-            if tab_ref:
-                error_msg = f"Agent Error: {type(e).__name__}"
-                await self._update_ui_status(error_msg, state="received_error", show_spinner=False)
-                if self.app:
-                    self.app.call_later(self._delayed_hide_status)
+                # Schedule badge hide after success
+                self.app.call_later(self._delayed_hide_status)
+
+        except SelectorAgentError as agent_err:
+            # Agent already logged the specific error and updated status via callback
+            logger.error(f"SelectorAgent failed: {agent_err}")
             self._last_proposed_selector = None
             self.call_later(self._clear_table_view)
+            self.app.call_later(self._delayed_hide_status)  # Schedule hide for error badge too
+        except Exception as e:
+            # Catch unexpected errors *outside* the agent's known failure modes
+            logger.error(
+                f"Unexpected error in worker task for target '{target_description}': {e}",
+                exc_info=True,
+            )
+            error_msg = f"Worker Error: {type(e).__name__}"
+            await self._update_ui_status(error_msg, state="received_error", show_spinner=False)
+            self._last_proposed_selector = None
+            self.call_later(self._clear_table_view)
+            self.app.call_later(self._delayed_hide_status)
         finally:
+            # --- Re-enable button --- #
             if submit_button:
                 submit_button.label = "Start AI selection"
                 submit_button.disabled = False
-            # NOTE: Ensure the badge is eventually hidden if not handled by success/error paths with delays
-            # This is a fallback in case the worker is cancelled or ends unexpectedly
-            if self._active_tab_ref:
-                # Let the delayed hides handle it. If cancelled, action_quit handles it.
-                pass
+            # Note: Badge hiding is handled by success/error paths scheduling _delayed_hide_status
+            # Cancellation is handled by action_quit
 
     async def trigger_rehighlight(self):
         # Check if there's an active tab and if the highlighter state indicates highlights are active
@@ -702,9 +464,13 @@ class SelectronApp(App[None]):
                 current_value = event.value.strip()
                 if self._active_tab_ref:
                     if current_value:
-                        await self._update_ui_status(current_value, state="idle")
-                    # else: # NOTE: maybe handle if input is cleared
-                    #     await self._update_ui_status("No active tab (interact to activate)", state="idle")
+                        # Use the concrete highlighter for idle badge updates
+                        await self._highlighter.show_agent_status(
+                            self._active_tab_ref, current_value, state="idle", show_spinner=False
+                        )
+                    # Optionally handle clearing the input (e.g., hide badge or show default)
+                    # else:
+                    #    await self._highlighter.hide_agent_status(self._active_tab_ref)
                 self._input_debounce_timer = None
 
             self._input_debounce_timer = self.set_timer(
@@ -716,9 +482,34 @@ class SelectronApp(App[None]):
         await asyncio.sleep(3.0)
         if self._active_tab_ref:
             logger.debug("Hiding agent status badge after delay.")
+            # Use the concrete highlighter
             await self._highlighter.hide_agent_status(self._active_tab_ref)
         try:
             status_label = self.query_one("#agent-status-label", Label)
             status_label.update("")
         except Exception as e:
             logger.warning(f"Failed to reset status label after delay: {e}")
+
+    # --- Highlighter Adapter --- #
+    class _ChromeHighlighterAdapter(HighlighterProtocol):
+        """Adapts ChromeHighlighter to the Highlighter protocol for a specific tab."""
+
+        def __init__(self, chrome_highlighter: ChromeHighlighter, tab_ref: TabReference):
+            self._highlighter = chrome_highlighter
+            self._tab_ref = tab_ref
+
+        async def highlight(self, selector: str, color: str) -> bool:
+            # Pass executor=None, let the highlighter manage it
+            return await self._highlighter.highlight(self._tab_ref, selector, color)
+
+        async def clear(self) -> None:
+            # Pass executor=None
+            await self._highlighter.clear(self._tab_ref)
+
+        async def show_agent_status(self, text: str, state: str, show_spinner: bool) -> None:
+            # Pass executor=None
+            await self._highlighter.show_agent_status(self._tab_ref, text, state, show_spinner)
+
+        async def hide_agent_status(self) -> None:
+            # Pass executor=None
+            await self._highlighter.hide_agent_status(self._tab_ref)

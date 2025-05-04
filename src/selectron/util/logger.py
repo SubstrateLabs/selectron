@@ -32,7 +32,7 @@ def get_logger(name: str) -> logging.Logger:
         root_logger.addHandler(_file_handler)
 
         # stream handler (for terminal visibility, using rich)
-        stream_handler = RichHandler(level=logging.INFO, rich_tracebacks=True, show_path=False)
+        stream_handler = RichHandler(level=logging.DEBUG, rich_tracebacks=True, show_path=False)
         root_logger.addHandler(stream_handler)
 
         # Set library levels

@@ -10,8 +10,10 @@ OPENAI_GPT_4_1_NANO = "openai:gpt-4.1-nano"
 OPENAI_GPT_4_1 = "openai:gpt-4.1"
 ANTHROPIC_ANALYZE_MODEL = CLAUDE_3_5_SONNET
 ANTHROPIC_AGENT_MODEL = CLAUDE_3_7_SONNET
+ANTHROPIC_CODEGEN_MODEL = CLAUDE_3_7_SONNET
 OPENAI_ANALYZE_MODEL = OPENAI_GPT_4_1_NANO
 OPENAI_AGENT_MODEL = OPENAI_GPT_4_1
+OPENAI_CODEGEN_MODEL = OPENAI_GPT_4_1_NANO
 
 
 class ModelConfig:
@@ -37,9 +39,11 @@ class ModelConfig:
         if self.provider == "anthropic":
             self._propose_model = ANTHROPIC_ANALYZE_MODEL
             self._agent_model = ANTHROPIC_AGENT_MODEL
+            self._codegen_model = ANTHROPIC_CODEGEN_MODEL
         elif self.provider == "openai":
             self._propose_model = OPENAI_ANALYZE_MODEL
             self._agent_model = OPENAI_AGENT_MODEL
+            self._codegen_model = OPENAI_CODEGEN_MODEL
 
     def _determine_provider(self) -> Optional[Provider]:
         if self.anthropic_key:
@@ -56,6 +60,10 @@ class ModelConfig:
     @property
     def agent_model(self) -> str:
         return self._agent_model
+
+    @property
+    def codegen_model(self) -> str:
+        return self._codegen_model
 
     @property
     def api_key(self) -> str:

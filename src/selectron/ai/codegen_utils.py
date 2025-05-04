@@ -104,31 +104,50 @@ def validate_text_representation(
             # If text extraction or sanity check fails, skip validation for this sample
             continue
 
-        # --- This check is now less necessary due to explicit continues --- #
-        # if not parsing_succeeded or not plain_text:
-        #      continue
-        # ----------------------------------------------------------------- #
-
+        # --- BEGIN REVISED CHANGE: Check ALL string values for match ---
         plain_tokens = set(plain_text.split())
         has_match = False
 
         for val in output_dict.values():
+            # Flatten value in case it's a list/dict containing strings
             for s in _flatten(val):
-                s_low = s.lower().strip()
+                s_low = str(s).lower().strip()  # Ensure string and normalize
                 if not s_low:
                     continue
-                # Direct substring
+
+                # --- BEGIN CHANGE: Add minimum length check & adjust threshold ---
+                min_match_len = 25
+                overlap_threshold = 0.6
+
+                # Only proceed if the extracted string is reasonably long
+                if len(s_low) < min_match_len:
+                    continue
+                # --- END CHANGE ---
+
+                # Check 1: Direct Substring
                 if s_low in plain_text or plain_text in s_low:
                     has_match = True
-                    break
-                # Token overlap
+                    break  # Found a match for this output dict
+
+                # Check 2: Token Overlap
                 s_tokens = set(s_low.split())
-                if s_tokens and len(s_tokens & plain_tokens) / len(s_tokens) >= 0.5:
+                # Ensure s_tokens is not empty before division
+                # --- BEGIN CHANGE: Use new threshold ---
+                if (
+                    plain_tokens
+                    and s_tokens
+                    and (len(s_tokens & plain_tokens) / len(s_tokens)) >= overlap_threshold
+                ):
+                    # --- END CHANGE ---
                     has_match = True
-                    break
+                    break  # Found a match for this output dict
+
             if has_match:
-                break
-        # Only flag if parsing succeeded AND no match was found
+                break  # Exit outer loop once a match is found for the sample
+
+        # --- END REVISED CHANGE ---
+
+        # Only flag if parsing succeeded AND no match was found across ALL values
         if parsing_succeeded and not has_match:
             samples_without_text_match.append(idx)
 
@@ -136,7 +155,7 @@ def validate_text_representation(
         feedback.append(
             "Outputs for samples "
             + ", ".join(map(str, samples_without_text_match))
-            + " lack any value approximating the element's visible text. Consider adding a text-rich field (e.g., title/description)."
+            + " did not contain any single string value that is both reasonably long (>=25 chars) and sufficiently similar (>=60% token overlap or substring) to the element's overall visible text. Ensure the main content is extracted cleanly into an appropriate field."
         )
     return feedback
 
@@ -214,6 +233,101 @@ def validate_cross_key_duplicates(outputs: List[Dict[str, Any]], keys: Set[str])
     if avatar_in_images:
         feedback.append(
             "Redundancy detected: The value of `author_avatar_url` was also found as a `src` within the `images` list. Ensure `images` excludes the author avatar."
+        )
+
+    return feedback
+
+
+def _check_word_repetition(text: str, sequence_len: int = 7, min_words: int = 14) -> bool:
+    """Check if a string contains a repeated sequence of `sequence_len` words.
+
+    Args:
+        text: The input string.
+        sequence_len: The number of consecutive words to check for repetition.
+        min_words: The minimum number of words the text must have to be checked.
+
+    Returns:
+        True if a repeated sequence is found, False otherwise.
+    """
+    words = text.lower().split()
+    if len(words) < min_words:
+        return False  # Not enough words for meaningful repetition check
+
+    sequences = set()
+    for i in range(len(words) - sequence_len + 1):
+        seq = tuple(words[i : i + sequence_len])
+        if seq in sequences:
+            return True  # Found a repeated sequence
+        sequences.add(seq)
+
+    return False
+
+
+def validate_internal_repetition(outputs: List[Dict[str, Any]], keys: Set[str]) -> List[str]:
+    """Check string values for significant internal word sequence repetition.
+
+    Returns a list of feedback strings for keys with detected repetition.
+    """
+    feedback: List[str] = []
+    repetitive_keys: Set[str] = set()
+
+    for output_dict in outputs:
+        for key in keys:
+            if key in repetitive_keys:
+                continue  # Already flagged this key
+
+            value = output_dict.get(key)
+            if isinstance(value, str):
+                if _check_word_repetition(value):
+                    repetitive_keys.add(key)
+                    # No need to check other outputs for this key once repetition is found
+                    # break # Optional: break inner loop if perf is critical
+
+    for key in repetitive_keys:
+        feedback.append(
+            f"Key '{key}' appears to contain significant internal repetition (sequence of words repeated) in at least one result. Check extraction logic."
+        )
+
+    return feedback
+
+
+def validate_naive_text_match(outputs: List[Dict[str, Any]], html_samples: List[str]) -> List[str]:
+    """Check if any extracted string value is identical to the naive full text extraction.
+
+    This helps detect cases where the agent might have just used `get_text()`
+    on a large container instead of extracting specific content.
+
+    Returns a list of feedback strings for keys matching the naive text.
+    """
+    feedback: List[str] = []
+    naive_match_keys: Set[str] = set()
+
+    for idx, output_dict in enumerate(outputs):
+        try:
+            soup = BeautifulSoup(html_samples[idx], "html.parser")
+            # Ensure soup parsing didn't completely fail
+            if not soup.find(True):
+                continue
+            naive_text = soup.get_text(separator=" ", strip=True)
+            if not naive_text:  # Skip if the element genuinely has no text
+                continue
+        except Exception:
+            continue  # Skip if HTML parsing fails
+
+        for key, value in output_dict.items():
+            if key in naive_match_keys:
+                continue  # Already flagged this key
+
+            # Only check string values
+            if isinstance(value, str):
+                # Use exact match to detect the most naive cases
+                if value.strip() == naive_text:
+                    naive_match_keys.add(key)
+                    # break # Optional optimization
+
+    for key in naive_match_keys:
+        feedback.append(
+            f"Key '{key}' in at least one result is identical to the element's full naive text (`get_text()`). Refine extraction to be more specific and exclude metadata/irrelevant text."
         )
 
     return feedback

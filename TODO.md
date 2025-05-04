@@ -1,8 +1,5 @@
 - generate python
-  - use model config
-  - html sampling util
-  - quality check util
-  - validation util
+  - code validation util (strip markdown)
   - extract prompt
 - save results somewhere
 - selector/parser registry

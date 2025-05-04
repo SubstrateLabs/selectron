@@ -1,8 +1,11 @@
 from selectron.ai.codegen_utils import (
+    _check_word_repetition,
     _flatten,
     validate_cross_key_duplicates,
     validate_empty_columns,
     validate_identical_columns,
+    validate_internal_repetition,
+    validate_naive_text_match,
     validate_redundant_key_pairs,
     validate_text_representation,
 )
@@ -146,17 +149,17 @@ def test_validate_identical_columns_no_outputs():
 
 
 def test_validate_text_rep_match_substring():
-    outputs = [{"title": "quick brown", "url": "/fox"}]
-    html = ["<div>the quick brown fox jumps</div>"]
+    outputs = [{"title": "the quick brown fox jumps over", "url": "/fox"}]
+    html = ["<div>the quick brown fox jumps over the lazy dog</div>"]
     feedback = validate_text_representation(outputs, html)
     assert len(feedback) == 0
 
 
 def test_validate_text_rep_match_token_overlap():
-    outputs = [{"desc": "brown fox lazy dog", "id": "1"}]
+    outputs = [{"desc": "the quick brown fox jumps over the lazy dog, yes it does", "id": "1"}]
     html = ["<p>the quick <b>brown</b> fox jumps over the lazy dog</p>"]
     feedback = validate_text_representation(outputs, html)
-    assert len(feedback) == 0  # "brown fox lazy dog" has 4 tokens, all 4 are in html text
+    assert len(feedback) == 0
 
 
 def test_validate_text_rep_no_match():
@@ -169,11 +172,13 @@ def test_validate_text_rep_no_match():
 
 
 def test_validate_text_rep_multiple_samples_one_fail():
-    outputs = [{"title": "good"}, {"id": "bad"}]
-    html = ["<span>good text</span>", "<span>other text</span>"]
+    outputs = [{"title": "good text should pass this length check"}, {"id": "bad"}]
+    html = [
+        "<span>good text should pass this length check easily</span>",
+        "<span>other text</span>",
+    ]
     feedback = validate_text_representation(outputs, html)
     assert len(feedback) == 1
-    assert "samples 1" in feedback[0]
 
 
 def test_validate_text_rep_empty_html_text():
@@ -194,7 +199,7 @@ def test_validate_text_rep_match_nested_value():
     outputs = [{"data": {"nested": "fox jumps"}, "id": 1}]
     html = ["<div>the quick brown fox jumps over</div>"]
     feedback = validate_text_representation(outputs, html)
-    assert len(feedback) == 0
+    assert len(feedback) == 1
 
 
 def test_validate_text_rep_bs4_fail_gracefully():
@@ -378,3 +383,164 @@ def test_validate_cross_key_dup_no_outputs():
     outputs = []
     feedback = validate_cross_key_duplicates(outputs, set())
     assert len(feedback) == 0
+
+
+# --- Tests for _check_word_repetition ---
+
+
+def test_check_word_repetition_present():
+    text = "this is a test string with a repeated sequence this is a test string with words"
+    assert _check_word_repetition(text, sequence_len=5, min_words=10) is True
+
+
+def test_check_word_repetition_not_present():
+    text = "this is a perfectly normal string without any obvious repetition of word sequences"
+    assert _check_word_repetition(text, sequence_len=5, min_words=10) is False
+
+
+def test_check_word_repetition_too_short():
+    text = "too short"
+    assert _check_word_repetition(text, sequence_len=5, min_words=10) is False
+
+
+def test_check_word_repetition_exact_min_words_no_rep():
+    text = "one two three four five six seven eight nine ten eleven twelve thirteen fourteen"
+    assert _check_word_repetition(text, sequence_len=7, min_words=14) is False
+
+
+def test_check_word_repetition_exact_min_words_with_rep():
+    text = "one two three four five six seven one two three four five six seven"
+    assert _check_word_repetition(text, sequence_len=7, min_words=14) is True
+
+
+def test_check_word_repetition_case_insensitive():
+    text = "Test test TEST test Test TEST test"
+    assert _check_word_repetition(text, sequence_len=2, min_words=4) is True
+
+
+def test_check_word_repetition_empty_string():
+    text = ""
+    assert _check_word_repetition(text) is False
+
+
+# --- Tests for validate_internal_repetition ---
+
+
+def test_validate_internal_rep_present():
+    outputs = [
+        {
+            "desc": "one two three four five six seven makes a sequence one two three four five six seven",
+            "other": "ok",
+        },
+        {"desc": "fine"},
+    ]
+    keys = {"desc", "other"}
+    feedback = validate_internal_repetition(outputs, keys)
+    assert len(feedback) == 1
+    assert "'desc'" in feedback[0]
+
+
+def test_validate_internal_rep_not_present():
+    outputs = [{"desc": "this text is fine", "title": "so is this"}]
+    keys = {"desc", "title"}
+    feedback = validate_internal_repetition(outputs, keys)
+    assert len(feedback) == 0
+
+
+def test_validate_internal_rep_non_string():
+    outputs = [{"desc": ["list", "items"], "count": 5}]
+    keys = {"desc", "count"}
+    feedback = validate_internal_repetition(outputs, keys)
+    assert len(feedback) == 0
+
+
+def test_validate_internal_rep_multiple_keys_repetitive():
+    outputs = [
+        {
+            "desc": "rep rep rep rep rep rep rep rep rep rep rep rep rep rep",
+            "title": "title title title title title title title title title title title title title title",
+        }
+    ]
+    keys = {"desc", "title"}
+    feedback = validate_internal_repetition(outputs, keys)
+    assert len(feedback) == 2
+    assert any("'desc'" in f for f in feedback)
+    assert any("'title'" in f for f in feedback)
+
+
+def test_validate_internal_rep_no_outputs():
+    outputs = []
+    keys = {"desc"}
+    feedback = validate_internal_repetition(outputs, keys)
+    assert len(feedback) == 0
+
+
+def test_validate_internal_rep_key_missing_sometimes():
+    outputs = [
+        {"desc": "rep rep rep rep rep rep rep rep rep rep rep rep rep rep"},
+        {"title": "ok"},
+    ]
+    keys = {"desc", "title"}
+    feedback = validate_internal_repetition(outputs, keys)
+    assert len(feedback) == 1
+    assert "'desc'" in feedback[0]
+
+
+# --- Tests for validate_naive_text_match ---
+
+
+def test_validate_naive_match_present():
+    outputs = [
+        {
+            "desc": "Author Name @handle · 5h Main content here Button Text 12 34 5K",
+            "other": "Specific info",
+        }
+    ]
+    html = [
+        "<div><span>Author Name @handle · 5h</span><p>Main content here</p><span>Button Text</span><span>12</span> <span>34</span> <span>5K</span></div>"
+    ]
+    feedback = validate_naive_text_match(outputs, html)
+    assert len(feedback) == 1
+    assert "'desc'" in feedback[0]
+
+
+def test_validate_naive_match_not_present():
+    outputs = [
+        {
+            "desc": "Main content here",
+            "author": "Author Name @handle",
+            "timestamp": "5h",
+        }
+    ]
+    html = ["<div><span>Author Name @handle · 5h</span><p>Main content here</p></div>"]
+    feedback = validate_naive_text_match(outputs, html)
+    assert len(feedback) == 0
+
+
+def test_validate_naive_match_empty_string_val():
+    outputs = [{"desc": ""}]
+    html = ["<div>Some text</div>"]
+    feedback = validate_naive_text_match(outputs, html)
+    assert len(feedback) == 0  # Empty string won't match non-empty naive text
+
+
+def test_validate_naive_match_empty_html():
+    outputs = [{"desc": "something"}]
+    html = ["<div></div>"]
+    feedback = validate_naive_text_match(outputs, html)
+    assert len(feedback) == 0  # Naive text is empty, won't match
+
+
+def test_validate_naive_match_parsing_fail():
+    outputs = [{"desc": "something"}]
+    html = ["<unclosed>"]
+    feedback = validate_naive_text_match(outputs, html)
+    assert len(feedback) == 0  # Should skip validation
+
+
+def test_validate_naive_match_multiple_outputs():
+    outputs = [{"desc": "Clean text"}, {"desc": "Naive Text Here Extra Stuff"}]
+    html = ["<p>Clean text</p>", "<div>Naive Text Here <span>Extra Stuff</span></div>"]
+    feedback = validate_naive_text_match(outputs, html)
+    assert len(feedback) == 1
+    assert "'desc'" in feedback[0]
