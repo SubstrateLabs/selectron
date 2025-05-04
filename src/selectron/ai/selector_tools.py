@@ -53,7 +53,7 @@ class SelectorTools:
         target_text_to_check: str,
         anchor_selector: Optional[str] = None,
         max_html_length: Optional[int] = None,
-        max_matches_to_detail: int = 7,
+        max_matches_to_detail: Optional[int] = None,
         return_matched_html: bool = False,
     ) -> SelectorEvaluationResult:
         """Evaluates a CSS selector, checks for text, validates size, and provides rich detail on multiple matches.
@@ -63,7 +63,7 @@ class SelectorTools:
             target_text_to_check: Text content to check for within the matched elements.
             anchor_selector: Optional selector to narrow the search scope.
             max_html_length: Optional max length for single element HTML validation.
-            max_matches_to_detail: Max number of matches to include detailed info for.
+            max_matches_to_detail: Max number of matches to include detailed info for. If None, details for ALL matches are included.
             return_matched_html: Whether to return the outer HTML of matched elements.
 
         Returns:
@@ -139,7 +139,7 @@ class SelectorTools:
             count = len(elements)
             match_details: list[MatchDetail] = []
 
-            # --- Populate Match Details (Up to max_matches_to_detail) --- #
+            # --- Populate Match Details (Up to max_matches_to_detail or all if None) --- #
             for i, el in enumerate(elements):
                 if not isinstance(el, Tag):
                     continue  # Skip non-Tag elements
@@ -156,8 +156,8 @@ class SelectorTools:
                 if target_text_to_check and target_text_to_check in el.get_text(strip=True):
                     text_found_flag = True
 
-                # Get details only for the first few matches
-                if i < max_matches_to_detail:
+                # Get details only if no limit or within limit
+                if max_matches_to_detail is None or i < max_matches_to_detail:
                     attrs = {
                         k: " ".join(v) if isinstance(v, list) else v for k, v in el.attrs.items()
                     }

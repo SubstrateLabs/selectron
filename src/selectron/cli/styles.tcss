@@ -31,13 +31,30 @@ Screen {
     border-top: $foreground round;
 }
 
+/* Style for button and status container */
+.button-status-row {
+    layout: horizontal;
+    height: auto;
+    width: 100%;
+    margin-bottom: 1;
+}
+
 /* Style for the submit button */
 #submit-button {
     min-width: 10;
     background: $background;
     align: center middle;
     color: $primary;
-    margin-bottom: 1;
+}
+
+/* Style for the agent status label */
+#agent-status-label {
+    color: $success;
+    margin-left: 1;
+    min-width: 20;
+    height: 1;
+    align: left middle;
+    padding-left: 1;
 }
 
 /* Style for the input field */

@@ -128,8 +128,9 @@ class MonitorEventHandler:
                 and self._app._active_tab_ref
                 and self._app._propose_selection_done_for_tab != self._app._active_tab_ref.id
             ):
-                await self._highlighter.show_agent_status(
-                    self._app._active_tab_ref, "Proposing selection...", state="thinking"
+                # Use app's _update_ui_status helper instead of direct highlighter call
+                await self._app._update_ui_status(
+                    "Proposing selection...", state="thinking", show_spinner=True
                 )
 
                 if (
@@ -156,10 +157,10 @@ class MonitorEventHandler:
                                     if desc and self._app._active_tab_ref:
                                         # Use app's call_later
                                         self._app.call_later(
-                                            self._highlighter.show_agent_status,
-                                            self._app._active_tab_ref,
+                                            self._app._update_ui_status,
                                             desc,
-                                            state="idle",
+                                            "idle",
+                                            False,  # No spinner for idle state
                                         )
                                 except Exception as e:
                                     logger.error(f"Error updating input from proposal: {e}")
@@ -169,10 +170,10 @@ class MonitorEventHandler:
 
                             if self._app._active_tab_ref:
                                 self._app.call_later(
-                                    self._highlighter.show_agent_status,
-                                    self._app._active_tab_ref,
+                                    self._app._update_ui_status,
                                     desc,
-                                    state="idle",
+                                    "idle",
+                                    False,  # No spinner for idle state
                                 )
 
                     except Exception as e:

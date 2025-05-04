@@ -35,6 +35,7 @@ from selectron.chrome.types import TabReference
 from selectron.cli.home_panel import ChromeStatus, HomePanel
 from selectron.cli.log_panel import LogPanel
 from selectron.cli.monitor_handler import MonitorEventHandler
+from selectron.util.debug_helpers import save_debug_elements
 from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
 from selectron.util.model_config import ModelConfig
@@ -47,6 +48,8 @@ DEFAULT_THEME = THEME_LIGHT
 
 
 class SelectronApp(App[None]):
+    # TODO: Make this configurable (e.g., via CLI flag or env var)
+    _debug_write_html: bool = True  # Flag to enable debug output
     CSS_PATH = "styles.tcss"
     BINDINGS = [
         Binding(key="ctrl+c", action="quit", description="⣏ Quit ⣹", show=False),
@@ -80,12 +83,14 @@ class SelectronApp(App[None]):
             with TabbedContent(initial="home-tab"):
                 with TabPane("⣏ Home ⣹", id="home-tab"):
                     yield HomePanel(id="home-panel-widget")
-                with TabPane("⣏ Logs ⣹", id="logs-tab"):
-                    yield LogPanel(log_file_path=LOG_PATH, id="log-panel-widget")
                 with TabPane("⣏ Parsed Data ⣹", id="table-tab"):
                     yield DataTable(id="data-table")
+                with TabPane("⣏ Logs ⣹", id="logs-tab"):
+                    yield LogPanel(log_file_path=LOG_PATH, id="log-panel-widget")
         with Container(classes="input-bar"):
-            yield Button("Start AI selection", id="submit-button")
+            with Container(id="button-row", classes="button-status-row"):
+                yield Button("Start AI selection", id="submit-button")
+                yield Label("", id="agent-status-label")  # New agent status label
             yield Input(placeholder="Enter prompt (or let AI propose...)", id="prompt-input")
             yield Label("No active tab (interact to activate)", id="active-tab-url-label")
         yield Footer()
@@ -238,10 +243,17 @@ class SelectronApp(App[None]):
                 logger.warning(
                     "Submit attempted but monitor not connected or no active tab identified."
                 )
+                # Optionally update UI status here if desired
+                # await self._update_ui_status("Error: Not connected", state="received_error")
                 return
+
+            # Update UI status immediately to clear any debounce text
+            await self._update_ui_status("Preparing agent...", state="thinking")
+
             if self._agent_worker and self._agent_worker.is_running:
                 logger.info("Cancelling previous agent worker.")
                 self._agent_worker.cancel()
+
             self._agent_worker = self.run_worker(
                 self._run_agent_and_highlight(target_description),
                 exclusive=True,
@@ -272,7 +284,37 @@ class SelectronApp(App[None]):
             url_label.update("No active tab (interact to activate)")
         except Exception as label_err:
             logger.warning(f"Failed to reset URL label on quit: {label_err}")
+        # Reset button state on quit
+        try:
+            submit_button = self.query_one("#submit-button", Button)
+            submit_button.label = "Start AI selection"
+            submit_button.disabled = False
+        except Exception as button_err:
+            logger.warning(f"Failed to reset submit button on quit: {button_err}")
+
         self.app.exit()
+
+    async def _update_ui_status(self, message: str, state: str, show_spinner: bool = False) -> None:
+        """Helper to update both the terminal label and the browser badge."""
+        try:
+            # Update terminal AGENT STATUS label
+            status_label = self.query_one("#agent-status-label", Label)
+            status_label.update(message)
+        except Exception as e:
+            logger.error(f"Failed to update status label: {e}", exc_info=True)
+
+        # Update browser badge (if active tab exists)
+        if self._active_tab_ref:
+            try:
+                await self._highlighter.show_agent_status(
+                    self._active_tab_ref, message, state=state, show_spinner=show_spinner
+                )
+            except Exception as e:
+                logger.error(f"Failed to show agent status badge: {e}", exc_info=True)
+        else:
+            logger.debug(
+                f"Skipping browser badge update for status '{message}' (no active tab ref)."
+            )
 
     def action_open_log_file(self) -> None:
         try:
@@ -290,6 +332,9 @@ class SelectronApp(App[None]):
     async def _run_agent_and_highlight(self, target_description: str) -> None:
         if not self._active_tab_ref or not self._active_tab_ref.html:
             logger.warning("Cannot run agent: No active tab reference with html.")
+            await self._update_ui_status(
+                "Agent Error: Missing HTML", state="received_error", show_spinner=False
+            )
             return
 
         tab_ref = self._active_tab_ref
@@ -297,15 +342,36 @@ class SelectronApp(App[None]):
         current_dom_string = self._active_tab_dom_string
         current_url = tab_ref.url
 
+        # --- Get UI elements --- Needed for status updates and button disabling
+        try:
+            submit_button = self.query_one("#submit-button", Button)
+        except Exception as e:
+            logger.error(f"Failed to query submit button: {e}", exc_info=True)
+            submit_button = None  # Proceed without button control if query fails
+
+        # --- Disable button and show initial status --- BEFORE the main try block
+        if submit_button:
+            submit_button.label = "Running AI..."
+            submit_button.disabled = True
+
+        # Use the new helper for initial status
+        await self._update_ui_status("Agent starting...", state="thinking", show_spinner=True)
+
         if not current_html:
             logger.error(
                 f"Cannot run agent: HTML content missing in active tab ref {tab_ref.id}. Aborting."
             )
-            await self._highlighter.hide_agent_status(tab_ref)  # Hide badge on abort
+            await self._update_ui_status(
+                "Agent Error: Missing HTML", state="received_error", show_spinner=False
+            )
+            # No need to hide badge explicitly, finally block handles button reset
             return
         if not current_url:
             logger.error(f"Cannot run agent: URL missing in active tab ref {tab_ref.id}. Aborting.")
-            await self._highlighter.hide_agent_status(tab_ref)  # Hide badge on abort
+            await self._update_ui_status(
+                "Agent Error: Missing URL", state="received_error", show_spinner=False
+            )
+            # No need to hide badge explicitly, finally block handles button reset
             return
 
         tool_call_count = 0  # Initialize tool call counter
@@ -315,14 +381,7 @@ class SelectronApp(App[None]):
         base_url_for_agent = current_url
 
         try:
-            # --- Initial status update ---
-            await self._highlighter.show_agent_status(
-                tab_ref, "Agent starting...", state="thinking", show_spinner=True
-            )
-            # Use the same executor for subsequent operations if created by highlighter
-            # Note: This assumes show_agent_status might create one we can reuse.
-            # A more robust way might be to explicitly create one here and pass it.
-            # Let's assume _execute_js_on_tab handles creation/reuse implicitly for now.
+            # --- Removed initial status update here, moved above try block ---
 
             tools_instance = SelectorTools(html_content=current_html, base_url=base_url_for_agent)
 
@@ -330,8 +389,7 @@ class SelectronApp(App[None]):
                 nonlocal tool_call_count
                 tool_call_count += 1
                 status_prefix = f"Tool #{tool_call_count} |"
-                await self._highlighter.show_agent_status(
-                    tab_ref,
+                await self._update_ui_status(
                     f"{status_prefix} evaluate_selector('{selector[:30]}...')",
                     state="sending",
                     show_spinner=True,
@@ -341,7 +399,7 @@ class SelectronApp(App[None]):
                     "anchor_selector": kwargs.get("anchor_selector"),
                     "max_html_length": kwargs.get("max_html_length"),
                     "max_matches_to_detail": kwargs.get(
-                        "max_matches_to_detail", 7
+                        "max_matches_to_detail", None
                     ),  # Use default if LLM omits
                     # Hardcode return_matched_html as True based on wrapper logic
                     "return_matched_html": True,
@@ -360,8 +418,7 @@ class SelectronApp(App[None]):
                     success = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="yellow"
                     )
-                    await self._highlighter.show_agent_status(
-                        tab_ref,
+                    await self._update_ui_status(
                         f"{status_prefix} evaluate_selector OK ({result.element_count} found)",
                         state="received_success",
                         show_spinner=True,
@@ -369,9 +426,7 @@ class SelectronApp(App[None]):
                     if success:
                         pass
                 elif result and result.element_count == 0 and not result.error:
-                    # Use new state for success but no results
-                    await self._highlighter.show_agent_status(
-                        tab_ref,
+                    await self._update_ui_status(
                         f"{status_prefix} Selector found 0 elements",
                         state="received_no_results",  # Orange: 0 found
                         show_spinner=True,
@@ -381,8 +436,7 @@ class SelectronApp(App[None]):
                         self._active_tab_ref, selector, color="yellow"
                     )
                 elif result and result.error:
-                    await self._highlighter.show_agent_status(
-                        tab_ref,
+                    await self._update_ui_status(
                         f"{status_prefix} evaluate_selector Error: {result.error[:50]}...",
                         state="received_error",  # Salmon: Error
                         show_spinner=True,
@@ -394,8 +448,7 @@ class SelectronApp(App[None]):
                 nonlocal tool_call_count
                 tool_call_count += 1
                 status_prefix = f"[Tool #{tool_call_count}]"
-                await self._highlighter.show_agent_status(
-                    tab_ref,
+                await self._update_ui_status(
                     f"{status_prefix} get_children_tags('{selector[:30]}...')",
                     state="sending",
                     show_spinner=True,
@@ -415,8 +468,7 @@ class SelectronApp(App[None]):
                     success = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="red"
                     )
-                    await self._highlighter.show_agent_status(
-                        tab_ref,
+                    await self._update_ui_status(
                         f"{status_prefix} get_children_tags OK ({len(result.children_details or [])} children)",
                         state="received_success",  # Green: Parent found
                         show_spinner=True,
@@ -424,9 +476,7 @@ class SelectronApp(App[None]):
                     if success:
                         pass
                 elif result and not result.parent_found and not result.error:
-                    # Use new state for success but no parent found
-                    await self._highlighter.show_agent_status(
-                        tab_ref,
+                    await self._update_ui_status(
                         f"{status_prefix} Parent selector found 0 elements",
                         state="received_no_results",  # Orange: Parent not found
                         show_spinner=True,
@@ -434,8 +484,7 @@ class SelectronApp(App[None]):
                     # Still highlight the selector even if parent not found
                     await self._highlighter.highlight(self._active_tab_ref, selector, color="red")
                 elif result and result.error:
-                    await self._highlighter.show_agent_status(
-                        tab_ref,
+                    await self._update_ui_status(
                         f"{status_prefix} get_children_tags Error: {result.error[:50]}...",
                         state="received_error",  # Salmon: Error
                         show_spinner=True,
@@ -447,8 +496,7 @@ class SelectronApp(App[None]):
                 nonlocal tool_call_count
                 tool_call_count += 1
                 status_prefix = f"[Tool #{tool_call_count}]"
-                await self._highlighter.show_agent_status(
-                    tab_ref,
+                await self._update_ui_status(
                     f"{status_prefix} get_siblings('{selector[:30]}...')",
                     state="sending",
                     show_spinner=True,
@@ -468,8 +516,7 @@ class SelectronApp(App[None]):
                     success = await self._highlighter.highlight(
                         self._active_tab_ref, selector, color="blue"
                     )
-                    await self._highlighter.show_agent_status(
-                        tab_ref,
+                    await self._update_ui_status(
                         f"{status_prefix} get_siblings OK ({len(result.siblings or [])} siblings)",
                         state="received_success",  # Green: Element found
                         show_spinner=True,
@@ -477,9 +524,7 @@ class SelectronApp(App[None]):
                     if success:
                         pass
                 elif result and not result.element_found and not result.error:
-                    # Use new state for success but no element found
-                    await self._highlighter.show_agent_status(
-                        tab_ref,
+                    await self._update_ui_status(
                         f"{status_prefix} Element selector found 0 elements",
                         state="received_no_results",  # Orange: Element not found
                         show_spinner=True,
@@ -487,8 +532,7 @@ class SelectronApp(App[None]):
                     # Still highlight the selector even if element not found
                     await self._highlighter.highlight(self._active_tab_ref, selector, color="blue")
                 elif result and result.error:
-                    await self._highlighter.show_agent_status(
-                        tab_ref,
+                    await self._update_ui_status(
                         f"{status_prefix} get_siblings Error: {result.error[:50]}...",
                         state="received_error",  # Salmon: Error
                         show_spinner=True,
@@ -500,8 +544,7 @@ class SelectronApp(App[None]):
                 nonlocal tool_call_count
                 tool_call_count += 1
                 status_prefix = f"[Tool #{tool_call_count}]"
-                await self._highlighter.show_agent_status(
-                    tab_ref,
+                await self._update_ui_status(
                     f"{status_prefix} extract_data_from_element('{selector[:30]}...')",
                     state="sending",
                     show_spinner=True,
@@ -534,22 +577,19 @@ class SelectronApp(App[None]):
                         if val is not None
                     )
                     if extracted_count > 0:
-                        await self._highlighter.show_agent_status(
-                            tab_ref,
+                        await self._update_ui_status(
                             f"{status_prefix} extract_data OK ({extracted_count} fields populated)",
                             state="received_success",  # Green: Data extracted
                             show_spinner=True,
                         )
                     else:
-                        await self._highlighter.show_agent_status(
-                            tab_ref,
+                        await self._update_ui_status(
                             f"{status_prefix} extract_data OK (No specific data extracted)",
                             state="received_no_results",  # Orange: Element found, but no data extracted
                             show_spinner=True,
                         )
                 elif result and result.error:
-                    await self._highlighter.show_agent_status(
-                        tab_ref,
+                    await self._update_ui_status(
                         f"{status_prefix} extract_data Error: {result.error[:50]}...",
                         state="received_error",  # Salmon: Error
                         show_spinner=True,
@@ -573,9 +613,7 @@ class SelectronApp(App[None]):
                 logger.warning(f"Proceeding without DOM string representation for tab {tab_ref.id}")
 
             # Update status before agent run
-            await self._highlighter.show_agent_status(
-                tab_ref, "Thinking...", state="thinking", show_spinner=True
-            )
+            await self._update_ui_status("Thinking...", state="thinking", show_spinner=True)
 
             agent = Agent(
                 self._model_config.selector_agent_model,
@@ -598,15 +636,26 @@ class SelectronApp(App[None]):
             if isinstance(agent_run_result.output, SelectorProposal):
                 proposal = agent_run_result.output
                 logger.info(
-                    f"FINISHED. Proposal: {proposal.proposed_selector}\\nREASONING: {proposal.reasoning}"
+                    f"FINISHED. Proposal: {proposal.proposed_selector}\nREASONING: {proposal.reasoning}"
                 )
-                await self._highlighter.show_agent_status(
-                    tab_ref,
+                await self._update_ui_status(
                     "Done",
                     state="final_success",
                     show_spinner=False,
                 )
                 self._last_proposed_selector = proposal.proposed_selector
+
+                # --- DEBUG: Write selected HTML to JSON using the utility function ---
+                if self._debug_write_html:
+                    await save_debug_elements(
+                        tools_instance=tools_instance,
+                        selector=proposal.proposed_selector,
+                        target_description=target_description,
+                        url=current_url,
+                        reasoning=proposal.reasoning,
+                    )
+                # --- End DEBUG section ---
+
                 # Highlight the final proposed selector in lime
                 success = await self._highlighter.highlight(
                     self._active_tab_ref, proposal.proposed_selector, color="lime"
@@ -624,8 +673,7 @@ class SelectronApp(App[None]):
                 logger.error(
                     f"Agent returned unexpected output type: {type(agent_run_result.output)}"
                 )
-                await self._highlighter.show_agent_status(
-                    tab_ref,
+                await self._update_ui_status(
                     "Agent Error: Unexpected output type",
                     state="received_error",
                     show_spinner=False,
@@ -640,15 +688,17 @@ class SelectronApp(App[None]):
             # --- Status update on agent exception ---
             if tab_ref:  # Check if tab_ref is still valid
                 error_msg = f"Agent Error: {type(e).__name__}"
-                await self._highlighter.show_agent_status(
-                    tab_ref, error_msg, state="received_error", show_spinner=False
-                )
+                await self._update_ui_status(error_msg, state="received_error", show_spinner=False)
                 if self.app:  # Ensure app context is available
                     self.app.call_later(self._delayed_hide_status)
 
             self._last_proposed_selector = None
             self.call_later(self._clear_table_view)
         finally:
+            # --- Reset button state --- ALWAYS reset the button in finally
+            if submit_button:
+                submit_button.label = "Start AI selection"
+                submit_button.disabled = False
             # Ensure the badge is eventually hidden if not handled by success/error paths with delays
             # This is a fallback in case the worker is cancelled or ends unexpectedly
             if self._active_tab_ref:
@@ -679,10 +729,10 @@ class SelectronApp(App[None]):
                 current_value = event.value.strip()  # Use event value captured by closure
                 if self._active_tab_ref:
                     if current_value:
-                        # Display the current input value in the badge
-                        await self._highlighter.show_agent_status(
-                            self._active_tab_ref, current_value, state="idle"
-                        )
+                        # Display the current input value in the badge AND label
+                        await self._update_ui_status(current_value, state="idle")
+                    # else: # What to do if input is cleared? Revert to default?
+                    #     await self._update_ui_status("No active tab (interact to activate)", state="idle")
                 self._input_debounce_timer = None  # Clear timer ref after execution
 
             # Start a new timer
@@ -696,3 +746,9 @@ class SelectronApp(App[None]):
         if self._active_tab_ref:
             logger.debug("Hiding agent status badge after delay.")
             await self._highlighter.hide_agent_status(self._active_tab_ref)
+        # Also reset the terminal AGENT STATUS label
+        try:
+            status_label = self.query_one("#agent-status-label", Label)
+            status_label.update("")  # Reset agent status label to empty
+        except Exception as e:
+            logger.warning(f"Failed to reset status label after delay: {e}")
