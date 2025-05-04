@@ -322,7 +322,8 @@ class ChromeHighlighter:
             )
             # Error logging is handled within _execute_js_on_tab
         else:
-            logger.debug("Skipping rehighlight (not active or no selector/color)")
+            pass
+            # logger.debug("Skipping rehighlight (not active or no selector/color)")
 
         # parser rehighlight logic (always independent of _highlights_active)
         if self._parser_last_selector and tab_ref:

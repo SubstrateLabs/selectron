@@ -3,7 +3,7 @@ from typing import Literal
 from textual.app import ComposeResult
 from textual.containers import Container, Vertical
 from textual.reactive import reactive
-from textual.widgets import Button, Static
+from textual.widgets import Button, Label, Static
 
 ChromeStatus = Literal[
     "unknown",
@@ -24,9 +24,16 @@ class HomePanel(Container):
 
     DEFAULT_CSS = """
     HomePanel {
-        align: center middle;
+        align: center top;
     }
-    # Add some styling for the button if needed
+    #home-status-content {
+        margin-bottom: 1;
+    }
+    #agent-status-label {
+        margin-top: 1;
+        text-align: center;
+        width: 100%;
+    }
     Button {
         margin-top: 1;
         min-width: 30; # Make buttons wider
@@ -35,7 +42,10 @@ class HomePanel(Container):
 
     def compose(self) -> ComposeResult:
         # This container will hold the dynamically changing content
-        yield Vertical(id="home-content-container")
+        yield Vertical(
+            Vertical(id="home-status-content"),  # Container for status widgets
+            Label("Interact with a page in Chrome to get started", id="agent-status-label"),  # Agent status label always present below
+        )
 
     def watch_status(self, old_status: ChromeStatus, new_status: ChromeStatus) -> None:
         """Update the UI when the status reactive changes."""
@@ -46,10 +56,12 @@ class HomePanel(Container):
         self.update_ui(self.status)
 
     def update_ui(self, status: ChromeStatus) -> None:
-        container = self.query_one("#home-content-container", Vertical)
+        status_container = self.query_one(
+            "#home-status-content", Vertical
+        )  # Target the inner container
 
         async def clear_and_mount():
-            await container.remove_children()
+            await status_container.remove_children()  # Clear the inner container
             widgets_to_mount = []
             if status == "unknown":
                 widgets_to_mount = [Static("Checking Chrome status...")]
@@ -85,6 +97,6 @@ class HomePanel(Container):
 
             # Mount the new widgets
             for widget in widgets_to_mount:
-                await container.mount(widget)
+                await status_container.mount(widget)  # Mount into the inner container
 
         self.app.call_later(clear_and_mount)

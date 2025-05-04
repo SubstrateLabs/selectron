@@ -41,7 +41,8 @@ from selectron.util.model_config import ModelConfig
 
 logger = get_logger(__name__)
 LOG_PATH = get_app_dir() / "selectron.log"
-THEME_DARK = "nord"
+# THEME_DARK = "tokyo-night"
+THEME_DARK = "catppuccin-mocha"
 THEME_LIGHT = "solarized-light"
 DEFAULT_THEME = THEME_LIGHT
 
@@ -87,7 +88,9 @@ class SelectronApp(App[None]):
         with Container(classes="input-bar"):
             with Container(id="button-row", classes="button-status-row"):
                 yield Button("Start AI selection", id="submit-button")
-                yield Label("", id="agent-status-label")  # New agent status label
+                yield Button(
+                    "Start AI parser generation", id="generate-parser-button", disabled=True
+                )
             yield Input(placeholder="Enter prompt (or let AI propose...)", id="prompt-input")
             yield Label("No active tab (interact to activate)", id="active-tab-url-label")
         yield Footer()
@@ -124,6 +127,7 @@ class SelectronApp(App[None]):
             interaction_debounce=0.7,
         )
 
+        self._set_parser_button_enabled(False)  # Ensure disabled on start
         await self.action_check_chrome_status()
 
     async def _handle_rehighlight(self, tab_ref: TabReference) -> None:
@@ -149,6 +153,8 @@ class SelectronApp(App[None]):
             logger.error(f"Error checking Chrome status: {e}", exc_info=True)
             new_status = "error"
         home_panel.status = new_status
+        if new_status != "ready_to_connect":
+            self._set_parser_button_enabled(False)
         if new_status == "ready_to_connect":
             self.app.call_later(self.action_connect_monitor)
 
@@ -204,9 +210,11 @@ class SelectronApp(App[None]):
             else:
                 logger.error("Failed to start Chrome Monitor.")
                 home_panel.status = "error"
+                self._set_parser_button_enabled(False)
         except Exception as e:
             logger.error(f"Error starting Chrome Monitor: {e}", exc_info=True)
             home_panel.status = "error"
+            self._set_parser_button_enabled(False)
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
@@ -241,6 +249,9 @@ class SelectronApp(App[None]):
 
             # Clear previous highlights before starting a new agent run for this tab
             await self._highlighter.clear(self._active_tab_ref)
+
+            # Disable parser button when starting a new selection
+            self._set_parser_button_enabled(False)
 
             # Update UI status immediately
             await self._update_ui_status("Preparing agent...", state="thinking")
@@ -292,8 +303,7 @@ class SelectronApp(App[None]):
     async def _update_ui_status(self, message: str, state: str, show_spinner: bool = False) -> None:
         """Helper to update both the terminal label and the browser badge."""
         try:
-            # Update terminal AGENT STATUS label
-            status_label = self.query_one("#agent-status-label", Label)
+            status_label = self.query_one("HomePanel #agent-status-label", Label)
             status_label.update(message)
         except Exception as e:
             logger.error(f"Failed to update status label: {e}", exc_info=True)
@@ -338,23 +348,19 @@ class SelectronApp(App[None]):
         current_dom_string = self._active_tab_dom_string
         current_url = tab_ref.url
 
-        # --- Get UI elements --- Needed for button disabling/enabling
         try:
             submit_button = self.query_one("#submit-button", Button)
         except Exception as e:
             logger.error(f"Failed to query submit button: {e}", exc_info=True)
             submit_button = None
 
-        # --- Disable button --- BEFORE the main try block
         if submit_button:
             submit_button.label = "Running AI..."
             submit_button.disabled = True
 
-        # --- Create Status Callback (Lambda) --- #
         async def status_callback(message: str, state: str, show_spinner: bool):
             await self._update_ui_status(message, state, show_spinner)
 
-        # --- Create Highlighter Adapter --- #
         highlighter_adapter = self._ChromeHighlighterAdapter(self._highlighter, tab_ref)
 
         # --- Check for essential data before creating agent --- #
@@ -380,7 +386,6 @@ class SelectronApp(App[None]):
 
         proposal: Optional[SelectorProposal] = None
         try:
-            # --- Instantiate and run the agent --- #
             agent = SelectorAgent(
                 html_content=current_html,
                 dom_string=current_dom_string,
@@ -396,7 +401,6 @@ class SelectronApp(App[None]):
             )
             proposal = await agent.run(selector_description)
 
-            # --- Handle Successful Proposal --- #
             if proposal:
                 logger.info(f"Worker FINISHED. Proposal: {proposal.proposed_selector}")
                 await self._update_ui_status(
@@ -405,6 +409,9 @@ class SelectronApp(App[None]):
                     show_spinner=False,
                 )
                 self._last_proposed_selector = proposal.proposed_selector
+
+                # Enable the parser button upon successful selection
+                self._set_parser_button_enabled(True)
 
                 # Final highlight with the concrete highlighter
                 success = await self._highlighter.highlight(
@@ -419,23 +426,16 @@ class SelectronApp(App[None]):
 
         except SelectorAgentError as agent_err:
             # Agent already logged the specific error and updated status via callback
-            logger.error(f"SelectorAgent failed: {agent_err}")
-            self._last_proposed_selector = None
-            self.call_later(self._clear_table_view)
-            self.app.call_later(self._delayed_hide_status)  # Schedule hide for error badge too
+            # Set update_status=False because the agent's status_cb likely handled it
+            await self._handle_agent_failure(
+                f"SelectorAgent failed: {agent_err}", update_status=False
+            )
         except Exception as e:
             # Catch unexpected errors *outside* the agent's known failure modes
-            logger.error(
-                f"Unexpected error in worker task for target '{selector_description}': {e}",
-                exc_info=True,
-            )
-            error_msg = f"Worker Error: {type(e).__name__}"
-            await self._update_ui_status(error_msg, state="received_error", show_spinner=False)
-            self._last_proposed_selector = None
-            self.call_later(self._clear_table_view)
-            self.app.call_later(self._delayed_hide_status)
+            log_msg = f"Unexpected error in worker task for target '{selector_description}': {e}"
+            # The handler will also update the status to a generic error message
+            await self._handle_agent_failure(log_msg, update_status=True)
         finally:
-            # --- Re-enable button --- #
             if submit_button:
                 submit_button.label = "Start AI selection"
                 submit_button.disabled = False
@@ -448,7 +448,7 @@ class SelectronApp(App[None]):
         target_ref = tab_ref or self._active_tab_ref
 
         if not target_ref:
-            logger.debug("Skipping rehighlight trigger: No target tab reference.")
+            # logger.debug("Skipping rehighlight trigger: No target tab reference.")
             return
 
         # Call the highlighter's rehighlight method first to redraw overlays
@@ -462,10 +462,11 @@ class SelectronApp(App[None]):
                 parser = self._monitor_handler._parser_registry.load_parser(target_ref.url)
                 # No need to log if parser is found, only if not or error
             except FileNotFoundError:
+                pass
                 # This is expected if no parser is defined for the URL.
-                logger.debug(
-                    f"No parser found for url '{target_ref.url}' during rehighlight check."
-                )
+                # logger.debug(
+                #     f"No parser found for url '{target_ref.url}' during rehighlight check."
+                # )
                 # parser remains None
             except Exception as e:
                 logger.error(
@@ -544,11 +545,32 @@ class SelectronApp(App[None]):
             await self._highlighter.hide_agent_status(self._active_tab_ref)
         try:
             status_label = self.query_one("#agent-status-label", Label)
-            status_label.update("")
+            status_label.update("Interact with a page in Chrome to get started")
         except Exception as e:
             logger.warning(f"Failed to reset status label after delay: {e}")
 
-    # --- Highlighter Adapter --- #
+    async def _handle_agent_failure(self, log_message: str, update_status: bool = True) -> None:
+        """Consolidated actions for when the selector agent fails."""
+        logger.error(log_message, exc_info=True)  # Always include traceback for errors
+        self._last_proposed_selector = None
+        # Use call_later for UI updates from potentially non-main threads/tasks
+        self.call_later(self._clear_table_view)
+        self.call_later(self._delayed_hide_status)
+        self.call_later(self._set_parser_button_enabled, False)
+        if update_status:
+            # Use call_later for status update as well
+            error_msg = f"Agent Error: {log_message[:100]}..."  # Keep status concise
+            self.call_later(self._update_ui_status, error_msg, "received_error", False)
+
+    def _set_parser_button_enabled(self, enabled: bool) -> None:
+        """Enable or disable the 'Start AI parser generation' button."""
+        try:
+            parser_button = self.query_one("#generate-parser-button", Button)
+            parser_button.disabled = not enabled
+            logger.debug(f"Set parser button enabled: {enabled}")
+        except Exception as e:
+            logger.error(f"Failed to set parser button enabled state: {e}", exc_info=True)
+
     class _ChromeHighlighterAdapter(HighlighterProtocol):
         """Adapts ChromeHighlighter to the Highlighter protocol for a specific tab."""
 
@@ -557,17 +579,13 @@ class SelectronApp(App[None]):
             self._tab_ref = tab_ref
 
         async def highlight(self, selector: str, color: str) -> bool:
-            # Pass executor=None, let the highlighter manage it
             return await self._highlighter.highlight(self._tab_ref, selector, color)
 
         async def clear(self) -> None:
-            # Pass executor=None
             await self._highlighter.clear(self._tab_ref)
 
         async def show_agent_status(self, text: str, state: str, show_spinner: bool) -> None:
-            # Pass executor=None
             await self._highlighter.show_agent_status(self._tab_ref, text, state, show_spinner)
 
         async def hide_agent_status(self) -> None:
-            # Pass executor=None
             await self._highlighter.hide_agent_status(self._tab_ref)

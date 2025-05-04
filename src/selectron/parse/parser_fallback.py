@@ -76,7 +76,7 @@ def find_fallback_parser(
 
     while True:
         current_slug = slugify_url(current_url)
-        logger.debug(f"Fallback attempt: trying slug '{current_slug}' for url '{current_url}'")
+        # logger.debug(f"Fallback attempt: trying slug '{current_slug}' for url '{current_url}'")
         parser_ref = available_parsers.get(current_slug)
         if parser_ref:
             parser_data = _load_parser_from_ref(parser_ref, current_slug, url)
@@ -105,9 +105,9 @@ def find_fallback_parser(
                 )
                 if root_no_slash_url != current_url:
                     root_no_slash_slug = slugify_url(root_no_slash_url)
-                    logger.debug(
-                        f"Fallback attempt: trying root without slash '{root_no_slash_url}' (slug '{root_no_slash_slug}')"
-                    )
+                    # logger.debug(
+                    #     f"Fallback attempt: trying root without slash '{root_no_slash_url}' (slug '{root_no_slash_slug}')"
+                    # )
                     parser_ref = available_parsers.get(root_no_slash_slug)
                     if parser_ref:
                         parser_data = _load_parser_from_ref(parser_ref, root_no_slash_slug, url)
@@ -143,5 +143,5 @@ def find_fallback_parser(
 
         current_url = next_url
 
-    logger.debug(f"No parser found for '{url}' even after fallback attempts.")
+    # logger.debug(f"No parser found for '{url}' even after fallback attempts.")
     return None

@@ -12,6 +12,8 @@ from selectron.chrome.types import TabReference
 from selectron.parse.parser_registry import ParserRegistry
 from selectron.util.logger import get_logger
 
+import asyncio
+
 if TYPE_CHECKING:
     from textual.widgets import DataTable, Input, Label
 
@@ -83,9 +85,6 @@ class MonitorEventHandler:
         # Reset proposal flag logic
         current_active_id_for_propose_select = self._app._propose_selection_done_for_tab
         if tab_ref and tab_ref.id != current_active_id_for_propose_select:
-            logger.debug(
-                f"Interaction detected on tab {tab_ref.id} (different from last proposal tab {current_active_id_for_propose_select}). Priming proposal."
-            )
             self._app._propose_selection_done_for_tab = (
                 None  # Allow proposal for this tab upon next content fetch
             )
@@ -142,11 +141,11 @@ class MonitorEventHandler:
                         # ---> Cancel any pending debounce timer BEFORE setting value <--- #
                         if self._app._input_debounce_timer:
                             self._app._input_debounce_timer.stop()
-                            self._app._input_debounce_timer = None # Clear the reference
-                        self._prompt_input.value = selector_description # Now set the value
+                            self._app._input_debounce_timer = None  # Clear the reference
+                        self._prompt_input.value = selector_description  # Now set the value
                         # Update status immediately and mark proposal as 'done' for this tab
                         await self._app._update_ui_status(
-                            f"Parser found: \"{selector_description}\"", "idle", False
+                            f'Parser found: "{selector_description}"', "idle", False
                         )
                         self._app._propose_selection_done_for_tab = tab_ref.id
                         parser_found_and_handled = True
@@ -192,40 +191,34 @@ class MonitorEventHandler:
 
                         if isinstance(proposal, AutoProposal):
                             desc = proposal.proposed_description
+                            logger.info(f"Automatic proposal received: '{desc}'")
 
-                            def _update_input():
-                                try:
-                                    # Use stored Input ref
-                                    self._prompt_input.value = desc
-                                    if desc and self._app._active_tab_ref:
-                                        # Use app's call_later
-                                        self._app.call_later(
-                                            self._app._update_ui_status,
-                                            desc,
-                                            "idle",
-                                            False,  # No spinner for idle state
-                                        )
-                                except Exception as e:
-                                    logger.error(f"Error updating input from proposal: {e}")
+                            # --- Attempt direct UI updates from worker --- #
+                            try:
+                                logger.debug(f"Attempting to set prompt input directly to: '{desc}'")
+                                self._prompt_input.value = desc
+                                logger.debug(f"Prompt input value set. Attempting direct status update...")
+                                await self._app._update_ui_status(desc, "idle", False)
+                                logger.debug(f"Direct status update awaited.")
+                            except Exception as ui_update_err:
+                                logger.error(f"Error during DIRECT UI update from proposal worker: {ui_update_err}", exc_info=True)
+                            # ---------------------------------------------- #
 
-                            # Use app's call_later
-                            self._app.call_later(_update_input)
-
+                        else:
+                            logger.warning(f"propose_selection returned unexpected type: {type(proposal)}")
+                            # Optionally hide status or show generic message if proposal is not AutoProposal
                             if self._app._active_tab_ref:
-                                self._app.call_later(
-                                    self._app._update_ui_status,
-                                    desc,
-                                    "idle",
-                                    False,  # No spinner for idle state
-                                )
+                                self._app.call_later(lambda: self._highlighter.hide_agent_status(self._app._active_tab_ref))
 
                     except Exception as e:
-                        logger.error(f"Error during proposal: {e}", exc_info=True)
+                        logger.error(f"Error during proposal worker: {e}", exc_info=True)
+                        # Explicitly log if this generic exception handler is hit
+                        logger.critical("*** Generic exception handler in _do_propose_selection was triggered ***")
                         if self._app._active_tab_ref:
+                            # Attempt to hide status even on failure, schedule it via call_later
+                            tab_ref_capture = self._app._active_tab_ref # Capture ref
                             self._app.call_later(
-                                lambda: self._highlighter.hide_agent_status(
-                                    self._app._active_tab_ref
-                                )
+                                lambda: asyncio.create_task(self._try_hide_status(tab_ref_capture))
                             )
 
                 # Use app's run_worker
@@ -243,6 +236,14 @@ class MonitorEventHandler:
 
         # --- Parser highlight logic (run after HTML present) --- #
         await self._maybe_apply_parser_highlight(tab_ref)
+
+    async def _try_hide_status(self, tab_ref: TabReference) -> None:
+        """Attempt to hide status badge, catching errors."""
+        try:
+            logger.debug(f"Attempting to hide status badge for tab {tab_ref.id} after proposal failure.")
+            await self._highlighter.hide_agent_status(tab_ref)
+        except Exception as hide_err:
+            logger.error(f"Error trying to hide agent status: {hide_err}", exc_info=True)
 
     # --- Internal helper for parser highlight --- #
     async def _maybe_apply_parser_highlight(self, tab_ref: TabReference) -> None:

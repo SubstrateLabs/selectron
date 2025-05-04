@@ -42,6 +42,7 @@ Screen {
 /* Style for the submit button */
 #submit-button {
     min-width: 10;
+    margin-right: 1;
     background: $background;
     align: center middle;
     color: $primary;
@@ -75,5 +76,14 @@ Screen {
     margin-left: 1;
     height: 1; /* Ensure consistent height */
     align: center middle; /* Vertically center the text */
+}
+
+/* Style for the generate parser button */
+#generate-parser-button {
+    min-width: 10;
+    margin-right: 1;
+    background: $background;
+    align: center middle;
+    color: $primary;
 }
 
