@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from PIL import Image
 
@@ -125,18 +125,7 @@ class MonitorEventHandler:
         except Exception as label_err:
             logger.error(f"Failed to update URL label on content fetch: {label_err}")
 
-        try:
-            # Use stored DataTable ref
-            self._data_table.clear()
-            html_to_display = (
-                html_content[:5000] + "..." if len(html_content) > 5000 else html_content
-            )
-            self._data_table.add_row(
-                html_to_display,
-                key=f"html_{tab_ref.id}",
-            )
-        except Exception as table_err:
-            logger.error(f"Failed to update data table from monitor callback: {table_err}")
+        # NOTE: table clearing and population is now handled by _apply_parser_extract or _clear_table_view
 
         # Check if the main agent worker is running (on the app)
         if self._app._agent_worker and self._app._agent_worker.is_running:
@@ -253,6 +242,11 @@ class MonitorEventHandler:
                 success = await self._highlighter.highlight_parser(tab_ref, selector, color="cyan")
                 if success:
                     self._parser_highlighted_for_tab[tab_ref.id] = tab_ref.url
+
+                    # After successful highlight, run parser extraction and update table
+                    if parser and isinstance(parser.get("python"), str):
+                        await self._apply_parser_extract(tab_ref, parser)
+
                 else:
                     self._parser_highlighted_for_tab.pop(tab_ref.id, None)
             except Exception as e:
@@ -261,3 +255,98 @@ class MonitorEventHandler:
         else:
             # no parser – ensure mapping cleared
             self._parser_highlighted_for_tab.pop(tab_ref.id, None)
+
+    # --- Run parser code on selected elements and update data table --- #
+    async def _apply_parser_extract(self, tab_ref: TabReference, parser: dict) -> None:
+        """Execute parser python code against each selected element's HTML (fetched live) and display results as columns."""
+
+        import json
+        import reprlib
+
+        from bs4 import BeautifulSoup
+
+        selector = parser.get("selector")
+        python_code = parser.get("python")
+
+        if not selector or not python_code or not isinstance(selector, str):
+            logger.debug("_apply_parser_extract: missing selector or python code.")
+            return
+
+        # Prepare sandbox
+        sandbox: dict[str, Any] = {"BeautifulSoup": BeautifulSoup, "json": json}
+        try:
+            exec(python_code, sandbox)
+        except Exception as e:
+            logger.error(f"Parser execution error: {e}", exc_info=True)
+            return
+
+        parse_fn = sandbox.get("parse_element")
+        if not callable(parse_fn):
+            logger.error("Parser does not define a callable 'parse_element' function.")
+            return
+
+        # Get element HTML directly from the browser
+        try:
+            element_htmls = await self._highlighter.get_elements_html(
+                tab_ref, selector, max_elements=100
+            )
+        except Exception as e:
+            logger.error(f"Error getting element HTML via CDP: {e}", exc_info=True)
+            await self._app._clear_table_view()  # Clear table on error
+            return
+
+        if not element_htmls:
+            logger.debug(f"Parser selector '{selector}' matched no elements in live browser.")
+            await self._app._clear_table_view()  # clear table if no results
+            return
+
+        # Execute parser on each element and collect results
+        results_data: list[tuple[str, dict | None]] = []  # (html_snippet, parsed_dict)
+        for idx, outer_html in enumerate(element_htmls):
+            html_display = (
+                outer_html[:500] + "..." if len(outer_html) > 500 else outer_html
+            )  # shorten html display
+            parsed_dict = None
+            try:
+                parsed_dict = parse_fn(outer_html)
+            except Exception as e:
+                logger.error(f"Error running parse_element for element {idx}: {e}", exc_info=True)
+            results_data.append((html_display, parsed_dict))
+
+        # Determine columns from the first valid result dictionary
+        column_keys: list[str] = []
+        for _, parsed_dict in results_data:
+            if isinstance(parsed_dict, dict):
+                column_keys = list(parsed_dict.keys())
+                break
+
+        # Update data table
+        try:
+            table = self._data_table
+            table.clear(columns=True)
+
+            # Add columns
+            table.add_column("Raw HTML", key="_raw_html_")
+            for key in column_keys:
+                table.add_column(key.replace("_", " ").title(), key=key)
+
+            # Add rows
+            repr_short = reprlib.Repr()
+            repr_short.maxstring = 50
+            repr_short.maxother = 50
+
+            for i, (html_snippet, parsed_dict) in enumerate(results_data):
+                row_data = [html_snippet]
+                if isinstance(parsed_dict, dict):
+                    for key in column_keys:
+                        # represent value concisely
+                        value = parsed_dict.get(key)
+                        row_data.append(repr_short.repr(value))
+                else:
+                    # Add placeholders if parsing failed or returned non-dict
+                    row_data.extend(["-"] * len(column_keys))
+
+                table.add_row(*row_data, key=f"parsed_{tab_ref.id}_{i}")
+
+        except Exception as e:
+            logger.error(f"Failed to update data table with parser results: {e}", exc_info=True)

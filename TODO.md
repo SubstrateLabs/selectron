@@ -1,3 +1,4 @@
+- skip propose and display parser target if found
 - parser generation workflow
 - sdk? 
   - test parser registry works

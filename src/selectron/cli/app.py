@@ -81,7 +81,6 @@ class SelectronApp(App[None]):
             with TabbedContent(initial="home-tab"):
                 with TabPane("⣏ Home ⣹", id="home-tab"):
                     yield HomePanel(id="home-panel-widget")
-                with TabPane("⣏ Parsed Data ⣹", id="table-tab"):
                     yield DataTable(id="data-table")
                 with TabPane("⣏ Logs ⣹", id="logs-tab"):
                     yield LogPanel(log_file_path=LOG_PATH, id="log-panel-widget")
@@ -97,7 +96,6 @@ class SelectronApp(App[None]):
         try:
             table = self.query_one(DataTable)
             table.cursor_type = "row"
-            table.add_column("Raw HTML", key="html_content")
         except Exception as table_init_err:
             logger.error(f"Failed to initialize DataTable: {table_init_err}", exc_info=True)
         self.theme = DEFAULT_THEME
@@ -448,19 +446,64 @@ class SelectronApp(App[None]):
         # Use the provided tab_ref if available, otherwise fallback to the app's active tab
         target_ref = tab_ref or self._active_tab_ref
 
-        if target_ref:
-            # Note: We call rehighlight even if _highlighter.is_active() is false,
-            # because the parser highlight needs to redraw independently.
-            # The rehighlight method internally checks agent highlight state (_highlights_active)
-            # and parser highlight state (_parser_last_selector).
-            await self._highlighter.rehighlight(target_ref)
-        else:
+        if not target_ref:
             logger.debug("Skipping rehighlight trigger: No target tab reference.")
+            return
+
+        # Call the highlighter's rehighlight method first to redraw overlays
+        await self._highlighter.rehighlight(target_ref)
+
+        # After rehighlighting, check if a parser needs to be re-applied
+        if self._monitor_handler and target_ref.url:
+            parser = None
+            try:
+                # Check if a parser exists for this URL by attempting to load it
+                parser = self._monitor_handler._parser_registry.load_parser(target_ref.url)
+                # No need to log if parser is found, only if not or error
+            except FileNotFoundError:
+                # This is expected if no parser is defined for the URL.
+                logger.debug(f"No parser found for url '{target_ref.url}' during rehighlight check.")
+                # parser remains None
+            except Exception as e:
+                logger.error(
+                    f"Error loading parser for url '{target_ref.url}' during rehighlight check: {e}"
+                )
+                # parser remains None
+
+            # If a valid parser dictionary was loaded, re-run the extraction logic
+            if (
+                parser
+                and isinstance(parser, dict)
+                and parser.get("selector")
+                and parser.get("python")
+            ):
+                # The _apply_parser_extract method fetches live element HTML via CDP,
+                # so it will use the elements visible/matching *after* the scroll/rehighlight.
+                logger.debug(f"Re-applying parser extract for {target_ref.url} after rehighlight.")
+                try:
+                    # Ensure the handler still exists before calling its method
+                    if self._monitor_handler:
+                         await self._monitor_handler._apply_parser_extract(target_ref, parser)
+                    else:
+                         # Should technically not happen if we passed the initial check, but safety first.
+                         logger.warning("Cannot re-apply parser extract: MonitorEventHandler became unavailable.")
+                except Exception as e:
+                    logger.error(
+                        f"Error during parser re-extraction triggered by rehighlight: {e}",
+                        exc_info=True,
+                    )
+            # If parser is None or invalid, we simply don't re-run extraction.
+        else:
+            # Log why the parser re-apply check was skipped
+            if not self._monitor_handler:
+                 logger.debug("Skipping parser re-apply check: MonitorEventHandler not available.")
+            elif not (target_ref and target_ref.url): # Combined check for clarity
+                 logger.debug("Skipping parser re-apply check: Target ref or its URL is missing.")
 
     async def _clear_table_view(self) -> None:
         try:
             table = self.query_one(DataTable)
-            table.clear()
+            table.clear(columns=True)
         except Exception as e:
             logger.error(f"Failed to query or clear data table: {e}")
 

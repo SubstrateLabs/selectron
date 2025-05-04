@@ -13,8 +13,6 @@ from typing import (
 
 from selectron.chrome.chrome_cdp import ChromeTab, get_tabs
 from selectron.chrome.diff_tabs import diff_tabs
-from selectron.util.logger import get_logger
-
 from selectron.chrome.tab_interaction_handler import (
     DEBOUNCE_DELAY_SECONDS,
     ContentFetchedCallback,
@@ -23,6 +21,7 @@ from selectron.chrome.tab_interaction_handler import (
     TabInteractionHandler,
 )
 from selectron.chrome.types import TabReference
+from selectron.util.logger import get_logger
 
 logger = get_logger(__name__)
 

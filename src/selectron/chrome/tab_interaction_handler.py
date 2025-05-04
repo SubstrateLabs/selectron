@@ -22,9 +22,7 @@ InteractionTabUpdateCallback = Callable[
 ContentFetchedCallback = Callable[
     [TabReference, Optional[Image.Image], Optional[int], Optional[str]], Awaitable[None]
 ]  # Called after interaction + fetch (with fresh HTML, screenshot, scrollY, and DOM string)
-RehighlightCallback = Callable[[
-    TabReference
-], Awaitable[None]]  # Pass tab context for rehighlight
+RehighlightCallback = Callable[[TabReference], Awaitable[None]]  # Pass tab context for rehighlight
 
 logger = get_logger(__name__)
 

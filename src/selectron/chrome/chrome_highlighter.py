@@ -1,3 +1,4 @@
+import json
 from typing import Any, Optional
 
 import websockets
@@ -351,6 +352,7 @@ class ChromeHighlighter:
         js_code: str,
         purpose: str = "generic JS execution",
         executor: Optional[CdpBrowserExecutor] = None,
+        timeout: float = 5.0,
     ) -> Optional[Any]:
         """Helper to execute JS, handling common boilerplate and errors."""
         if not tab_ref or not tab_ref.ws_url:
@@ -693,3 +695,74 @@ class ChromeHighlighter:
         # reset parser tracking
         self._parser_last_selector = None
         self._parser_last_color = None
+
+    async def get_elements_html(
+        self,
+        tab_ref: Optional[TabReference],
+        selector: str,
+        max_elements: int = 100,
+        executor: Optional[CdpBrowserExecutor] = None,
+    ) -> Optional[list[str]]:
+        """Executes JS in the tab to find elements and return their outerHTML."""
+        if not tab_ref or not tab_ref.ws_url:
+            logger.debug("Cannot get elements HTML – missing tab reference or ws_url.")
+            return None
+
+        escaped_selector = (
+            selector.replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace('"', '\\"')
+            .replace("`", "\\`")
+        )
+
+        js_code = f"""
+        (function() {{
+            const selector = `{escaped_selector}`;
+            const maxCount = {max_elements};
+            const elements = document.querySelectorAll(selector);
+            const htmlList = [];
+            for (let i = 0; i < Math.min(elements.length, maxCount); i++) {{
+                htmlList.push(elements[i].outerHTML);
+            }}
+            // Return as a JSON string to handle potential complexities in HTML content
+            return JSON.stringify(htmlList);
+        }})();
+        """
+
+        result = await self._execute_js_on_tab(
+            tab_ref,
+            js_code,
+            purpose="get elements html",
+            executor=executor,
+            timeout=10.0,  # Give a bit more time for potentially larger data
+        )
+
+        if result and isinstance(result, str):
+            try:
+                # Parse the JSON string back into a list
+                html_list = json.loads(result)
+                if isinstance(html_list, list):
+                    logger.info(
+                        f"Successfully retrieved HTML for {len(html_list)} elements matching '{selector[:50]}...'"
+                    )
+                    return html_list
+                else:
+                    logger.warning(
+                        f"JS execution for get_elements_html returned non-list JSON: {result[:100]}..."
+                    )
+                    return None
+            except json.JSONDecodeError as e:
+                logger.error(
+                    f"Failed to decode JSON response from get_elements_html: {e}. Response: {result[:200]}..."
+                )
+                return None
+            except Exception as e:
+                logger.error(
+                    f"Unexpected error processing result from get_elements_html: {e}", exc_info=True
+                )
+                return None
+        else:
+            logger.warning(
+                f"JS execution for get_elements_html returned unexpected or no result: {type(result)}"
+            )
+            return None
