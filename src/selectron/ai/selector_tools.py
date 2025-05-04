@@ -19,6 +19,12 @@ from selectron.util.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Constants for tool verbosity control
+DEFAULT_MAX_MATCHES_TO_DETAIL = 5  # Limit number of detailed matches by default
+DEFAULT_MAX_CHILDREN_TO_DETAIL = 10  # Limit number of detailed children by default
+DEFAULT_MAX_SNIPPET_LENGTH = 300  # Max length for HTML/Markdown snippets
+DEFAULT_MAX_HTML_LENGTH_VALIDATION = 5000  # Max length for single element HTML validation
+
 
 class SelectorTools:
     """Internal class holding the BeautifulSoup instance and tool methods."""
@@ -26,7 +32,6 @@ class SelectorTools:
     def __init__(self, html_content: str, base_url: str):
         self.soup = BeautifulSoup(html_content, "html.parser")
         self.base_url = base_url
-        logger.info(f"HTML structure parsed for SelectorTools. Base URL: {self.base_url}")
 
     def _convert_html_to_markdown(self, element: Tag) -> str:
         """Converts a BeautifulSoup Tag element to a Markdown string."""
@@ -37,6 +42,9 @@ class SelectorTools:
             # Convert the specific element, not just its inner content
             # Use default options, maybe configure later if needed (e.g., heading style)
             md = markdownify.markdownify(str(element), heading_style="ATX")
+            # --- Truncate Markdown ---
+            if len(md) > DEFAULT_MAX_SNIPPET_LENGTH:
+                md = md[:DEFAULT_MAX_SNIPPET_LENGTH] + "..."
             return md.strip()
         except ImportError:
             logger.warning(
@@ -53,7 +61,7 @@ class SelectorTools:
         target_text_to_check: str,
         anchor_selector: Optional[str] = None,
         max_html_length: Optional[int] = None,
-        max_matches_to_detail: Optional[int] = None,
+        max_matches_to_detail: Optional[int] = DEFAULT_MAX_MATCHES_TO_DETAIL,
         return_matched_html: bool = False,
     ) -> SelectorEvaluationResult:
         """Evaluates a CSS selector, checks for text, validates size, and provides rich detail on multiple matches.
@@ -63,7 +71,7 @@ class SelectorTools:
             target_text_to_check: Text content to check for within the matched elements.
             anchor_selector: Optional selector to narrow the search scope.
             max_html_length: Optional max length for single element HTML validation.
-            max_matches_to_detail: Max number of matches to include detailed info for. If None, details for ALL matches are included.
+            max_matches_to_detail: Max number of matches to include detailed info for. Defaults to {DEFAULT_MAX_MATCHES_TO_DETAIL}.
             return_matched_html: Whether to return the outer HTML of matched elements.
 
         Returns:
@@ -147,7 +155,11 @@ class SelectorTools:
                 # Capture HTML if requested
                 if return_matched_html:
                     try:
-                        matched_html.append(str(el))
+                        html_str = str(el)
+                        # --- Truncate HTML Snippet ---
+                        if len(html_str) > DEFAULT_MAX_SNIPPET_LENGTH:
+                            html_str = html_str[:DEFAULT_MAX_SNIPPET_LENGTH] + "..."
+                        matched_html.append(html_str)
                     except Exception as html_err:
                         logger.warning(f"Error getting HTML for element {i}: {html_err}")
                         matched_html.append(f"<!-- Error getting HTML: {html_err} -->")
@@ -161,7 +173,7 @@ class SelectorTools:
                     attrs = {
                         k: " ".join(v) if isinstance(v, list) else v for k, v in el.attrs.items()
                     }
-                    # Extract full markdown content using the helper
+                    # Extract full markdown content using the helper (will be truncated by helper)
                     markdown_content = self._convert_html_to_markdown(el)
                     match_details.append(
                         MatchDetail(
@@ -176,15 +188,21 @@ class SelectorTools:
             if count == 1 and max_html_length is not None and isinstance(elements[0], Tag):
                 try:
                     html_content = str(elements[0])
+                    # Use DEFAULT_MAX_HTML_LENGTH_VALIDATION if max_html_length is passed as None explicitly by caller (though signature has int)
+                    # or just use the provided max_html_length if it's a valid int.
+                    effective_max_html_length = (
+                        max_html_length
+                        if isinstance(max_html_length, int)
+                        else DEFAULT_MAX_HTML_LENGTH_VALIDATION
+                    )
+
                     html_len = len(html_content)
-                    if html_len > max_html_length:
-                        size_validation_error_msg = (
-                            f"Element HTML too large: {html_len} chars > {max_html_length}"
-                        )
+                    if html_len > effective_max_html_length:
+                        size_validation_error_msg = f"Element HTML too large: {html_len} chars > {effective_max_html_length}"
                         logger.warning(f"{log_prefix}: {size_validation_error_msg}")
                     else:
                         logger.debug(
-                            f"{log_prefix}: Size validation OK ({html_len} chars <= {max_html_length})"
+                            f"{log_prefix}: Size validation OK ({html_len} chars <= {effective_max_html_length})"
                         )
                 except Exception as size_err:
                     size_validation_error_msg = f"Error during size validation: {size_err}"
@@ -258,7 +276,10 @@ class SelectorTools:
             error_msg = f"Evaluation Error: {type(e).__name__}: {e}"
             tb_str = traceback.format_exc()
             logger.error(f"{log_prefix}: {error_msg}", exc_info=False)  # No traceback in log
-            # Combine error message and traceback for the agent
+            # TRUNCATE Traceback for the agent to avoid excessive length
+            max_tb_len = 1000
+            if len(tb_str) > max_tb_len:
+                tb_str = tb_str[:max_tb_len] + "\n... (Traceback truncated)"
             error_for_agent = f"{error_msg}\nTraceback:\n{tb_str}"
             return SelectorEvaluationResult(
                 selector_used=selector,
@@ -324,23 +345,33 @@ class SelectorTools:
 
         assert base_element is not None, "Base element for get_children_tags cannot be None"
 
-        max_snippet_len = 500  # Reduced snippet length
+        max_snippet_len = DEFAULT_MAX_SNIPPET_LENGTH  # Use constant
         try:
             parent_element = base_element.select_one(selector)
             if parent_element and isinstance(parent_element, Tag):
                 details_list: list[ChildDetail] = []
+                children_count = 0
+                # --- Limit number of children detailed ---
                 for child in parent_element.find_all(recursive=False):
                     if isinstance(child, Tag) and child.name:
-                        snippet = str(child)
-                        if len(snippet) > max_snippet_len:
-                            snippet = snippet[:max_snippet_len] + "..."
-                        details_list.append(ChildDetail(tag_name=child.name, html_snippet=snippet))
+                        children_count += 1
+                        if children_count <= DEFAULT_MAX_CHILDREN_TO_DETAIL:  # Check limit
+                            snippet = str(child)
+                            if len(snippet) > max_snippet_len:
+                                snippet = snippet[:max_snippet_len] + "..."
+                            details_list.append(
+                                ChildDetail(tag_name=child.name, html_snippet=snippet)
+                            )
 
+                # Log total count vs detailed count
                 child_tags_summary = (
-                    ", ".join([d.tag_name for d in details_list]) if details_list else "None"
+                    f"{len(details_list)} detailed out of {children_count} total"
+                    if children_count > 0
+                    else "None"
                 )
+
                 logger.info(
-                    f"{log_prefix}: Result: ParentFound=True, ChildrenTags=[{child_tags_summary}]"
+                    f"{log_prefix}: Result: ParentFound=True, ChildrenTags Summary=[{child_tags_summary}]"
                 )
                 return ChildrenTagsResult(
                     selector_used=selector,
@@ -363,6 +394,10 @@ class SelectorTools:
             error_msg = f"Error getting children details: {type(e).__name__}: {e}"
             tb_str = traceback.format_exc()
             logger.error(f"{log_prefix}: {error_msg}", exc_info=False)  # No traceback in log
+            # TRUNCATE Traceback for the agent
+            max_tb_len = 1000
+            if len(tb_str) > max_tb_len:
+                tb_str = tb_str[:max_tb_len] + "\n... (Traceback truncated)"
             error_for_agent = f"{error_msg}\nTraceback:\n{tb_str}"
             return ChildrenTagsResult(
                 selector_used=selector,
@@ -484,6 +519,10 @@ class SelectorTools:
             error_msg = f"Error getting siblings: {type(e).__name__}: {e}"
             tb_str = traceback.format_exc()
             logger.error(f"{log_prefix}: {error_msg}", exc_info=False)  # No traceback in log
+            # TRUNCATE Traceback for the agent
+            max_tb_len = 1000
+            if len(tb_str) > max_tb_len:
+                tb_str = tb_str[:max_tb_len] + "\n... (Traceback truncated)"
             error_for_agent = f"{error_msg}\nTraceback:\n{tb_str}"
             return SiblingsResult(
                 selector_used=selector,
@@ -571,9 +610,17 @@ class SelectorTools:
             # Always get HTML content string if element is found
             try:
                 html_content_val = str(element)
-                logger.debug(
-                    f"{log_prefix}: Extracted HTML content (first 100 chars): '{html_content_val[:100]}...'"
-                )
+                # --- Truncate HTML ---
+                if len(html_content_val) > DEFAULT_MAX_SNIPPET_LENGTH:
+                    html_preview = html_content_val[:DEFAULT_MAX_SNIPPET_LENGTH] + "..."
+                    logger.debug(
+                        f"{log_prefix}: Extracted HTML content (truncated): '{html_preview}'"
+                    )
+                    html_content_val = html_preview  # Return truncated value
+                else:
+                    logger.debug(
+                        f"{log_prefix}: Extracted HTML content: '{html_content_val[:100]}...'"
+                    )
             except Exception as html_err:
                 logger.warning(f"{log_prefix}: Failed to get HTML string: {html_err}")
                 html_content_val = f"Error getting HTML: {html_err}"
@@ -610,6 +657,11 @@ class SelectorTools:
                 try:
                     # Use the modified copy for markdown conversion
                     markdown_content_val = markdownify(str(element_copy), base_url=self.base_url)
+                    if len(markdown_content_val) > DEFAULT_MAX_SNIPPET_LENGTH:
+                        markdown_content_val = (
+                            markdown_content_val[:DEFAULT_MAX_SNIPPET_LENGTH] + "..."
+                        )
+                        logger.debug(f"{log_prefix}: Generated truncated markdown content.")
                 except Exception as md_err:
                     logger.warning(f"{log_prefix}: Failed to generate markdown content: {md_err}")
                     markdown_content_val = f"Error generating markdown: {md_err}"
@@ -667,7 +719,11 @@ class SelectorTools:
                         f"{log_prefix}: Absolutified {links_processed_count} href(s) before final markdown conversion."
                     )
 
+                # --- Convert to Markdown and Truncate (again, ensure it happens regardless of path) ---
                 markdown_content_val = markdownify(str(element_copy_for_md), base_url=self.base_url)
+                if len(markdown_content_val) > DEFAULT_MAX_SNIPPET_LENGTH:
+                    markdown_content_val = markdown_content_val[:DEFAULT_MAX_SNIPPET_LENGTH] + "..."
+                    logger.debug(f"{log_prefix}: Final markdown content generated and truncated.")
             except Exception as md_err:
                 logger.warning(f"{log_prefix}: Failed to generate markdown content: {md_err}")
                 markdown_content_val = f"Error generating markdown: {md_err}"
@@ -685,6 +741,10 @@ class SelectorTools:
             error_msg = f"Extraction Exception: {type(e).__name__}: {e}"
             tb_str = traceback.format_exc()
             logger.error(f"{log_prefix}: {error_msg}", exc_info=False)  # No traceback in log
+            # TRUNCATE Traceback for the agent
+            max_tb_len = 1000
+            if len(tb_str) > max_tb_len:
+                tb_str = tb_str[:max_tb_len] + "\n... (Traceback truncated)"
             error_for_agent = f"{error_msg}\nTraceback:\n{tb_str}"
             return ExtractionResult(
                 error=error_for_agent,

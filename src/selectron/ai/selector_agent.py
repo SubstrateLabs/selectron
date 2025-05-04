@@ -76,7 +76,11 @@ class SelectorAgent:
     async def _safe_status_update(self, message: str, state: str, show_spinner: bool) -> None:
         if self.status_cb:
             try:
-                await self.status_cb(message=message, state=state, show_spinner=show_spinner)
+                # Escape brackets for Textual markup
+                escaped_message = message.replace("[", "[[").replace("]", "]]")
+                await self.status_cb(
+                    message=escaped_message, state=state, show_spinner=show_spinner
+                )
             except Exception as e:
                 logger.error(f"Error in status callback: {e}", exc_info=True)
 
@@ -301,7 +305,6 @@ class SelectorAgent:
 
     async def run(self, selector_description: str) -> SelectorProposal:
         """Executes the selector proposal agent workflow."""
-        logger.info("Starting SelectorAgent...")
         self._tool_call_count = 0  # Reset tool counter for each run
         await self._safe_status_update("Agent starting...", state="thinking", show_spinner=True)
         if not self.html_content:

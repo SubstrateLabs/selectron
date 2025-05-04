@@ -540,8 +540,6 @@ class SelectronApp(App[None]):
         """Helper method called via call_later to hide the status badge after a delay."""
         await asyncio.sleep(3.0)
         if self._active_tab_ref:
-            logger.debug("Hiding agent status badge after delay.")
-            # Use the concrete highlighter
             await self._highlighter.hide_agent_status(self._active_tab_ref)
         try:
             status_label = self.query_one("#agent-status-label", Label)
@@ -567,7 +565,6 @@ class SelectronApp(App[None]):
         try:
             parser_button = self.query_one("#generate-parser-button", Button)
             parser_button.disabled = not enabled
-            logger.debug(f"Set parser button enabled: {enabled}")
         except Exception as e:
             logger.error(f"Failed to set parser button enabled state: {e}", exc_info=True)
 

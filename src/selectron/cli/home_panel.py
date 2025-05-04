@@ -44,7 +44,9 @@ class HomePanel(Container):
         # This container will hold the dynamically changing content
         yield Vertical(
             Vertical(id="home-status-content"),  # Container for status widgets
-            Label("Interact with a page in Chrome to get started", id="agent-status-label"),  # Agent status label always present below
+            Label(
+                "Interact with a page in Chrome to get started", id="agent-status-label"
+            ),  # Agent status label always present below
         )
 
     def watch_status(self, old_status: ChromeStatus, new_status: ChromeStatus) -> None:

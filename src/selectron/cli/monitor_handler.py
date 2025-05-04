@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any, Optional
 
 from PIL import Image
@@ -11,8 +12,6 @@ from selectron.chrome.chrome_monitor import TabChangeEvent
 from selectron.chrome.types import TabReference
 from selectron.parse.parser_registry import ParserRegistry
 from selectron.util.logger import get_logger
-
-import asyncio
 
 if TYPE_CHECKING:
     from textual.widgets import DataTable, Input, Label
@@ -191,32 +190,36 @@ class MonitorEventHandler:
 
                         if isinstance(proposal, AutoProposal):
                             desc = proposal.proposed_description
-                            logger.info(f"Automatic proposal received: '{desc}'")
-
-                            # --- Attempt direct UI updates from worker --- #
                             try:
-                                logger.debug(f"Attempting to set prompt input directly to: '{desc}'")
                                 self._prompt_input.value = desc
-                                logger.debug(f"Prompt input value set. Attempting direct status update...")
                                 await self._app._update_ui_status(desc, "idle", False)
-                                logger.debug(f"Direct status update awaited.")
                             except Exception as ui_update_err:
-                                logger.error(f"Error during DIRECT UI update from proposal worker: {ui_update_err}", exc_info=True)
-                            # ---------------------------------------------- #
+                                logger.error(
+                                    f"Error during DIRECT UI update from proposal worker: {ui_update_err}",
+                                    exc_info=True,
+                                )
 
                         else:
-                            logger.warning(f"propose_selection returned unexpected type: {type(proposal)}")
+                            logger.warning(
+                                f"propose_selection returned unexpected type: {type(proposal)}"
+                            )
                             # Optionally hide status or show generic message if proposal is not AutoProposal
                             if self._app._active_tab_ref:
-                                self._app.call_later(lambda: self._highlighter.hide_agent_status(self._app._active_tab_ref))
+                                self._app.call_later(
+                                    lambda: self._highlighter.hide_agent_status(
+                                        self._app._active_tab_ref
+                                    )
+                                )
 
                     except Exception as e:
                         logger.error(f"Error during proposal worker: {e}", exc_info=True)
                         # Explicitly log if this generic exception handler is hit
-                        logger.critical("*** Generic exception handler in _do_propose_selection was triggered ***")
+                        logger.critical(
+                            "*** Generic exception handler in _do_propose_selection was triggered ***"
+                        )
                         if self._app._active_tab_ref:
                             # Attempt to hide status even on failure, schedule it via call_later
-                            tab_ref_capture = self._app._active_tab_ref # Capture ref
+                            tab_ref_capture = self._app._active_tab_ref  # Capture ref
                             self._app.call_later(
                                 lambda: asyncio.create_task(self._try_hide_status(tab_ref_capture))
                             )
@@ -240,7 +243,9 @@ class MonitorEventHandler:
     async def _try_hide_status(self, tab_ref: TabReference) -> None:
         """Attempt to hide status badge, catching errors."""
         try:
-            logger.debug(f"Attempting to hide status badge for tab {tab_ref.id} after proposal failure.")
+            logger.debug(
+                f"Attempting to hide status badge for tab {tab_ref.id} after proposal failure."
+            )
             await self._highlighter.hide_agent_status(tab_ref)
         except Exception as hide_err:
             logger.error(f"Error trying to hide agent status: {hide_err}", exc_info=True)

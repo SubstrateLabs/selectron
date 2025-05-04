@@ -13,6 +13,7 @@ app
 - readme
 - CI
 
-## bugs
-- pydanticai model length in messages sometimes exceeds
+## issues
+- many tool calls in selector proposal can result in exceeding context length
+  - trimmed down tool results so might be better (see selector_tools constants to tune)
 
