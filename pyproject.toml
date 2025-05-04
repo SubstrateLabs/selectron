@@ -63,7 +63,8 @@ path = "src/selectron/__about__.py"
 [tool.hatch.build]
 include = [
   "src/**/*.py",
-  "src/selectron/dom/buildDomTree.js"
+  "src/selectron/dom/buildDomTree.js",
+  "src/selectron/parsers/**/*.json"
 ]
 exclude = [
   "tests/**"

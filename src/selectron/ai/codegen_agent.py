@@ -216,10 +216,8 @@ class CodegenAgent:
                 if not save_path.exists():
                     result_data = {
                         "python": final_code,
-                        # Use placeholders or provided values
                         "selector": self.input_selector or "",
                         "selector_description": self.input_selector_description or "",
-                        "example_html": self.html_samples[0] if self.html_samples else "",
                     }
                     try:
                         save_path.write_text(json.dumps(result_data, indent=2, ensure_ascii=False))
