@@ -2,17 +2,15 @@ import importlib.resources
 from importlib.abc import Traversable
 from importlib.resources import as_file
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple
 
 from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
 
 from .parser_fallback import find_fallback_parser
+from .types import ParserInfo, ParserOrigin
 
 logger = get_logger(__name__)
-
-ParserOrigin = Literal["source", "user"]
-ParserInfo = Tuple[ParserOrigin, Union[Traversable, Path], Path]  # origin, resource, file_path
 
 
 class ParserRegistry:

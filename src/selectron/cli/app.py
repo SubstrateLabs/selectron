@@ -238,19 +238,14 @@ class SelectronApp(App[None]):
                 if self._agent_worker and self._agent_worker.is_running:
                     logger.info("Cancelling active agent worker.")
                     self._agent_worker.cancel()
-                    # Worker cleanup (like button reset) happens in worker's finally block or cancellation handler
+                    # Worker's CancelledError handler now manages UI state based on intermediate results.
                 else:
                     logger.warning("Stop requested, but no agent worker found or running.")
-                    # Manually reset button if no worker is running to clean up
+                    # If no worker running, manually reset button just in case.
                     submit_button.label = "Start AI selection"
                     submit_button.disabled = False
-
-                # Clear highlights and status regardless of worker state
-                if self._active_tab_ref:
-                    await self._highlighter.clear(self._active_tab_ref)
-                    await self._highlighter.hide_agent_status(self._active_tab_ref)
-                await self._update_ui_status("Selection cancelled by user.", state="idle")
-                self._set_parser_button_enabled(False)
+                    # Also ensure parser button is disabled if stop is pressed with no worker
+                    self._set_parser_button_enabled(False)
 
             else:
                 # --- Handle Start Action --- #
@@ -284,11 +279,9 @@ class SelectronApp(App[None]):
                     # Clear current parser info in handler
                     self._monitor_handler._current_parser_info = None
                     self._monitor_handler._current_parser_slug = None
-                    # Re-check for fallback parsers and clear highlights if none found
+                    # Explicitly clear the highlight for the deleted parser
                     if self._active_tab_ref:
-                        await self._monitor_handler._maybe_apply_parser_highlight(
-                            self._active_tab_ref
-                        )
+                        await self._highlighter.clear_parser(self._active_tab_ref)
                 else:
                     logger.error(f"Failed to delete parser with slug: {slug_to_delete}")
                     await self._update_ui_status("Failed to delete parser.", state="received_error")
@@ -432,10 +425,6 @@ class SelectronApp(App[None]):
             logger.error(f"Failed to query submit button: {e}", exc_info=True)
             submit_button = None
 
-        if submit_button:
-            submit_button.label = "Running AI..."
-            submit_button.disabled = True
-
         async def status_callback(message: str, state: str, show_spinner: bool):
             await self._update_ui_status(message, state, show_spinner)
 
@@ -463,6 +452,7 @@ class SelectronApp(App[None]):
             return
 
         proposal: Optional[SelectorProposal] = None
+        agent: Optional[SelectorAgent] = None  # Store agent instance
         try:
             agent = SelectorAgent(
                 html_content=current_html,
@@ -500,6 +490,10 @@ class SelectronApp(App[None]):
                     )
                 # Schedule badge hide after success
                 self.app.call_later(self._delayed_hide_status)
+                # Reset button after successful completion
+                if submit_button:
+                    submit_button.label = "Start AI selection"
+                    submit_button.disabled = False
 
         except SelectorAgentError as agent_err:
             # Agent already logged the specific error and updated status via callback
@@ -508,48 +502,80 @@ class SelectronApp(App[None]):
                 f"SelectorAgent failed: {agent_err}", update_status=False
             )
         except asyncio.CancelledError:
-            logger.info("Agent worker task was cancelled.")
-            # Status/highlights are cleared by the stop button handler
-            # Ensure the parser button is disabled after cancellation
-            self.call_later(self._set_parser_button_enabled, False)
-            # Button state might have been reset by the stop handler already,
-            # but ensure it's reset if cancellation came from elsewhere (e.g., quit).
-            # We check the label before resetting to avoid race conditions with the stop button handler.
-            try:
-                submit_button = self.query_one("#submit-button", Button)
-                if submit_button.label == "Stop AI selection":
-                    submit_button.label = "Start AI selection"
-                    submit_button.disabled = False
-            except Exception as e:
-                logger.error(
-                    f"Failed to query/reset submit button on cancellation: {e}", exc_info=True
+            logger.info("Agent worker task was cancelled by user.")
+            intermediate_selector: Optional[str] = None
+            if agent:
+                intermediate_selector = agent._best_selector_so_far
+
+            if intermediate_selector and self._active_tab_ref:
+                # --- Handle cancellation WITH a valid intermediate selector --- #
+                logger.info(
+                    f"Using intermediate selector found before cancellation: '{intermediate_selector}'"
                 )
-            # Rethrow cancellation to signal worker completion state if needed
-            raise
+                self._last_proposed_selector = intermediate_selector
+
+                # Use call_later for UI updates from worker
+                self.call_later(
+                    self._update_ui_status,
+                    "Selection stopped; using intermediate result.",
+                    "final_success",
+                    False,
+                )
+                self.call_later(
+                    self._highlighter.highlight, self._active_tab_ref, intermediate_selector, "lime"
+                )
+                self.call_later(self._set_parser_button_enabled, True)
+                self.call_later(self._delayed_hide_status)  # Schedule status hide
+
+                # Reset button immediately within call_later if possible, or schedule reset
+                def _reset_button_on_cancel_success():
+                    try:
+                        button = self.query_one("#submit-button", Button)
+                        button.label = "Start AI selection"
+                        button.disabled = False
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to reset submit button on cancel success: {e}", exc_info=True
+                        )
+
+                self.call_later(_reset_button_on_cancel_success)
+
+            else:
+                # --- Handle cancellation WITHOUT a valid intermediate selector --- #
+                logger.info("Agent cancelled, no intermediate selector found to use.")
+                # Use call_later for UI updates from worker
+                if self._active_tab_ref:
+                    self.call_later(self._highlighter.clear, self._active_tab_ref)
+                    self.call_later(self._highlighter.hide_agent_status, self._active_tab_ref)
+                self.call_later(self._update_ui_status, "Selection cancelled.", "idle", False)
+                self.call_later(self._set_parser_button_enabled, False)
+
+                # Reset button
+                def _reset_button_on_cancel_fail():
+                    try:
+                        button = self.query_one("#submit-button", Button)
+                        button.label = "Start AI selection"
+                        button.disabled = False
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to reset submit button on cancel fail: {e}", exc_info=True
+                        )
+
+                self.call_later(_reset_button_on_cancel_fail)
+
+            # Do not re-raise cancellation error, as we've handled the state.
+            # raise
         except Exception as e:
             # Catch unexpected errors *outside* the agent's known failure modes
             log_msg = f"Unexpected error in worker task for target '{selector_description}': {e}"
             # The handler will also update the status to a generic error message
             await self._handle_agent_failure(log_msg, update_status=True)
+            # Button reset is handled by _handle_agent_failure
         finally:
-            if submit_button:
-                submit_button.label = "Start AI selection"
-                submit_button.disabled = False
-            # Note: Badge hiding is handled by success/error paths scheduling _delayed_hide_status
-            # Cancellation is handled by action_quit
-
-            # Reset button state ONLY if it wasn't cancelled by the user (which resets it already)
-            # This covers normal completion and non-cancellation errors.
-            try:
-                submit_button = self.query_one("#submit-button", Button)
-                # Check if the button still indicates it's running; if so, reset it.
-                if submit_button.label == "Stop AI selection":
-                    submit_button.label = "Start AI selection"
-                    submit_button.disabled = False
-            except Exception as e:
-                logger.error(
-                    f"Failed to query/reset submit button in finally block: {e}", exc_info=True
-                )
+            # Button reset logic is now handled within success/error/cancel paths
+            pass
+        # Note: Badge hiding is handled by success/error paths scheduling _delayed_hide_status
+        # or within the CancelledError handler.
 
     async def trigger_rehighlight(self, tab_ref: Optional[TabReference] = None):
         # Check if there's an active tab and if the highlighter state indicates highlights are active

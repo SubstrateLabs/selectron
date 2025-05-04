@@ -81,6 +81,7 @@ class SelectorAgent:
 
         self._tools_instance = SelectorTools(html_content=self.html_content, base_url=self.base_url)
         self._tool_call_count = 0
+        self._best_selector_so_far: Optional[str] = None  # Track the last valid selector found
 
     async def _safe_status_update(self, message: str, state: str, show_spinner: bool) -> None:
         if self.status_cb:
@@ -130,6 +131,7 @@ class SelectorAgent:
                 state="received_success",
                 show_spinner=True,
             )
+            self._best_selector_so_far = selector  # <-- Store successful selector
         elif result and result.element_count == 0 and not result.error:
             await self._safe_status_update(
                 f"{status_prefix} Selector found 0 elements",

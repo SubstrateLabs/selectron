@@ -88,9 +88,6 @@ class MonitorEventHandler:
         except Exception as label_err:
             logger.error(f"Failed to update URL label on interaction: {label_err}")
 
-        # Call app's method to clear table
-        await self.app._clear_table_view()
-
         # Reset proposal flag logic
         current_active_id_for_propose_select = self.app._propose_selection_done_for_tab
         if tab_ref and tab_ref.id != current_active_id_for_propose_select:
@@ -263,11 +260,6 @@ class MonitorEventHandler:
         if not tab_ref.url or not tab_ref.id:
             return
 
-        last_url = self._parser_highlighted_for_tab.get(tab_ref.id)
-        if last_url == tab_ref.url:
-            # already highlighted for this url
-            return
-
         # load parser
         try:
             parser = self._parser_registry.load_parser(tab_ref.url)
@@ -288,7 +280,6 @@ class MonitorEventHandler:
             self._current_parser_info = parser
             self._current_parser_slug = slugify_url(tab_ref.url)
 
-            logger.info(f"Applying parser (origin: {origin}) for URL {tab_ref.url}")
             selector = parser_dict.get("selector")
             if selector:
                 # Highlight elements matched by the parser's selector
@@ -305,7 +296,6 @@ class MonitorEventHandler:
                 logger.warning(f"Loaded parser for {tab_ref.url} is missing 'selector' key.")
                 self._set_delete_button_visibility(False)
         else:
-            logger.debug(f"No parser found for {tab_ref.url}, clearing parser highlights.")
             await self._highlighter.clear_parser(tab_ref)
             self._set_delete_button_visibility(False)
 
@@ -314,6 +304,7 @@ class MonitorEventHandler:
         self, tab_ref: TabReference, parser_dict: Dict[str, Any]
     ) -> None:
         """Execute parser python code against each selected element's HTML (fetched live) and display results as columns."""
+        logger.debug(f"Entering _apply_parser_extract for tab {tab_ref.id}")
 
         import json
         import reprlib
@@ -330,11 +321,14 @@ class MonitorEventHandler:
         # Prepare sandbox
         sandbox: dict[str, Any] = {"BeautifulSoup": BeautifulSoup, "json": json}
         try:
+            logger.debug("Executing parser python code in sandbox...")
             exec(python_code, sandbox)
+            logger.debug("Parser code executed successfully.")
         except Exception as e:
-            logger.error(f"Parser execution error: {e}", exc_info=True)
+            logger.error(f"Parser execution error during exec: {e}", exc_info=True)
             return
 
+        logger.debug("Retrieving parse_element function from sandbox...")
         parse_fn = sandbox.get("parse_element")
         if not callable(parse_fn):
             logger.error("Parser does not define a callable 'parse_element' function.")
@@ -342,9 +336,14 @@ class MonitorEventHandler:
 
         # Get element HTML directly from the browser
         try:
+            logger.debug(f"Fetching HTML for elements matching selector: '{selector}'")
             element_htmls = await self._highlighter.get_elements_html(
                 tab_ref, selector, max_elements=100
             )
+            if element_htmls is not None:
+                logger.debug(f"Successfully fetched HTML for {len(element_htmls)} elements.")
+            else:
+                logger.warning("get_elements_html returned None unexpectedly.")
         except Exception as e:
             logger.error(f"Error getting element HTML via CDP: {e}", exc_info=True)
             await self.app._clear_table_view()  # Clear table on error
@@ -366,11 +365,11 @@ class MonitorEventHandler:
                     parsed_dict = result
                 else:
                     logger.error(
-                        f"parse_element for element {idx} returned non-dict type: {type(result).__name__}"
+                        f"parse_element for element {idx+1} returned non-dict type: {type(result).__name__}"
                     )
                     # Keep parsed_dict as None
             except Exception as e:
-                logger.error(f"Error running parse_element for element {idx}: {e}", exc_info=True)
+                logger.error(f"Error running parse_element for element {idx+1}: {e}", exc_info=True)
                 # parsed_dict remains None
 
             results_data.append(parsed_dict)
@@ -385,6 +384,7 @@ class MonitorEventHandler:
         # Update data table
         try:
             table = self._data_table
+            logger.debug(f"Clearing data table. Found {len(column_keys)} columns for {len(results_data)} results.")
             table.clear(columns=True)
 
             # Add columns
