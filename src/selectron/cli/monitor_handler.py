@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from PIL import Image
+from textual.widgets import Button, DataTable, Input, Label
 
 from selectron.ai.propose_selection import propose_selection
 from selectron.ai.types import AutoProposal
@@ -12,9 +14,10 @@ from selectron.chrome.chrome_monitor import TabChangeEvent
 from selectron.chrome.types import TabReference
 from selectron.parse.parser_registry import ParserRegistry
 from selectron.util.logger import get_logger
+from selectron.util.slugify_url import slugify_url
 
 if TYPE_CHECKING:
-    from textual.widgets import DataTable, Input, Label
+    from textual.widgets import Button, DataTable, Input, Label
 
     from selectron.cli.app import SelectronApp  # Use specific type if possible
 
@@ -26,13 +29,14 @@ class MonitorEventHandler:
 
     def __init__(
         self,
-        app: SelectronApp,  # Keep strong typing
+        *,  # Force keyword args
+        app: "SelectronApp",  # Forward reference for typing
         highlighter: ChromeHighlighter,
         url_label: Label,
         data_table: DataTable,
         prompt_input: Input,
     ):
-        self._app = app
+        self.app = app
         self._highlighter = highlighter
         # Store references to UI elements needed
         self._url_label = url_label
@@ -43,6 +47,12 @@ class MonitorEventHandler:
         self._parser_registry = ParserRegistry()
         # Track last URL for which parser highlight was applied per tab
         self._parser_highlighted_for_tab: dict[str, str] = {}
+        self._last_polling_state: Dict[int, str] = {}
+        self._last_interaction_update_time: float = 0
+        self._current_parser_info: Optional[Tuple[Dict[str, Any], str, Path]] = (
+            None  # (parser_dict, origin, path)
+        )
+        self._current_parser_slug: Optional[str] = None
 
     async def handle_polling_change(self, event: TabChangeEvent) -> None:
         """Handles tab navigation/changes detected by polling."""
@@ -51,8 +61,8 @@ class MonitorEventHandler:
         if navigated_tabs_info:
             navigated_ids = {new_tab.id for new_tab, _ in navigated_tabs_info}
             logger.debug(f"Polling detected navigation for tabs: {navigated_ids}. Resetting flag.")
-            # Access app state via self._app
-            self._app._propose_selection_done_for_tab = None
+            # Access app state via self.app
+            self.app._propose_selection_done_for_tab = None
             # NOTE: Cannot reliably clear highlights/badges here as ws_url may be missing
 
             # clear any persistent parser highlights for navigated tabs
@@ -69,7 +79,7 @@ class MonitorEventHandler:
     async def handle_interaction_update(self, tab_ref: TabReference) -> None:
         """Handles updates triggered by user interaction in a tab."""
         # Logic moved from SelectronApp._handle_interaction_update
-        self._app._active_tab_ref = tab_ref
+        self.app._active_tab_ref = tab_ref
 
         try:
             # Use the stored Label reference
@@ -79,12 +89,12 @@ class MonitorEventHandler:
             logger.error(f"Failed to update URL label on interaction: {label_err}")
 
         # Call app's method to clear table
-        await self._app._clear_table_view()
+        await self.app._clear_table_view()
 
         # Reset proposal flag logic
-        current_active_id_for_propose_select = self._app._propose_selection_done_for_tab
+        current_active_id_for_propose_select = self.app._propose_selection_done_for_tab
         if tab_ref and tab_ref.id != current_active_id_for_propose_select:
-            self._app._propose_selection_done_for_tab = (
+            self.app._propose_selection_done_for_tab = (
                 None  # Allow proposal for this tab upon next content fetch
             )
 
@@ -107,12 +117,12 @@ class MonitorEventHandler:
             logger.warning(
                 f"Monitor Content Fetched (Tab {tab_ref.id}): No HTML content in TabReference."
             )
-            await self._app._clear_table_view()
+            await self.app._clear_table_view()
             return
 
         # Always update the active ref and DOM string first (on the app)
-        self._app._active_tab_ref = tab_ref
-        self._app._active_tab_dom_string = dom_string
+        self.app._active_tab_ref = tab_ref
+        self.app._active_tab_dom_string = dom_string
 
         # Update UI Label using the latest fetched info (using stored ref)
         try:
@@ -138,12 +148,12 @@ class MonitorEventHandler:
                             f"Parser found for {tab_ref.url}, using description: '{selector_description}'"
                         )
                         # ---> Cancel any pending debounce timer BEFORE setting value <--- #
-                        if self._app._input_debounce_timer:
-                            self._app._input_debounce_timer.stop()
-                            self._app._input_debounce_timer = None  # Clear the reference
+                        if self.app._input_debounce_timer:
+                            self.app._input_debounce_timer.stop()
+                            self.app._input_debounce_timer = None  # Clear the reference
                         self._prompt_input.value = selector_description  # Now set the value
                         # Update status immediately and mark proposal as 'done' for this tab
-                        self._app._propose_selection_done_for_tab = tab_ref.id
+                        self.app._propose_selection_done_for_tab = tab_ref.id
                         parser_found_and_handled = True
                     else:
                         logger.debug(
@@ -156,40 +166,40 @@ class MonitorEventHandler:
                 logger.error(f"Error checking for parser for url '{tab_ref.url}': {e}")
 
         # Check if the main agent worker is running (on the app)
-        if self._app._agent_worker and self._app._agent_worker.is_running:
+        if self.app._agent_worker and self.app._agent_worker.is_running:
             logger.debug("Skipping proposal: Selector agent is currently running.")
             pass  # Let the logic proceed to potentially update the flag if needed, but don't start worker
         elif not parser_found_and_handled:  # Only propose if parser wasn't found/handled
             # Only proceed with proposal if agent is NOT running
             if (
                 screenshot
-                and self._app._active_tab_ref
-                and self._app._propose_selection_done_for_tab != self._app._active_tab_ref.id
+                and self.app._active_tab_ref
+                and self.app._propose_selection_done_for_tab != self.app._active_tab_ref.id
             ):
                 # Use app's _update_ui_status helper instead of direct highlighter call
-                await self._app._update_ui_status(
+                await self.app._update_ui_status(
                     "Proposing selection...", state="thinking", show_spinner=True
                 )
 
                 if (
-                    self._app._propose_selection_worker
-                    and self._app._propose_selection_worker.is_running
+                    self.app._propose_selection_worker
+                    and self.app._propose_selection_worker.is_running
                 ):
                     logger.debug("Cancelling previous propose worker.")
-                    self._app._propose_selection_worker.cancel()
+                    self.app._propose_selection_worker.cancel()
 
                 async def _do_propose_selection():
                     try:
                         # Use app's model config
-                        proposal = await propose_selection(screenshot, self._app._model_config)
-                        if self._app._active_tab_ref:
-                            self._app._propose_selection_done_for_tab = self._app._active_tab_ref.id
+                        proposal = await propose_selection(screenshot, self.app._model_config)
+                        if self.app._active_tab_ref:
+                            self.app._propose_selection_done_for_tab = self.app._active_tab_ref.id
 
                         if isinstance(proposal, AutoProposal):
                             desc = proposal.proposed_description
                             try:
                                 self._prompt_input.value = desc
-                                await self._app._update_ui_status(desc, "idle", False)
+                                await self.app._update_ui_status(desc, "idle", False)
                             except Exception as ui_update_err:
                                 logger.error(
                                     f"Error during DIRECT UI update from proposal worker: {ui_update_err}",
@@ -201,10 +211,10 @@ class MonitorEventHandler:
                                 f"propose_selection returned unexpected type: {type(proposal)}"
                             )
                             # Optionally hide status or show generic message if proposal is not AutoProposal
-                            if self._app._active_tab_ref:
-                                self._app.call_later(
+                            if self.app._active_tab_ref:
+                                self.app.call_later(
                                     lambda: self._highlighter.hide_agent_status(
-                                        self._app._active_tab_ref
+                                        self.app._active_tab_ref
                                     )
                                 )
 
@@ -214,21 +224,21 @@ class MonitorEventHandler:
                         logger.critical(
                             "*** Generic exception handler in _do_propose_selection was triggered ***"
                         )
-                        if self._app._active_tab_ref:
+                        if self.app._active_tab_ref:
                             # Attempt to hide status even on failure, schedule it via call_later
-                            tab_ref_capture = self._app._active_tab_ref  # Capture ref
-                            self._app.call_later(
+                            tab_ref_capture = self.app._active_tab_ref  # Capture ref
+                            self.app.call_later(
                                 lambda: asyncio.create_task(self._try_hide_status(tab_ref_capture))
                             )
 
                 # Use app's run_worker
-                self._app._propose_selection_worker = self._app.run_worker(
+                self.app._propose_selection_worker = self.app.run_worker(
                     _do_propose_selection(), exclusive=True, group="propose_selection"
                 )
             elif (
                 screenshot
-                and self._app._active_tab_ref
-                and self._app._propose_selection_done_for_tab == self._app._active_tab_ref.id
+                and self.app._active_tab_ref
+                and self.app._propose_selection_done_for_tab == self.app._active_tab_ref.id
             ):
                 pass
             elif not screenshot:
@@ -268,32 +278,41 @@ class MonitorEventHandler:
         # clear previous highlight first (if any)
         await self._highlighter.clear_parser(tab_ref)
 
-        if (
-            parser
-            and isinstance(parser, dict)
-            and (selector := parser.get("selector"))
-            and isinstance(selector, str)
-        ):
-            try:
-                success = await self._highlighter.highlight_parser(tab_ref, selector, color="cyan")
-                if success:
-                    self._parser_highlighted_for_tab[tab_ref.id] = tab_ref.url
+        self._set_delete_button_visibility(False)  # Hide by default
+        self._current_parser_info = None
+        self._current_parser_slug = None
 
-                    # After successful highlight, run parser extraction and update table
-                    if parser and isinstance(parser.get("python"), str):
-                        await self._apply_parser_extract(tab_ref, parser)
+        # If parser found, apply highlight and extract
+        if parser:
+            parser_dict, origin, _file_path = parser
+            self._current_parser_info = parser
+            self._current_parser_slug = slugify_url(tab_ref.url)
 
-                else:
-                    self._parser_highlighted_for_tab.pop(tab_ref.id, None)
-            except Exception as e:
-                logger.debug(f"Failed to apply parser highlight for tab {tab_ref.id}: {e}")
-                self._parser_highlighted_for_tab.pop(tab_ref.id, None)
+            logger.info(f"Applying parser (origin: {origin}) for URL {tab_ref.url}")
+            selector = parser_dict.get("selector")
+            if selector:
+                # Highlight elements matched by the parser's selector
+                await self._highlighter.highlight_parser(tab_ref, selector)
+                self._parser_highlighted_for_tab[tab_ref.id] = tab_ref.url  # Mark highlight done
+
+                # Extract data using the parser and update the table
+                await self._apply_parser_extract(tab_ref, parser_dict)
+
+                # Show delete button ONLY if the parser origin is 'source'
+                self._set_delete_button_visibility(origin == "source")
+
+            else:
+                logger.warning(f"Loaded parser for {tab_ref.url} is missing 'selector' key.")
+                self._set_delete_button_visibility(False)
         else:
-            # no parser – ensure mapping cleared
-            self._parser_highlighted_for_tab.pop(tab_ref.id, None)
+            logger.debug(f"No parser found for {tab_ref.url}, clearing parser highlights.")
+            await self._highlighter.clear_parser(tab_ref)
+            self._set_delete_button_visibility(False)
 
     # --- Run parser code on selected elements and update data table --- #
-    async def _apply_parser_extract(self, tab_ref: TabReference, parser: dict) -> None:
+    async def _apply_parser_extract(
+        self, tab_ref: TabReference, parser_dict: Dict[str, Any]
+    ) -> None:
         """Execute parser python code against each selected element's HTML (fetched live) and display results as columns."""
 
         import json
@@ -301,8 +320,8 @@ class MonitorEventHandler:
 
         from bs4 import BeautifulSoup
 
-        selector = parser.get("selector")
-        python_code = parser.get("python")
+        selector = parser_dict.get("selector")
+        python_code = parser_dict.get("python")
 
         if not selector or not python_code or not isinstance(selector, str):
             logger.debug("_apply_parser_extract: missing selector or python code.")
@@ -328,12 +347,12 @@ class MonitorEventHandler:
             )
         except Exception as e:
             logger.error(f"Error getting element HTML via CDP: {e}", exc_info=True)
-            await self._app._clear_table_view()  # Clear table on error
+            await self.app._clear_table_view()  # Clear table on error
             return
 
         if not element_htmls:
             logger.debug(f"Parser selector '{selector}' matched no elements in live browser.")
-            await self._app._clear_table_view()  # clear table if no results
+            await self.app._clear_table_view()  # clear table if no results
             return
 
         # Execute parser on each element and collect results
@@ -392,3 +411,16 @@ class MonitorEventHandler:
 
         except Exception as e:
             logger.error(f"Failed to update data table with parser results: {e}", exc_info=True)
+
+    def _set_delete_button_visibility(self, visible: bool) -> None:
+        """Sets the visibility/disabled state of the delete parser button in the app."""
+        try:
+            # Access the button through the app reference
+            delete_button = self.app.query_one("#delete-parser-button", Button)
+            # Hide button by setting display=False, or disable it
+            # Using display: none is usually better for layout stability
+            delete_button.display = visible
+            # Alternatively, disable: delete_button.disabled = not visible
+        except Exception as e:
+            # Log if the button isn't found (might happen during setup/teardown)
+            logger.debug(f"Could not find or update delete-parser-button: {e}")

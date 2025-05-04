@@ -1,7 +1,8 @@
 import importlib.resources
 from importlib.abc import Traversable
+from importlib.resources import as_file
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
@@ -10,61 +11,36 @@ from .parser_fallback import find_fallback_parser
 
 logger = get_logger(__name__)
 
+ParserOrigin = Literal["source", "user"]
+ParserInfo = Tuple[ParserOrigin, Union[Traversable, Path], Path]  # origin, resource, file_path
+
 
 class ParserRegistry:
     def __init__(self):
-        self._available_parsers: Dict[str, Traversable] = {}
+        # Store tuples: (origin, resource_handle, file_path)
+        self._available_parsers: Dict[str, ParserInfo] = {}
         self._parser_dir_ref: Optional[Traversable] = None
         self._app_parser_dir: Optional[Path] = None
 
-        # 1. Load base parsers from package resources
+        # 1. Try to locate the base parser directory within package resources
         try:
             self._parser_dir_ref = importlib.resources.files("selectron").joinpath("parsers")
-            if self._parser_dir_ref.is_dir():
-                logger.info("Using source parser directory for loading.")
-            else:
-                logger.error(
-                    "Parser directory 'selectron/parsers' not found within package resources."
+            if not self._parser_dir_ref.is_dir():
+                logger.warning(
+                    "Base parser directory 'selectron/parsers' not found or not a directory within package resources."
                 )
                 self._parser_dir_ref = None
+            else:
+                logger.info(f"Located base parser directory resource: {self._parser_dir_ref}")
 
         except ModuleNotFoundError:
-            logger.warning("Package 'selectron' not found. Parser registry will be empty.")
+            logger.warning("Package 'selectron' not found. Cannot load base parsers.")
             self._parser_dir_ref = None
         except Exception as e:
-            logger.error(
-                f"Error accessing package resources or listing base parsers: {e}", exc_info=True
-            )
+            logger.error(f"Error accessing package resources for base parsers: {e}", exc_info=True)
             self._parser_dir_ref = None
 
-        # 2. Load user-specific parsers from app config directory
-        app_parsers_dir = get_app_dir() / "parsers"
-        user_parser_count = 0
-        if app_parsers_dir.is_dir():
-            try:
-                for item in app_parsers_dir.iterdir():
-                    # Use Path objects directly for user parsers
-                    if item.is_file() and item.name.endswith(".json"):
-                        slug = item.name[:-5]
-                        # Only add if not already present from base parsers
-                        if slug not in self._available_parsers:
-                            # Store the Path object directly
-                            self._available_parsers[slug] = item
-                            user_parser_count += 1
-                        else:
-                            logger.debug(
-                                f"Skipping user parser '{slug}', as it already exists as a base parser."
-                            )
-                if user_parser_count > 0:
-                    logger.info(
-                        f"Found {user_parser_count} additional user parser definitions in {app_parsers_dir}."
-                    )
-            except Exception as e:
-                logger.error(f"Error listing user parsers in {app_parsers_dir}: {e}", exc_info=True)
-        else:
-            logger.info(f"User parser directory not found or not a directory: {app_parsers_dir}")
-
-        # Also check and prepare the user-specific parser directory
+        # 2. Locate and ensure the user-specific parser directory exists
         try:
             self._app_parser_dir = get_app_dir() / "parsers"
             self._app_parser_dir.mkdir(parents=True, exist_ok=True)
@@ -79,25 +55,23 @@ class ParserRegistry:
         # Perform initial scan
         self.rescan_parsers()  # Call rescan during init
 
-        logger.info(f"Total available parsers (base + user): {len(self._available_parsers)}")
+        logger.info(f"Total available parsers loaded: {len(self._available_parsers)}")
 
-    def load_parser(self, url: str) -> Optional[Dict[str, Any]]:
+    def load_parser(self, url: str) -> Optional[Tuple[Dict[str, Any], ParserOrigin, Path]]:
         """
         Attempts to load a parser for the URL, using fallback logic.
 
         Uses the find_fallback_parser utility to check the exact URL slug,
-        parent path slugs, and the domain root slug against available parsers
-        (both base and user-specific).
+        parent path slugs, and the domain root slug against available parsers.
 
         Args:
             url: The target URL.
 
         Returns:
-            The parser definition dictionary if found (either exact or via fallback),
-            otherwise None.
+            A tuple containing the parser definition dictionary, its origin ('source' or 'user'),
+            and its file Path if found (either exact or via fallback), otherwise None.
         """
-        # The available_parsers dict now contains both base and user parsers
-        # Pass the combined dictionary and handle Path/Traversable differences in fallback
+        # Pass the combined dictionary
         return find_fallback_parser(url, self._available_parsers)
 
     def rescan_parsers(self) -> None:
@@ -105,41 +79,109 @@ class ParserRegistry:
         logger.info("Rescanning parser directories...")
         self._available_parsers.clear()
         loaded_count = 0
+        source_parsers_found = 0
+        user_parsers_found = 0
 
-        # Scan source directory (if available)
+        # Scan source directory (if available) - Lower priority
         if self._parser_dir_ref and self._parser_dir_ref.is_dir():
             try:
-                for item in self._parser_dir_ref.iterdir():
-                    if item.is_file() and item.name.endswith(".json"):
-                        slug = item.name[:-5]
-                        # Source dir has lower priority, only add if not already loaded from user dir
-                        if slug not in self._available_parsers:
-                            self._available_parsers[slug] = item
-                            loaded_count += 1
-            except Exception as e:
-                logger.error(f"Error scanning source parser directory: {e}", exc_info=True)
+                for item_resource in self._parser_dir_ref.iterdir():
+                    if item_resource.is_file() and item_resource.name.endswith(".json"):
+                        slug = item_resource.name[:-5]
+                        try:
+                            # Resolve Traversable to a real Path using a context manager
+                            with as_file(item_resource) as item_path:
+                                if (
+                                    slug not in self._available_parsers
+                                ):  # Add only if not overridden by user parser later
+                                    self._available_parsers[slug] = (
+                                        "source",
+                                        item_resource,
+                                        item_path,
+                                    )
+                                    source_parsers_found += 1
+                        except FileNotFoundError:
+                            logger.error(
+                                f"Could not resolve source parser resource to a file path (might be inside a package?): {item_resource.name}"
+                            )
+                        except Exception as resolve_err:
+                            logger.error(
+                                f"Error resolving source parser resource path {item_resource.name}: {resolve_err}",
+                                exc_info=True,
+                            )
 
-        # Scan user directory (if available) - This overrides source dir parsers
+            except Exception as e:
+                logger.error(f"Error scanning source parser directory resource: {e}", exc_info=True)
+
+        # Scan user directory (if available) - Higher priority (overwrites source)
         if self._app_parser_dir and self._app_parser_dir.is_dir():
             try:
                 for item_path in self._app_parser_dir.glob("*.json"):
                     if item_path.is_file():
                         slug = item_path.stem  # Use stem to get name without extension
-                        # User dir has higher priority, potentially overwriting source
-                        # Note: We need a Traversable here, not a Path. Reconstruct.
-                        # This assumes the user dir is findable via importlib resources mechanism
-                        # relative to the app's install location or cwd, which might be brittle.
-                        # TODO: Revisit how user parsers are loaded. For now, log a warning.
-                        logger.warning(
-                            f"Loading user parser '{item_path.name}' by direct path - registry might not handle this robustly."
-                        )
-                        # Attempt to load as path for now, knowing fallback might break
-                        self._available_parsers[slug] = item_path  # Store Path, not Traversable
-                        loaded_count += 1
+                        # User parsers always override source parsers
+                        if (
+                            slug in self._available_parsers
+                            and self._available_parsers[slug][0] == "source"
+                        ):
+                            logger.debug(f"User parser '{slug}' is overriding source parser.")
+                        self._available_parsers[slug] = (
+                            "user",
+                            item_path,
+                            item_path,
+                        )  # resource and path are the same for user
+                        user_parsers_found += 1
             except Exception as e:
                 logger.error(
                     f"Error scanning user parser directory {self._app_parser_dir}: {e}",
                     exc_info=True,
                 )
 
-        logger.info(f"Parser rescan complete. Found {len(self._available_parsers)} definitions.")
+        loaded_count = len(self._available_parsers)
+        logger.info(
+            f"Parser rescan complete. Found {loaded_count} total definitions ({source_parsers_found} source, {user_parsers_found} user initially scanned)."
+        )
+
+    def delete_source_parser(self, slug: str) -> bool:
+        """
+        Deletes a parser file from the source parser directory.
+
+        Args:
+            slug: The identifier slug of the parser to delete.
+
+        Returns:
+            True if the parser was found, identified as 'source', and deleted successfully, False otherwise.
+        """
+        parser_info = self._available_parsers.get(slug)
+        if not parser_info:
+            logger.warning(f"Attempted to delete non-existent parser with slug: {slug}")
+            return False
+
+        origin, _, file_path = parser_info
+
+        if origin != "source":
+            logger.warning(
+                f"Attempted to delete a non-source parser '{slug}' (origin: {origin}). Deletion refused."
+            )
+            return False
+
+        if not file_path.exists():
+            logger.error(
+                f"Source parser '{slug}' record exists but file path not found: {file_path}. Cannot delete."
+            )
+            # Optionally remove from registry if file is gone?
+            # del self._available_parsers[slug]
+            return False
+
+        try:
+            file_path.unlink()
+            logger.info(f"Successfully deleted source parser file: {file_path}")
+            # Remove from registry after successful deletion
+            del self._available_parsers[slug]
+            return True
+        except Exception as e:
+            logger.error(
+                f"Failed to delete source parser file {file_path} for slug '{slug}': {e}",
+                exc_info=True,
+            )
+            return False

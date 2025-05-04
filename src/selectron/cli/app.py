@@ -95,6 +95,7 @@ class SelectronApp(App[None]):
                 yield Button(
                     "Start AI parser generation", id="generate-parser-button", disabled=True
                 )
+                yield Button("Delete Parser", id="delete-parser-button")
             yield Input(placeholder="Enter prompt (or let AI propose...)", id="prompt-input")
             yield Label("No active tab (interact to activate)", id="active-tab-url-label")
         yield Footer()
@@ -230,7 +231,30 @@ class SelectronApp(App[None]):
             await self.action_restart_chrome()
         elif button_id == "submit-button":
             input_widget = self.query_one("#prompt-input", Input)
-            await self.on_input_submitted(Input.Submitted(input_widget, input_widget.value))
+            submit_button = self.query_one("#submit-button", Button)
+            if submit_button.label == "Stop AI selection":
+                # --- Handle Stop Action --- #
+                logger.info("User requested to stop AI selection.")
+                if self._agent_worker and self._agent_worker.is_running:
+                    logger.info("Cancelling active agent worker.")
+                    self._agent_worker.cancel()
+                    # Worker cleanup (like button reset) happens in worker's finally block or cancellation handler
+                else:
+                    logger.warning("Stop requested, but no agent worker found or running.")
+                    # Manually reset button if no worker is running to clean up
+                    submit_button.label = "Start AI selection"
+                    submit_button.disabled = False
+
+                # Clear highlights and status regardless of worker state
+                if self._active_tab_ref:
+                    await self._highlighter.clear(self._active_tab_ref)
+                    await self._highlighter.hide_agent_status(self._active_tab_ref)
+                await self._update_ui_status("Selection cancelled by user.", state="idle")
+                self._set_parser_button_enabled(False)
+
+            else:
+                # --- Handle Start Action --- #
+                await self.on_input_submitted(Input.Submitted(input_widget, input_widget.value))
         elif button_id == "generate-parser-button":
             # Trigger parser generation workflow
             if self._codegen_worker and self._codegen_worker.is_running:
@@ -243,6 +267,35 @@ class SelectronApp(App[None]):
                 exclusive=True,
                 group="parser_codegen",
             )
+        elif button_id == "delete-parser-button":
+            # --- Handle Delete Parser Action --- #
+            logger.info("User requested to delete current source parser.")
+            if self._monitor_handler and self._monitor_handler._current_parser_slug:
+                slug_to_delete = self._monitor_handler._current_parser_slug
+                deleted = self._monitor_handler._parser_registry.delete_source_parser(
+                    slug_to_delete
+                )
+                if deleted:
+                    logger.info(f"Successfully deleted parser with slug: {slug_to_delete}")
+                    await self._update_ui_status("Parser deleted.", state="idle")
+                    await self._clear_table_view()
+                    # Hide the button via the handler method
+                    self._monitor_handler._set_delete_button_visibility(False)
+                    # Clear current parser info in handler
+                    self._monitor_handler._current_parser_info = None
+                    self._monitor_handler._current_parser_slug = None
+                    # Re-check for fallback parsers and clear highlights if none found
+                    if self._active_tab_ref:
+                        await self._monitor_handler._maybe_apply_parser_highlight(
+                            self._active_tab_ref
+                        )
+                else:
+                    logger.error(f"Failed to delete parser with slug: {slug_to_delete}")
+                    await self._update_ui_status("Failed to delete parser.", state="received_error")
+            else:
+                logger.warning(
+                    "Delete parser button pressed, but no current parser slug identified in handler."
+                )
         else:
             logger.warning(f"Unhandled button press: {event.button.id}")
 
@@ -271,6 +324,15 @@ class SelectronApp(App[None]):
 
             # Update UI status immediately
             await self._update_ui_status("Preparing agent...", state="thinking")
+
+            # Update button state: Change label and keep enabled for stopping
+            try:
+                submit_button = self.query_one("#submit-button", Button)
+                submit_button.label = "Stop AI selection"
+                submit_button.disabled = False  # Keep enabled to allow stopping
+            except Exception as e:
+                logger.error(f"Failed to update submit button state: {e}", exc_info=True)
+                # Optionally handle the error, e.g., don't start the worker
 
             if self._agent_worker and self._agent_worker.is_running:
                 logger.info("Cancelling previous agent worker.")
@@ -445,6 +507,25 @@ class SelectronApp(App[None]):
             await self._handle_agent_failure(
                 f"SelectorAgent failed: {agent_err}", update_status=False
             )
+        except asyncio.CancelledError:
+            logger.info("Agent worker task was cancelled.")
+            # Status/highlights are cleared by the stop button handler
+            # Ensure the parser button is disabled after cancellation
+            self.call_later(self._set_parser_button_enabled, False)
+            # Button state might have been reset by the stop handler already,
+            # but ensure it's reset if cancellation came from elsewhere (e.g., quit).
+            # We check the label before resetting to avoid race conditions with the stop button handler.
+            try:
+                submit_button = self.query_one("#submit-button", Button)
+                if submit_button.label == "Stop AI selection":
+                    submit_button.label = "Start AI selection"
+                    submit_button.disabled = False
+            except Exception as e:
+                logger.error(
+                    f"Failed to query/reset submit button on cancellation: {e}", exc_info=True
+                )
+            # Rethrow cancellation to signal worker completion state if needed
+            raise
         except Exception as e:
             # Catch unexpected errors *outside* the agent's known failure modes
             log_msg = f"Unexpected error in worker task for target '{selector_description}': {e}"
@@ -456,6 +537,19 @@ class SelectronApp(App[None]):
                 submit_button.disabled = False
             # Note: Badge hiding is handled by success/error paths scheduling _delayed_hide_status
             # Cancellation is handled by action_quit
+
+            # Reset button state ONLY if it wasn't cancelled by the user (which resets it already)
+            # This covers normal completion and non-cancellation errors.
+            try:
+                submit_button = self.query_one("#submit-button", Button)
+                # Check if the button still indicates it's running; if so, reset it.
+                if submit_button.label == "Stop AI selection":
+                    submit_button.label = "Start AI selection"
+                    submit_button.disabled = False
+            except Exception as e:
+                logger.error(
+                    f"Failed to query/reset submit button in finally block: {e}", exc_info=True
+                )
 
     async def trigger_rehighlight(self, tab_ref: Optional[TabReference] = None):
         # Check if there's an active tab and if the highlighter state indicates highlights are active
@@ -574,6 +668,17 @@ class SelectronApp(App[None]):
             # Use call_later for status update as well
             error_msg = f"Agent Error: {log_message[:100]}..."  # Keep status concise
             self.call_later(self._update_ui_status, error_msg, "received_error", False)
+
+        # Ensure button is reset on failure
+        try:
+            submit_button = self.query_one("#submit-button", Button)
+            if submit_button.label == "Stop AI selection":
+                submit_button.label = "Start AI selection"
+                submit_button.disabled = False
+        except Exception as e:
+            logger.error(
+                f"Failed to query/reset submit button in failure handler: {e}", exc_info=True
+            )
 
     def _set_parser_button_enabled(self, enabled: bool) -> None:
         """Enable or disable the 'Start AI parser generation' button."""
