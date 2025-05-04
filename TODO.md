@@ -1,10 +1,7 @@
-- skip propose and display parser target if found
 - parser generation workflow
 - sdk? 
-  - test parser registry works
   - eval function?
 app
-- move table to home rm tab
 - duckdb?
 
 ## polish

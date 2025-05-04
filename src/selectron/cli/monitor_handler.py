@@ -127,11 +127,44 @@ class MonitorEventHandler:
 
         # NOTE: table clearing and population is now handled by _apply_parser_extract or _clear_table_view
 
+        # --- Check for existing parser before proposing ---
+        parser_found_and_handled = False
+        parser = None
+        if tab_ref and tab_ref.url:
+            try:
+                parser = self._parser_registry.load_parser(tab_ref.url)
+                if parser and isinstance(parser, dict):
+                    selector_description = parser.get("selector_description")
+                    if selector_description and isinstance(selector_description, str):
+                        logger.info(
+                            f"Parser found for {tab_ref.url}, using description: '{selector_description}'"
+                        )
+                        # ---> Cancel any pending debounce timer BEFORE setting value <--- #
+                        if self._app._input_debounce_timer:
+                            self._app._input_debounce_timer.stop()
+                            self._app._input_debounce_timer = None # Clear the reference
+                        self._prompt_input.value = selector_description # Now set the value
+                        # Update status immediately and mark proposal as 'done' for this tab
+                        await self._app._update_ui_status(
+                            f"Parser found: \"{selector_description}\"", "idle", False
+                        )
+                        self._app._propose_selection_done_for_tab = tab_ref.id
+                        parser_found_and_handled = True
+                    else:
+                        logger.debug(
+                            f"Parser found for {tab_ref.url} but has no 'selector_description'."
+                        )
+                # No need to log FileNotFoundError, it's expected
+            except FileNotFoundError:
+                pass  # No parser exists, proceed to proposal logic if applicable
+            except Exception as e:
+                logger.error(f"Error checking for parser for url '{tab_ref.url}': {e}")
+
         # Check if the main agent worker is running (on the app)
         if self._app._agent_worker and self._app._agent_worker.is_running:
             logger.debug("Skipping proposal: Selector agent is currently running.")
             pass  # Let the logic proceed to potentially update the flag if needed, but don't start worker
-        else:
+        elif not parser_found_and_handled:  # Only propose if parser wasn't found/handled
             # Only proceed with proposal if agent is NOT running
             if (
                 screenshot
@@ -301,21 +334,18 @@ class MonitorEventHandler:
             return
 
         # Execute parser on each element and collect results
-        results_data: list[tuple[str, dict | None]] = []  # (html_snippet, parsed_dict)
+        results_data: list[dict | None] = []  # Store only parsed dicts
         for idx, outer_html in enumerate(element_htmls):
-            html_display = (
-                outer_html[:500] + "..." if len(outer_html) > 500 else outer_html
-            )  # shorten html display
             parsed_dict = None
             try:
                 parsed_dict = parse_fn(outer_html)
             except Exception as e:
                 logger.error(f"Error running parse_element for element {idx}: {e}", exc_info=True)
-            results_data.append((html_display, parsed_dict))
+            results_data.append(parsed_dict)  # Append only the dict
 
         # Determine columns from the first valid result dictionary
         column_keys: list[str] = []
-        for _, parsed_dict in results_data:
+        for parsed_dict in results_data:  # Iterate only over dicts
             if isinstance(parsed_dict, dict):
                 column_keys = list(parsed_dict.keys())
                 break
@@ -326,17 +356,16 @@ class MonitorEventHandler:
             table.clear(columns=True)
 
             # Add columns
-            table.add_column("Raw HTML", key="_raw_html_")
             for key in column_keys:
-                table.add_column(key.replace("_", " ").title(), key=key)
+                table.add_column(key, key=key)
 
             # Add rows
             repr_short = reprlib.Repr()
             repr_short.maxstring = 50
             repr_short.maxother = 50
 
-            for i, (html_snippet, parsed_dict) in enumerate(results_data):
-                row_data = [html_snippet]
+            for i, parsed_dict in enumerate(results_data):  # Unpack only the dict
+                row_data = []  # Changed initialization from [html_snippet]
                 if isinstance(parsed_dict, dict):
                     for key in column_keys:
                         # represent value concisely

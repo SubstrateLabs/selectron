@@ -269,6 +269,7 @@ class SelectronApp(App[None]):
                 # Schedule badge hide AND highlight clear on quit via call_later
                 self.call_later(self._highlighter.hide_agent_status, self._active_tab_ref)
                 self.call_later(self._highlighter.clear, self._active_tab_ref)
+                self.call_later(self._highlighter.clear_parser, self._active_tab_ref)
                 await asyncio.sleep(0.1)  # Brief pause for calls to potentially start
             except Exception as e:
                 logger.warning(f"Error scheduling highlight clear on exit: {e}")
@@ -462,7 +463,9 @@ class SelectronApp(App[None]):
                 # No need to log if parser is found, only if not or error
             except FileNotFoundError:
                 # This is expected if no parser is defined for the URL.
-                logger.debug(f"No parser found for url '{target_ref.url}' during rehighlight check.")
+                logger.debug(
+                    f"No parser found for url '{target_ref.url}' during rehighlight check."
+                )
                 # parser remains None
             except Exception as e:
                 logger.error(
@@ -483,10 +486,12 @@ class SelectronApp(App[None]):
                 try:
                     # Ensure the handler still exists before calling its method
                     if self._monitor_handler:
-                         await self._monitor_handler._apply_parser_extract(target_ref, parser)
+                        await self._monitor_handler._apply_parser_extract(target_ref, parser)
                     else:
-                         # Should technically not happen if we passed the initial check, but safety first.
-                         logger.warning("Cannot re-apply parser extract: MonitorEventHandler became unavailable.")
+                        # Should technically not happen if we passed the initial check, but safety first.
+                        logger.warning(
+                            "Cannot re-apply parser extract: MonitorEventHandler became unavailable."
+                        )
                 except Exception as e:
                     logger.error(
                         f"Error during parser re-extraction triggered by rehighlight: {e}",
@@ -496,9 +501,9 @@ class SelectronApp(App[None]):
         else:
             # Log why the parser re-apply check was skipped
             if not self._monitor_handler:
-                 logger.debug("Skipping parser re-apply check: MonitorEventHandler not available.")
-            elif not (target_ref and target_ref.url): # Combined check for clarity
-                 logger.debug("Skipping parser re-apply check: Target ref or its URL is missing.")
+                logger.debug("Skipping parser re-apply check: MonitorEventHandler not available.")
+            elif not (target_ref and target_ref.url):  # Combined check for clarity
+                logger.debug("Skipping parser re-apply check: Target ref or its URL is missing.")
 
     async def _clear_table_view(self) -> None:
         try:
