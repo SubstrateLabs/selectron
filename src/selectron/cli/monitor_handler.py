@@ -14,7 +14,6 @@ from selectron.chrome.chrome_monitor import TabChangeEvent
 from selectron.chrome.types import TabReference
 from selectron.parse.parser_registry import ParserRegistry
 from selectron.util.logger import get_logger
-from selectron.util.slugify_url import slugify_url
 
 if TYPE_CHECKING:
     from textual.widgets import Button, DataTable, Input, Label
@@ -49,9 +48,9 @@ class MonitorEventHandler:
         self._parser_highlighted_for_tab: dict[str, str] = {}
         self._last_polling_state: Dict[int, str] = {}
         self._last_interaction_update_time: float = 0
-        self._current_parser_info: Optional[Tuple[Dict[str, Any], str, Path]] = (
-            None  # (parser_dict, origin, path)
-        )
+        # Store the chosen candidate info: (parser_dict, origin, path)
+        self._current_parser_info: Optional[Tuple[Dict[str, Any], str, Path]] = None
+        # Store the slug key of the chosen parser
         self._current_parser_slug: Optional[str] = None
 
     async def handle_polling_change(self, event: TabChangeEvent) -> None:
@@ -132,42 +131,21 @@ class MonitorEventHandler:
 
         # NOTE: table clearing and population is now handled by _apply_parser_extract or _clear_table_view
 
-        # --- Check for existing parser before proposing ---
-        parser_found_and_handled = False
-        parser = None
-        if tab_ref and tab_ref.url:
-            try:
-                parser = self._parser_registry.load_parser(tab_ref.url)
-                if parser and isinstance(parser, dict):
-                    selector_description = parser.get("selector_description")
-                    if selector_description and isinstance(selector_description, str):
-                        logger.info(
-                            f"Parser found for {tab_ref.url}, using description: '{selector_description}'"
-                        )
-                        # ---> Cancel any pending debounce timer BEFORE setting value <--- #
-                        if self.app._input_debounce_timer:
-                            self.app._input_debounce_timer.stop()
-                            self.app._input_debounce_timer = None  # Clear the reference
-                        self._prompt_input.value = selector_description  # Now set the value
-                        # Update status immediately and mark proposal as 'done' for this tab
-                        self.app._propose_selection_done_for_tab = tab_ref.id
-                        parser_found_and_handled = True
-                    else:
-                        logger.debug(
-                            f"Parser found for {tab_ref.url} but has no 'selector_description'."
-                        )
-                # No need to log FileNotFoundError, it's expected
-            except FileNotFoundError:
-                pass  # No parser exists, proceed to proposal logic if applicable
-            except Exception as e:
-                logger.error(f"Error checking for parser for url '{tab_ref.url}': {e}")
+        # --- Apply parser highlight logic (run after HTML present) --- #
+        # This now handles finding/validating parser and updating table or clearing it
+        await self._maybe_apply_parser_highlight(tab_ref)
+
+        # --- Check if we should propose a selection (AI) --- #
+        # We only propose if NO parser was found and validated by _maybe_apply_parser_highlight
+        propose_if_needed = self._current_parser_info is None
 
         # Check if the main agent worker is running (on the app)
         if self.app._agent_worker and self.app._agent_worker.is_running:
             logger.debug("Skipping proposal: Selector agent is currently running.")
-            pass  # Let the logic proceed to potentially update the flag if needed, but don't start worker
-        elif not parser_found_and_handled:  # Only propose if parser wasn't found/handled
-            # Only proceed with proposal if agent is NOT running
+            propose_if_needed = False  # Don't propose if agent is busy
+
+        if propose_if_needed:
+            # Only propose if agent is NOT running and no parser was found/validated
             if (
                 screenshot
                 and self.app._active_tab_ref
@@ -237,12 +215,10 @@ class MonitorEventHandler:
                 and self.app._active_tab_ref
                 and self.app._propose_selection_done_for_tab == self.app._active_tab_ref.id
             ):
-                pass
+                pass  # Already proposed for this tab
             elif not screenshot:
                 logger.debug("Skipping proposal: No screenshot available.")
-
-        # --- Parser highlight logic (run after HTML present) --- #
-        await self._maybe_apply_parser_highlight(tab_ref)
+        # else: Parser found and validated, or agent running, no need to propose
 
     async def _try_hide_status(self, tab_ref: TabReference) -> None:
         """Attempt to hide status badge, catching errors."""
@@ -256,31 +232,73 @@ class MonitorEventHandler:
 
     # --- Internal helper for parser highlight --- #
     async def _maybe_apply_parser_highlight(self, tab_ref: TabReference) -> None:
-        """Load parser for current url and apply highlight if appropriate."""
+        """Load parser candidates, validate selectors against live page, apply first valid one."""
         if not tab_ref.url or not tab_ref.id:
             return
 
-        # load parser
-        try:
-            parser = self._parser_registry.load_parser(tab_ref.url)
-        except Exception as e:
-            logger.error(f"Error loading parser for url '{tab_ref.url}': {e}")
-            parser = None
-
-        # clear previous highlight first (if any)
+        # Clear previous highlights and reset state BEFORE finding new parser
         await self._highlighter.clear_parser(tab_ref)
-
         self._set_delete_button_visibility(False)  # Hide by default
         self._current_parser_info = None
         self._current_parser_slug = None
+        chosen_candidate = None
 
-        # If parser found, apply highlight and extract
-        if parser:
-            parser_dict, origin, _file_path = parser
-            self._current_parser_info = parser
-            self._current_parser_slug = slugify_url(tab_ref.url)
+        # Load parser candidates list
+        try:
+            candidates = self._parser_registry.load_parser(tab_ref.url)
+        except Exception as e:
+            logger.error(f"Error loading parser candidates for url '{tab_ref.url}': {e}")
+            candidates = []
 
+        if not candidates:
+            logger.debug(f"No parser candidates found for {tab_ref.url} after fallback search.")
+            await self.app._clear_table_view()  # Ensure table is clear if no candidates
+            return  # Exit early if no candidates
+
+        logger.debug(
+            f"Found {len(candidates)} parser candidates for {tab_ref.url}. Validating selectors..."
+        )
+
+        # Iterate through candidates and validate selector against live page
+        for parser_dict, origin, file_path, slug_key in candidates:
             selector = parser_dict.get("selector")
+            if not selector or not isinstance(selector, str):
+                logger.debug(f"Candidate slug '{slug_key}' is missing a valid selector. Skipping.")
+                continue  # Skip this candidate if no selector
+
+            try:
+                # Check if selector finds at least one element on the current page
+                matching_elements = await self._highlighter.get_elements_html(
+                    tab_ref, selector, max_elements=1
+                )
+                if matching_elements:
+                    logger.info(
+                        f"Candidate parser '{slug_key}' (origin: {origin}) validated. "
+                        f"Its selector '{selector[:100]}...' matched elements on the page."
+                    )
+                    chosen_candidate = (parser_dict, origin, file_path, slug_key)
+                    break  # Found the first valid parser, stop iterating
+                else:
+                    logger.debug(
+                        f"Candidate '{slug_key}' selector '{selector[:100]}...' did not match any elements on {tab_ref.url}."
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Error checking selector for candidate '{slug_key}': {e}", exc_info=True
+                )
+                # Continue to next candidate if check fails
+
+        # --- Apply the chosen parser (if any) --- #
+        if chosen_candidate:
+            parser_dict, origin, _file_path, slug_key = chosen_candidate
+            self._current_parser_info = (
+                parser_dict,
+                origin,
+                _file_path,
+            )  # Store tuple without slug
+            self._current_parser_slug = slug_key  # Store the slug key of the chosen parser
+
+            selector = parser_dict.get("selector")  # Should exist if chosen_candidate is set
             if selector:
                 # Highlight elements matched by the parser's selector
                 await self._highlighter.highlight_parser(tab_ref, selector)
@@ -291,13 +309,19 @@ class MonitorEventHandler:
 
                 # Show delete button ONLY if the parser origin is 'source'
                 self._set_delete_button_visibility(origin == "source")
-
             else:
-                logger.warning(f"Loaded parser for {tab_ref.url} is missing 'selector' key.")
+                # This case should technically not be reachable if candidate chosen correctly
+                logger.error(
+                    f"Chosen parser candidate '{slug_key}' is missing 'selector' key unexpectedly."
+                )
                 self._set_delete_button_visibility(False)
+                await self.app._clear_table_view()
         else:
+            logger.info(f"No candidate parser's selector matched elements on {tab_ref.url}.")
+            # Ensure highlights are cleared and table is empty if no parser was applied
             await self._highlighter.clear_parser(tab_ref)
             self._set_delete_button_visibility(False)
+            await self.app._clear_table_view()
 
     # --- Run parser code on selected elements and update data table --- #
     async def _apply_parser_extract(
@@ -365,11 +389,13 @@ class MonitorEventHandler:
                     parsed_dict = result
                 else:
                     logger.error(
-                        f"parse_element for element {idx+1} returned non-dict type: {type(result).__name__}"
+                        f"parse_element for element {idx + 1} returned non-dict type: {type(result).__name__}"
                     )
                     # Keep parsed_dict as None
             except Exception as e:
-                logger.error(f"Error running parse_element for element {idx+1}: {e}", exc_info=True)
+                logger.error(
+                    f"Error running parse_element for element {idx + 1}: {e}", exc_info=True
+                )
                 # parsed_dict remains None
 
             results_data.append(parsed_dict)
@@ -384,7 +410,9 @@ class MonitorEventHandler:
         # Update data table
         try:
             table = self._data_table
-            logger.debug(f"Clearing data table. Found {len(column_keys)} columns for {len(results_data)} results.")
+            logger.debug(
+                f"Clearing data table. Found {len(column_keys)} columns for {len(results_data)} results."
+            )
             table.clear(columns=True)
 
             # Add columns

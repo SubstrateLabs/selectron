@@ -2,7 +2,7 @@ import importlib.resources
 from importlib.abc import Traversable
 from importlib.resources import as_file
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
@@ -55,19 +55,19 @@ class ParserRegistry:
 
         logger.info(f"Total available parsers loaded: {len(self._available_parsers)}")
 
-    def load_parser(self, url: str) -> Optional[Tuple[Dict[str, Any], ParserOrigin, Path]]:
+    def load_parser(self, url: str) -> List[Tuple[Dict[str, Any], ParserOrigin, Path, str]]:
         """
-        Attempts to load a parser for the URL, using fallback logic.
+        Finds all potential parser candidates for the URL, using fallback logic.
 
         Uses the find_fallback_parser utility to check the exact URL slug,
-        parent path slugs, and the domain root slug against available parsers.
+        parent path slugs, and siblings against available parsers, returning an ordered list.
 
         Args:
             url: The target URL.
 
         Returns:
-            A tuple containing the parser definition dictionary, its origin ('source' or 'user'),
-            and its file Path if found (either exact or via fallback), otherwise None.
+            An ordered list of tuples: (parser_dict, origin, file_path, matched_slug)
+            for all successfully loaded candidate parsers. Returns empty list if none found.
         """
         # Pass the combined dictionary
         return find_fallback_parser(url, self._available_parsers)

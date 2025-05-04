@@ -1,10 +1,11 @@
-- fallback to sibling urls
 - save results to duckdb (app dir)
 - sdk? 
-  - parse fn (done)
-  - eval fn
-  - test on example code
-- pipx install?
+  - parse(url)
+  - test parse on a single example in script
+  - remove old codegen script
+- publish
+  - test pipx usage
+  - test sdk usage
 
 ## polish
 - better model config options?
