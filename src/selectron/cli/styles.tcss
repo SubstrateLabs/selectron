@@ -87,3 +87,36 @@ Screen {
     color: $primary;
 }
 
+/* Styles moved from HomePanel.py */
+HomePanel {
+    align: center top;
+    padding: 1;
+}
+#home-status-content {
+    margin-bottom: 1;
+    padding-bottom: 1;
+    width: 100%;
+    align: center top;
+}
+#ai-status-label {
+    margin-bottom: 1;
+    padding-bottom: 1;
+    width: 100%;
+    text-align: center;
+}
+#home-status-content Button {
+    margin-top: 1;
+    min-width: 30; /* Make buttons wider */
+}
+
+/* Status message styling (used by HomePanel and potentially others) */
+.success-message {
+    color: $success;
+}
+.error-message {
+    color: $error;
+}
+.warning-message {
+    color: $warning;
+}
+

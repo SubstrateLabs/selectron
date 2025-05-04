@@ -208,7 +208,6 @@ async def get_active_tab_html() -> Optional[str]:
 
             if eval_result["result"].get("type") == "string":
                 html_content = eval_result["result"].get("value")
-                logger.info(f"Successfully retrieved HTML content (length: {len(html_content)}).")
                 return html_content
             else:
                 logger.error(
@@ -336,9 +335,6 @@ async def get_tab_html(ws_url: str, settle_delay_s: float = 0.0) -> Optional[str
 
             if eval_result["result"].get("type") == "string":
                 html_content = eval_result["result"].get("value")
-                logger.info(
-                    f"Successfully retrieved HTML content (length: {len(html_content)}) from {ws_url}."
-                )
                 return html_content
             else:
                 logger.error(

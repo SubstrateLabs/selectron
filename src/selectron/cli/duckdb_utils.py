@@ -35,7 +35,6 @@ def get_db_connection(db_path: Path | str | None = None) -> duckdb.DuckDBPyConne
     if isinstance(db_path, str):
         db_path = Path(db_path)
 
-    logger.debug(f"Connecting to DuckDB at: {db_path}")
     try:
         # Ensure the parent directory exists
         db_path.parent.mkdir(parents=True, exist_ok=True)

@@ -21,22 +21,18 @@ class ModelConfig:
 
     anthropic_key: Optional[str]
     openai_key: Optional[str]
-    provider: Provider
-    _propose_model: str
-    _selector_model: str
-    _codegen_model: str
+    provider: Optional[Provider]
+    _propose_model: Optional[str] = None
+    _selector_model: Optional[str] = None
+    _codegen_model: Optional[str] = None
 
     def __init__(self):
         self.anthropic_key = os.getenv("ANTHROPIC_API_KEY")
         self.openai_key = os.getenv("OPENAI_API_KEY")
 
-        maybe_provider = self._determine_provider()
-        if not maybe_provider:
-            raise ValueError(
-                "Missing required environment variable: Set ANTHROPIC_API_KEY or OPENAI_API_KEY"
-            )
-        self.provider = maybe_provider
-        # Set models directly based on provider
+        self.provider = self._determine_provider()
+
+        # Set models only if a provider is available
         if self.provider == "anthropic":
             self._propose_model = ANTHROPIC_ANALYZE_MODEL
             self._selector_model = ANTHROPIC_SELECTOR_MODEL
@@ -45,6 +41,7 @@ class ModelConfig:
             self._propose_model = OPENAI_ANALYZE_MODEL
             self._selector_model = OPENAI_SELECTOR_MODEL
             self._codegen_model = OPENAI_CODEGEN_MODEL
+        # No else needed, models remain None if no provider
 
     def _determine_provider(self) -> Optional[Provider]:
         if self.anthropic_key:
@@ -56,14 +53,20 @@ class ModelConfig:
 
     @property
     def analyze_model(self) -> str:
+        if self._propose_model is None:
+            raise ValueError("AI provider not configured, cannot get analyze model.")
         return self._propose_model
 
     @property
     def selector_model(self) -> str:
+        if self._selector_model is None:
+            raise ValueError("AI provider not configured, cannot get selector model.")
         return self._selector_model
 
     @property
     def codegen_model(self) -> str:
+        if self._codegen_model is None:
+            raise ValueError("AI provider not configured, cannot get codegen model.")
         return self._codegen_model
 
     @property
@@ -74,8 +77,12 @@ class ModelConfig:
             key = self.anthropic_key
         elif self.provider == "openai":
             key = self.openai_key
+
         if key is None:
+            # This case should ideally not be reached if provider is None,
+            # but added for robustness / if provider is somehow set without a key.
+            # Or, more likely, if code tries to access api_key when provider is None.
             raise ValueError(
-                f"API key for provider '{self.provider}' not found, though provider was set."
+                f"API key for provider '{self.provider}' not found or provider not configured."
             )
         return key

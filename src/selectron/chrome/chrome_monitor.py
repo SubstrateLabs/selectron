@@ -146,7 +146,8 @@ class ChromeMonitor:
             except asyncio.TimeoutError:
                 logger.warning("Main polling task did not stop within timeout.")
             except asyncio.CancelledError:
-                logger.debug("Main polling task cancelled as expected.")
+                pass
+                # logger.debug("Main polling task cancelled as expected.")
             except Exception as e:
                 logger.error(f"Error stopping main polling task: {e}")
 

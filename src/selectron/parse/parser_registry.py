@@ -74,7 +74,6 @@ class ParserRegistry:
 
     def rescan_parsers(self) -> None:
         """Clears the current parser cache and re-scans source and user directories."""
-        logger.info("Rescanning parser directories...")
         self._available_parsers.clear()
         loaded_count = 0
         source_parsers_found = 0

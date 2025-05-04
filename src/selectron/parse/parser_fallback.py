@@ -95,7 +95,6 @@ def find_fallback_parser(
                 )
                 parent_found_and_loaded = False
         elif parent_slug in found_slugs:
-            logger.debug(f"Parent slug '{parent_slug}' already added as a candidate.")
             parent_found_and_loaded = True
 
         # 3a. Check for siblings under this parent level ONLY if parent wasn't successfully found AND loaded

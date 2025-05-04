@@ -743,9 +743,6 @@ class ChromeHighlighter:
                 # Parse the JSON string back into a list
                 html_list = json.loads(result)
                 if isinstance(html_list, list):
-                    logger.info(
-                        f"Successfully retrieved HTML for {len(html_list)} elements matching '{selector[:50]}...'"
-                    )
                     return html_list
                 else:
                     logger.warning(

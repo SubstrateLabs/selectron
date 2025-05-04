@@ -256,10 +256,6 @@ class MonitorEventHandler:
             await self.app._clear_table_view()  # Ensure table is clear if no candidates
             return  # Exit early if no candidates
 
-        logger.debug(
-            f"Found {len(candidates)} parser candidates for {tab_ref.url}. Validating selectors..."
-        )
-
         # Iterate through candidates and validate selector against live page
         for parser_dict, origin, file_path, slug_key in candidates:
             selector = parser_dict.get("selector")
@@ -273,10 +269,10 @@ class MonitorEventHandler:
                     tab_ref, selector, max_elements=1
                 )
                 if matching_elements:
-                    logger.info(
-                        f"Candidate parser '{slug_key}' (origin: {origin}) validated. "
-                        f"Its selector '{selector[:100]}...' matched elements on the page."
-                    )
+                    # logger.info(
+                    #     f"Candidate parser '{slug_key}' (origin: {origin}) validated. "
+                    #     f"Its selector '{selector[:100]}...' matched elements on the page."
+                    # )
                     chosen_candidate = (parser_dict, origin, file_path, slug_key)
                     break  # Found the first valid parser, stop iterating
                 else:
@@ -329,8 +325,6 @@ class MonitorEventHandler:
         self, tab_ref: TabReference, parser_dict: Dict[str, Any]
     ) -> None:
         """Execute parser python code against each selected element's HTML (fetched live) and display results as columns."""
-        logger.debug(f"Entering _apply_parser_extract for tab {tab_ref.id}")
-
         import json
         import reprlib
 
@@ -344,14 +338,11 @@ class MonitorEventHandler:
         # Prepare sandbox
         sandbox: dict[str, Any] = {"BeautifulSoup": BeautifulSoup, "json": json}
         try:
-            logger.debug("Executing parser python code in sandbox...")
             exec(python_code, sandbox)
-            logger.debug("Parser code executed successfully.")
         except Exception as e:
             logger.error(f"Parser execution error during exec: {e}", exc_info=True)
             return
 
-        logger.debug("Retrieving parse_element function from sandbox...")
         parse_fn = sandbox.get("parse_element")
         if not callable(parse_fn):
             logger.error("Parser does not define a callable 'parse_element' function.")

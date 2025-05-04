@@ -8,12 +8,13 @@
   - test sdk usage
 
 ## polish
+- reuse duckdb connection
 - better model config options?
 - organize prompts, always use dedent
+- CI tests
 
 ## publish
 - readme
-- CI
 
 ## issues
 - sometimes selector agent gets "lost in the sauce" with tool attempts

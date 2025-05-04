@@ -1,7 +1,7 @@
 import asyncio
 import os
 import webbrowser
-from typing import Optional
+from typing import Literal, Optional
 
 # Add duckdb import
 import duckdb
@@ -53,6 +53,8 @@ THEME_DARK = "catppuccin-mocha"
 THEME_LIGHT = "solarized-light"
 DEFAULT_THEME = THEME_LIGHT
 
+AiStatus = Literal["enabled_anthropic", "enabled_openai", "disabled"]
+
 
 class SelectronApp(App[None]):
     _debug_write_selection: bool = os.getenv("SLT_DBG_WRITE_SELECTION", "false").lower() == "true"
@@ -78,6 +80,8 @@ class SelectronApp(App[None]):
     _duckdb_ui_conn: Optional[duckdb.DuckDBPyConnection] = (
         None  # ADDED: Store connection for DuckDB UI
     )
+    _model_config: ModelConfig
+    _ai_status: AiStatus
 
     def __init__(self, model_config: ModelConfig):
         super().__init__()
@@ -85,6 +89,15 @@ class SelectronApp(App[None]):
         self.shutdown_event = asyncio.Event()
         self._highlighter = ChromeHighlighter()
         self._model_config = model_config
+        self._ai_status = self._determine_ai_status(model_config)
+
+    def _determine_ai_status(self, config: ModelConfig) -> AiStatus:
+        if config.provider == "anthropic":
+            return "enabled_anthropic"
+        elif config.provider == "openai":
+            return "enabled_openai"
+        else:
+            return "disabled"
 
     def compose(self) -> ComposeResult:
         """Create child widgets for the app."""
@@ -117,6 +130,15 @@ class SelectronApp(App[None]):
             logger.error(f"Failed to initialize DataTable: {table_init_err}", exc_info=True)
         self.theme = DEFAULT_THEME
 
+        # Set AI status on HomePanel
+        try:
+            home_panel = self.query_one(HomePanel)
+            home_panel.ai_status = self._ai_status
+        except Exception as ai_status_err:
+            logger.error(
+                f"Failed to set initial AI status on HomePanel: {ai_status_err}", exc_info=True
+            )
+
         # Instantiate MonitorEventHandler after widgets are potentially available
         try:
             url_label = self.query_one("#active-tab-url-label", Label)
@@ -144,13 +166,44 @@ class SelectronApp(App[None]):
         self._set_parser_button_enabled(False)  # Ensure disabled on start
         await self.action_check_chrome_status()
 
+        # Disable AI buttons if no provider is configured
+        if self._ai_status == "disabled":
+            logger.info("AI is disabled, disabling AI-related buttons.")
+            try:
+                submit_button = self.query_one("#submit-button", Button)
+                submit_button.disabled = True
+                submit_button.tooltip = "AI disabled (set ANTHROPIC_API_KEY or OPENAI_API_KEY)"
+            except Exception as e:
+                logger.error(f"Failed to disable submit button: {e}", exc_info=True)
+            try:
+                parser_button = self.query_one("#generate-parser-button", Button)
+                parser_button.disabled = True
+                parser_button.tooltip = "AI disabled (set ANTHROPIC_API_KEY or OPENAI_API_KEY)"
+            except Exception as e:
+                logger.error(f"Failed to disable parser button: {e}", exc_info=True)
+            try:
+                delete_button = self.query_one("#delete-parser-button", Button)
+                delete_button.disabled = True
+                delete_button.tooltip = "AI disabled (set ANTHROPIC_API_KEY or OPENAI_API_KEY)"
+            except Exception as e:
+                logger.error(f"Failed to disable delete button: {e}", exc_info=True)
+            try:
+                prompt_input = self.query_one("#prompt-input", Input)
+                prompt_input.disabled = True
+                prompt_input.placeholder = "AI Disabled (set ANTHROPIC_API_KEY or OPENAI_API_KEY)"
+            except Exception as e:
+                logger.error(f"Failed to disable prompt input: {e}", exc_info=True)
+        else:
+            # Ensure parser button is disabled initially if AI *is* enabled
+            self._set_parser_button_enabled(False)
+
     async def _handle_rehighlight(self, tab_ref: TabReference) -> None:
         # Pass the specific tab_ref to the trigger method
         await self.trigger_rehighlight(tab_ref)
 
     async def action_check_chrome_status(self) -> None:
         home_panel = self.query_one(HomePanel)
-        home_panel.status = "checking"
+        home_panel.chrome_status = "checking"
         await asyncio.sleep(0.1)
         new_status: ChromeStatus = "error"
         try:
@@ -166,7 +219,7 @@ class SelectronApp(App[None]):
         except Exception as e:
             logger.error(f"Error checking Chrome status: {e}", exc_info=True)
             new_status = "error"
-        home_panel.status = new_status
+        home_panel.chrome_status = new_status
         if new_status != "ready_to_connect":
             self._set_parser_button_enabled(False)
         if new_status == "ready_to_connect":
@@ -175,33 +228,33 @@ class SelectronApp(App[None]):
     async def action_launch_chrome(self) -> None:
         logger.info("Action: Launching Chrome...")
         home_panel = self.query_one(HomePanel)
-        home_panel.status = "checking"
+        home_panel.chrome_status = "checking"
         success = await chrome_launcher.launch_chrome()
         if not success:
             logger.error("Failed to launch Chrome via launcher.")
-            home_panel.status = "error"
+            home_panel.chrome_status = "error"
             return
         await asyncio.sleep(1.0)
         await self.action_check_chrome_status()
 
     async def action_restart_chrome(self) -> None:
         home_panel = self.query_one(HomePanel)
-        home_panel.status = "checking"
+        home_panel.chrome_status = "checking"
         success = await chrome_launcher.restart_chrome_with_debug_port()
         if not success:
             logger.error("Failed to restart Chrome via launcher.")
-            home_panel.status = "error"
+            home_panel.chrome_status = "error"
             return
         await asyncio.sleep(1.0)
         await self.action_check_chrome_status()
 
     async def action_connect_monitor(self) -> None:
         home_panel = self.query_one(HomePanel)
-        home_panel.status = "connecting"
+        home_panel.chrome_status = "connecting"
         await asyncio.sleep(0.1)
         if not self._chrome_monitor:
             logger.error("Monitor not initialized, cannot connect.")
-            home_panel.status = "error"
+            home_panel.chrome_status = "error"
             return
         if not await chrome_launcher.is_chrome_debug_port_active():
             logger.error("Debug port became inactive before monitor could start.")
@@ -211,7 +264,7 @@ class SelectronApp(App[None]):
             # Ensure handler is instantiated before starting monitor
             if not self._monitor_handler:
                 logger.error("MonitorEventHandler not initialized, cannot start monitor.")
-                home_panel.status = "error"
+                home_panel.chrome_status = "error"
                 return
 
             success = await self._chrome_monitor.start_monitoring(
@@ -220,14 +273,14 @@ class SelectronApp(App[None]):
                 on_content_fetched_callback=self._monitor_handler.handle_content_fetched,
             )
             if success:
-                home_panel.status = "connected"
+                home_panel.chrome_status = "connected"
             else:
                 logger.error("Failed to start Chrome Monitor.")
-                home_panel.status = "error"
+                home_panel.chrome_status = "error"
                 self._set_parser_button_enabled(False)
         except Exception as e:
             logger.error(f"Error starting Chrome Monitor: {e}", exc_info=True)
-            home_panel.status = "error"
+            home_panel.chrome_status = "error"
             self._set_parser_button_enabled(False)
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -252,14 +305,25 @@ class SelectronApp(App[None]):
                     logger.warning("Stop requested, but no agent worker found or running.")
                     # If no worker running, manually reset button just in case.
                     submit_button.label = "Start AI selection"
-                    submit_button.disabled = False
+                    # Only enable if AI is not disabled
+                    submit_button.disabled = self._ai_status == "disabled"
                     # Also ensure parser button is disabled if stop is pressed with no worker
                     self._set_parser_button_enabled(False)
 
             else:
                 # --- Handle Start Action --- #
+                # Prevent starting if AI is disabled
+                if self._ai_status == "disabled":
+                    logger.warning("AI features disabled. Cannot start selection.")
+                    await self._update_ui_status("AI Disabled (No API key)", state="received_error")
+                    return
                 await self.on_input_submitted(Input.Submitted(input_widget, input_widget.value))
         elif button_id == "generate-parser-button":
+            # Prevent starting if AI is disabled
+            if self._ai_status == "disabled":
+                logger.warning("AI features disabled. Cannot start parser generation.")
+                await self._update_ui_status("AI Disabled (No API key)", state="received_error")
+                return
             # Trigger parser generation workflow
             if self._codegen_worker and self._codegen_worker.is_running:
                 logger.info("Cancelling previous codegen worker.")
@@ -285,6 +349,7 @@ class SelectronApp(App[None]):
                     await self._clear_table_view()
                     # Hide the button via the handler method
                     self._monitor_handler._set_delete_button_visibility(False)
+                    self.query_one("#delete-parser-button", Button).disabled = True
                     # Clear current parser info in handler
                     self._monitor_handler._current_parser_info = None
                     self._monitor_handler._current_parser_slug = None
@@ -768,10 +833,22 @@ class SelectronApp(App[None]):
             )
 
     def _set_parser_button_enabled(self, enabled: bool) -> None:
-        """Enable or disable the 'Start AI parser generation' button."""
+        """Enable or disable the 'Start AI parser generation' button, respecting AI status."""
+        # Never enable if AI is globally disabled
+        if self._ai_status == "disabled":
+            enabled = False
+
         try:
             parser_button = self.query_one("#generate-parser-button", Button)
             parser_button.disabled = not enabled
+            # Set tooltip based on why it's disabled
+            if not enabled and self._ai_status == "disabled":
+                parser_button.tooltip = "AI disabled (set ANTHROPIC_API_KEY or OPENAI_API_KEY)"
+            elif not enabled:
+                parser_button.tooltip = "Requires a successful AI selection first"
+            else:
+                parser_button.tooltip = None  # Clear tooltip when enabled
+
         except Exception as e:
             logger.error(f"Failed to set parser button enabled state: {e}", exc_info=True)
 
@@ -942,3 +1019,6 @@ class SelectronApp(App[None]):
                 # For error: remains disabled (no explicit enable)
                 # If we want to ALWAYS re-enable, we'd do it here.
                 # Let's stick to re-enabling only on success for now.
+                # If AI is enabled, enable the button, otherwise _set_parser_button_enabled handles it
+                if self._ai_status != "disabled":
+                    self._set_parser_button_enabled(True)
