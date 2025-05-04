@@ -9,6 +9,7 @@ from selectron.ai.types import AutoProposal
 from selectron.chrome.chrome_highlighter import ChromeHighlighter
 from selectron.chrome.chrome_monitor import TabChangeEvent
 from selectron.chrome.types import TabReference
+from selectron.parse.parser_registry import ParserRegistry
 from selectron.util.logger import get_logger
 
 if TYPE_CHECKING:
@@ -37,6 +38,11 @@ class MonitorEventHandler:
         self._data_table = data_table
         self._prompt_input = prompt_input
 
+        # --- Parser related --- #
+        self._parser_registry = ParserRegistry()
+        # Track last URL for which parser highlight was applied per tab
+        self._parser_highlighted_for_tab: dict[str, str] = {}
+
     async def handle_polling_change(self, event: TabChangeEvent) -> None:
         """Handles tab navigation/changes detected by polling."""
         # Logic moved from SelectronApp._handle_polling_change
@@ -47,6 +53,17 @@ class MonitorEventHandler:
             # Access app state via self._app
             self._app._propose_selection_done_for_tab = None
             # NOTE: Cannot reliably clear highlights/badges here as ws_url may be missing
+
+            # clear any persistent parser highlights for navigated tabs
+            for _, old_ref in navigated_tabs_info:
+                try:
+                    await self._highlighter.clear_parser(old_ref)
+                except Exception as e:
+                    logger.debug(
+                        f"Failed to clear parser highlight on navigation for tab {old_ref.id}: {e}"
+                    )
+                # remove tracking
+                self._parser_highlighted_for_tab.pop(old_ref.id, None)
 
     async def handle_interaction_update(self, tab_ref: TabReference) -> None:
         """Handles updates triggered by user interaction in a tab."""
@@ -72,6 +89,10 @@ class MonitorEventHandler:
             self._app._propose_selection_done_for_tab = (
                 None  # Allow proposal for this tab upon next content fetch
             )
+
+        # if user interacted but url unchanged, ensure parser highlight present
+        if tab_ref and tab_ref.url:
+            await self._maybe_apply_parser_highlight(tab_ref)
 
     async def handle_content_fetched(
         self,
@@ -197,3 +218,46 @@ class MonitorEventHandler:
                 pass
             elif not screenshot:
                 logger.debug("Skipping proposal: No screenshot available.")
+
+        # --- Parser highlight logic (run after HTML present) --- #
+        await self._maybe_apply_parser_highlight(tab_ref)
+
+    # --- Internal helper for parser highlight --- #
+    async def _maybe_apply_parser_highlight(self, tab_ref: TabReference) -> None:
+        """Load parser for current url and apply highlight if appropriate."""
+        if not tab_ref.url or not tab_ref.id:
+            return
+
+        last_url = self._parser_highlighted_for_tab.get(tab_ref.id)
+        if last_url == tab_ref.url:
+            # already highlighted for this url
+            return
+
+        # load parser
+        try:
+            parser = self._parser_registry.load_parser(tab_ref.url)
+        except Exception as e:
+            logger.error(f"Error loading parser for url '{tab_ref.url}': {e}")
+            parser = None
+
+        # clear previous highlight first (if any)
+        await self._highlighter.clear_parser(tab_ref)
+
+        if (
+            parser
+            and isinstance(parser, dict)
+            and (selector := parser.get("selector"))
+            and isinstance(selector, str)
+        ):
+            try:
+                success = await self._highlighter.highlight_parser(tab_ref, selector, color="cyan")
+                if success:
+                    self._parser_highlighted_for_tab[tab_ref.id] = tab_ref.url
+                else:
+                    self._parser_highlighted_for_tab.pop(tab_ref.id, None)
+            except Exception as e:
+                logger.debug(f"Failed to apply parser highlight for tab {tab_ref.id}: {e}")
+                self._parser_highlighted_for_tab.pop(tab_ref.id, None)
+        else:
+            # no parser – ensure mapping cleared
+            self._parser_highlighted_for_tab.pop(tab_ref.id, None)

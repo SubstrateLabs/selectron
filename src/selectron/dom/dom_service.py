@@ -128,10 +128,9 @@ class DomService:
     ) -> tuple[DOMElementNode, SelectorMap]:
         js_node_map = eval_page["map"]
         js_root_id = eval_page["rootId"]
-        logger.debug(f"Received {len(js_node_map)} nodes from buildDomTree.js")
+        # logger.debug(f"Received {len(js_node_map)} nodes from buildDomTree.js")
         selector_map = {}
         node_map = {}
-
         for id, node_data in js_node_map.items():
             node, children_ids = self._parse_node(node_data)
             if node is None:

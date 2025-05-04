@@ -15,13 +15,14 @@ from selectron.chrome.chrome_cdp import ChromeTab, get_tabs
 from selectron.chrome.diff_tabs import diff_tabs
 from selectron.util.logger import get_logger
 
-from .tab_interaction_handler import (
+from selectron.chrome.tab_interaction_handler import (
     DEBOUNCE_DELAY_SECONDS,
     ContentFetchedCallback,
     InteractionTabUpdateCallback,
+    RehighlightCallback,
     TabInteractionHandler,
 )
-from .types import TabReference
+from selectron.chrome.types import TabReference
 
 logger = get_logger(__name__)
 
@@ -35,7 +36,6 @@ class TabChangeEvent(NamedTuple):
 
 # Type aliases
 PollingTabChangeCallback = Callable[[TabChangeEvent], Awaitable[None]]
-RehighlightCallback = Callable[[], Awaitable[None]]
 
 
 class ChromeMonitor:

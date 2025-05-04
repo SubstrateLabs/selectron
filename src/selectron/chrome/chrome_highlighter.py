@@ -15,6 +15,11 @@ class ChromeHighlighter:
         self._last_highlight_selector: Optional[str] = None
         self._last_highlight_color: Optional[str] = None
         self._agent_status_badge_id = "selectron-agent-status-badge"
+        # additional container id for persistent parser highlight overlays
+        self._parser_container_id = "selectron-parser-highlight-container"
+        # tracking parser overlay
+        self._parser_last_selector: Optional[str] = None
+        self._parser_last_color: Optional[str] = None
 
     async def highlight(
         self, tab_ref: Optional[TabReference], selector: str, color: str = "yellow"
@@ -318,6 +323,17 @@ class ChromeHighlighter:
         else:
             logger.debug("Skipping rehighlight (not active or no selector/color)")
 
+        # parser rehighlight logic (always independent of _highlights_active)
+        if self._parser_last_selector and tab_ref:
+            try:
+                await self.highlight_parser(
+                    tab_ref,
+                    self._parser_last_selector,
+                    color=self._parser_last_color or "cyan",
+                )
+            except Exception as e:
+                logger.debug(f"Failed to rehighlight parser overlays: {e}")
+
     def is_active(self) -> bool:
         """Returns true if highlights are considered active."""
         return self._highlights_active
@@ -541,3 +557,139 @@ class ChromeHighlighter:
         }})();
         """
         await self._execute_js_on_tab(tab_ref, js_code, "hide agent status", executor)
+
+    async def highlight_parser(
+        self, tab_ref: Optional[TabReference], selector: str, color: str = "cyan"
+    ) -> bool:
+        """Highlights elements for a parser definition. These overlays are persistent and
+        should *not* be cleared by the normal agent iteration highlights (they use a different
+        container). Call :py:meth:`clear_parser` to remove them – typically on URL navigation.
+
+        Args:
+            tab_ref: Active tab reference.
+            selector: CSS selector to highlight.
+            color: Border/background colour (defaults to cyan).
+        Returns:
+            bool: True if highlight JS executed and returned an expected success string.
+        """
+        if not tab_ref or not tab_ref.ws_url:
+            logger.debug("Cannot highlight parser selector – missing tab reference or ws_url.")
+            return False
+
+        # Escape selector for JS template literal
+        escaped_selector = (
+            selector.replace("\\", "\\\\")
+            .replace("'", "\\'")
+            .replace('"', '\\"')
+            .replace("`", "\\`")
+        )
+
+        # dashed border to distinguish
+        border_style = f"2px dashed {color}"
+        background_color = f"{color}22"  # light transparent fill
+        overlay_attr = "data-selectron-parser-overlay"
+        container_id = self._parser_container_id
+
+        js_code = f"""
+        (function() {{
+            const selector = `{escaped_selector}`;
+            const borderStyle = '{border_style}';
+            const bgColor = '{background_color}';
+            const containerId = '{container_id}';
+            const overlayAttr = '{overlay_attr}';
+
+            // Ensure container exists
+            let container = document.getElementById(containerId);
+            if (!container) {{
+                container = document.createElement('div');
+                container.id = containerId;
+                container.style.position = 'fixed';
+                container.style.pointerEvents = 'none';
+                container.style.top = '0';
+                container.style.left = '0';
+                container.style.width = '100%';
+                container.style.height = '100%';
+                container.style.zIndex = '2147483646'; // just beneath main highlight overlays
+                container.style.backgroundColor = 'transparent';
+                (document.body || document.documentElement).appendChild(container);
+            }} else {{
+                // Clear any existing parser overlays first (avoid duplicates)
+                const oldOverlays = container.querySelectorAll(`[${{overlayAttr}}="true"]`);
+                oldOverlays.forEach(o => o.remove());
+            }}
+
+            const elements = document.querySelectorAll(selector);
+            if (!elements || elements.length === 0) {{
+                return `ParserHighlight: No elements found for selector: ${{selector}}`;
+            }}
+
+            let highlightedCount = 0;
+            elements.forEach(el => {{
+                try {{
+                    const rects = el.getClientRects();
+                    if (!rects || rects.length === 0) return;
+                    for (const rect of rects) {{
+                        if (rect.width === 0 || rect.height === 0) continue;
+                        const overlay = document.createElement('div');
+                        overlay.setAttribute(overlayAttr, 'true');
+                        overlay.style.position = 'fixed';
+                        overlay.style.border = borderStyle;
+                        overlay.style.backgroundColor = bgColor;
+                        overlay.style.pointerEvents = 'none';
+                        overlay.style.boxSizing = 'border-box';
+                        overlay.style.top = `${{rect.top}}px`;
+                        overlay.style.left = `${{rect.left}}px`;
+                        overlay.style.width = `${{rect.width}}px`;
+                        overlay.style.height = `${{rect.height}}px`;
+                        overlay.style.zIndex = '2147483646';
+                        container.appendChild(overlay);
+                    }}
+                    highlightedCount++;
+                }} catch (e) {{
+                    console.warn('Selectron parser highlight error:', e);
+                }}
+            }});
+            return `ParserHighlight: Highlighted ${{highlightedCount}} element(s) for: ${{selector}}`;
+        }})();
+        """
+
+        result = await self._execute_js_on_tab(tab_ref, js_code, purpose="parser highlight")
+        if result and isinstance(result, str) and "ParserHighlight" in result:
+            # store selector & color for rehighlighting on scroll
+            self._parser_last_selector = selector
+            self._parser_last_color = color
+            return True
+        logger.debug(f"Parser highlight JS returned unexpected value: {result}")
+        return False
+
+    async def clear_parser(
+        self, tab_ref: Optional[TabReference], executor: Optional[CdpBrowserExecutor] = None
+    ) -> None:
+        """Clears overlays created by :py:meth:`highlight_parser`."""
+        if not tab_ref:
+            return
+
+        container_id = self._parser_container_id
+        js_code = f"""
+        (function() {{
+            const containerId = '{container_id}';
+            const container = document.getElementById(containerId);
+            if (container) {{
+                try {{
+                    container.remove();
+                    return `ParserHighlight: removed container '${{containerId}}'.`;
+                }} catch (e) {{
+                    return `ParserHighlight: ERROR removing container '${{containerId}}' – ${{e.message}}`;
+                }}
+            }} else {{
+                return `ParserHighlight: container '${{containerId}}' not found.`;
+            }}
+        }})();
+        """
+        await self._execute_js_on_tab(
+            tab_ref, js_code, purpose="clear parser highlight", executor=executor
+        )
+
+        # reset parser tracking
+        self._parser_last_selector = None
+        self._parser_last_color = None

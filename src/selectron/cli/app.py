@@ -128,8 +128,9 @@ class SelectronApp(App[None]):
 
         await self.action_check_chrome_status()
 
-    async def _handle_rehighlight(self) -> None:
-        await self.trigger_rehighlight()
+    async def _handle_rehighlight(self, tab_ref: TabReference) -> None:
+        # Pass the specific tab_ref to the trigger method
+        await self.trigger_rehighlight(tab_ref)
 
     async def action_check_chrome_status(self) -> None:
         home_panel = self.query_one(HomePanel)
@@ -442,10 +443,19 @@ class SelectronApp(App[None]):
             # Note: Badge hiding is handled by success/error paths scheduling _delayed_hide_status
             # Cancellation is handled by action_quit
 
-    async def trigger_rehighlight(self):
+    async def trigger_rehighlight(self, tab_ref: Optional[TabReference] = None):
         # Check if there's an active tab and if the highlighter state indicates highlights are active
-        if self._active_tab_ref and self._highlighter.is_active():
-            await self._highlighter.rehighlight(self._active_tab_ref)
+        # Use the provided tab_ref if available, otherwise fallback to the app's active tab
+        target_ref = tab_ref or self._active_tab_ref
+
+        if target_ref:
+            # Note: We call rehighlight even if _highlighter.is_active() is false,
+            # because the parser highlight needs to redraw independently.
+            # The rehighlight method internally checks agent highlight state (_highlights_active)
+            # and parser highlight state (_parser_last_selector).
+            await self._highlighter.rehighlight(target_ref)
+        else:
+            logger.debug("Skipping rehighlight trigger: No target tab reference.")
 
     async def _clear_table_view(self) -> None:
         try:

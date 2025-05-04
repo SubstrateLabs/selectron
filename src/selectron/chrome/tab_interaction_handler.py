@@ -22,7 +22,9 @@ InteractionTabUpdateCallback = Callable[
 ContentFetchedCallback = Callable[
     [TabReference, Optional[Image.Image], Optional[int], Optional[str]], Awaitable[None]
 ]  # Called after interaction + fetch (with fresh HTML, screenshot, scrollY, and DOM string)
-RehighlightCallback = Callable[[], Awaitable[None]]
+RehighlightCallback = Callable[[
+    TabReference
+], Awaitable[None]]  # Pass tab context for rehighlight
 
 logger = get_logger(__name__)
 
@@ -239,7 +241,15 @@ class TabInteractionHandler:
     async def _invoke_rehighlight_callback(self):
         """Wrapper to log and invoke the rehighlight callback."""
         try:
-            await self.rehighlight_callback()
+            # Create a TabReference from self.tab for the callback
+            tab_ref = TabReference(
+                id=self.tab.id,
+                url=self.tab.url,
+                title=self.tab.title,
+                ws_url=self.ws_url,
+                html=None,  # HTML not needed for rehighlight trigger
+            )
+            await self.rehighlight_callback(tab_ref)
         except Exception as e:
             logger.error(
                 f"Tab {self.tab_id}: Error invoking rehighlight callback: {e}", exc_info=True

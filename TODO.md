@@ -1,10 +1,10 @@
-- generate python
-  - save result
-  - extract prompt
-- save results somewhere
-- selector/parser registry
-  - unslugify
-- sdk
+- parser generation workflow
+- sdk? 
+  - test parser registry works
+  - eval function?
+app
+- move table to home rm tab
+- duckdb?
 
 ## polish
 - handle multiple selectors + parsers per url?
