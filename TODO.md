@@ -1,5 +1,5 @@
 - generate python
-  - code validation util (strip markdown)
+  - save result
   - extract prompt
 - save results somewhere
 - selector/parser registry
@@ -7,9 +7,9 @@
 - sdk
 
 ## polish
-- display badge status in cli
-- organize prompts, always use dedent
-- allow configuring model somehow, maybe in tui?
+- handle multiple selectors + parsers per url?
+- organize prompts, always use dedent?
+- allow configuring model in tui?
 
 ## publish
 - readme

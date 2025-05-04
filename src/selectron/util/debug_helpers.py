@@ -12,7 +12,7 @@ logger = get_logger(__name__)
 async def save_debug_elements(
     tools_instance: SelectorTools,
     selector: str,
-    target_description: str,
+    selector_description: str,
     url: str,
     reasoning: str,
     output_dir: Path | None = None,  # Use None default
@@ -26,7 +26,7 @@ async def save_debug_elements(
     Args:
         tools_instance: An instance of SelectorTools initialized with the relevant HTML.
         selector: The CSS selector to evaluate.
-        target_description: The original description used to generate the selector.
+        selector_description: The original description used to generate the selector.
         url: The URL the selector was generated for.
         reasoning: The reasoning provided by the agent for the selector.
         output_dir: The directory where the JSON file should be saved. Defaults to cwd/debug_outputs.
@@ -53,7 +53,7 @@ async def save_debug_elements(
         # Evaluate the final selector *again* to get HTML details
         final_eval_result = await tools_instance.evaluate_selector(
             selector=selector,
-            target_text_to_check=target_description,
+            target_text_to_check=selector_description,
             return_matched_html=True,
             max_matches_to_detail=max_matches_to_detail,
         )
@@ -79,7 +79,7 @@ async def save_debug_elements(
         output_data = {
             "url": url,
             "selector": selector,
-            "target_description": target_description,
+            "selector_description": selector_description,
             "reasoning": reasoning,
             "html_elements": html_elements,
         }

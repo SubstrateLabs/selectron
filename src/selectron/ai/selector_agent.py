@@ -299,14 +299,11 @@ class SelectorAgent:
             )
         return result
 
-    # --- Main Execution Method ---
-
-    async def run(self, target_description: str) -> SelectorProposal:
+    async def run(self, selector_description: str) -> SelectorProposal:
         """Executes the selector proposal agent workflow."""
+        logger.info("Starting SelectorAgent...")
         self._tool_call_count = 0  # Reset tool counter for each run
-
         await self._safe_status_update("Agent starting...", state="thinking", show_spinner=True)
-
         if not self.html_content:
             logger.error("Cannot run agent: HTML content is missing.")
             await self._safe_status_update(
@@ -347,7 +344,7 @@ class SelectorAgent:
             )
 
             query_parts = [
-                f"Generate the most STABLE CSS selector to target '{target_description}'.",
+                f"Generate the most STABLE CSS selector to target '{selector_description}'.",
                 "Prioritize stable attributes and classes.",
                 "CRITICAL: Your FINAL output MUST be a single JSON object conforming EXACTLY to the SelectorProposal schema. "
                 "This JSON object MUST include values for the fields: 'proposed_selector' (string), 'reasoning' (string), and 'target_cardinality' ('unique' or 'multiple'). "
@@ -371,7 +368,7 @@ class SelectorAgent:
                         await save_debug_elements(
                             tools_instance=self._tools_instance,
                             selector=proposal.proposed_selector,
-                            target_description=target_description,
+                            selector_description=selector_description,
                             url=self.base_url,
                             reasoning=proposal.reasoning,
                         )
@@ -402,7 +399,7 @@ class SelectorAgent:
             raise SelectorAgentError(f"Agent run error: {agent_err}") from agent_err
         except Exception as e:
             logger.error(
-                f"Unexpected error running SelectorAgent for target '{target_description}': {e}",
+                f"Unexpected error running SelectorAgent for target '{selector_description}': {e}",
                 exc_info=True,
             )
             await self._safe_status_update(

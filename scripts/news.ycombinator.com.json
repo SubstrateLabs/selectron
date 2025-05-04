@@ -1,7 +1,7 @@
 {
   "url": "https://news.ycombinator.com/",
   "selector": "tr.athing.submission",
-  "target_description": "All posts in the main feed",
+  "selector_description": "All posts in the main feed",
   "reasoning": "The selector 'tr.athing.submission' uses two stable, human-readable class names ('athing' and 'submission') applied to the <tr> elements that represent each individual post in the main Hacker News feed. These class names are semantic and consistent with the site's markup and do not appear auto-generated. The selector matches all main feed posts and nothing extraneous, as confirmed by the correct number of matches for visible stories. This approach avoids unstable IDs and targets only the post rows, making it the most robust and precise selector for the requested purpose. Target cardinality is 'multiple', matching all posts in the feed.",
   "html_elements": [
     "<tr class=\"athing submission\" id=\"43886243\">\n<td align=\"right\" class=\"title\" valign=\"top\"><span class=\"rank\">1.</span></td> <td class=\"votelinks\" valign=\"top\"><center><a class=\"clicky\" href=\"vote?id=43886243&amp;how=up&amp;auth=86d857a52d9bc6120e4183715845612392ba575f&amp;goto=news\" id=\"up_43886243\"><div class=\"votearrow\" title=\"upvote\"></div></a></center></td><td class=\"title\"><span class=\"titleline\"><a href=\"https://oxfordamerican.org/oa-now/the-alabama-landline-that-keeps-ringing\">The Alabama Landline That Keeps Ringing</a><span class=\"sitebit comhead\"> (<a href=\"from?site=oxfordamerican.org\"><span class=\"sitestr\">oxfordamerican.org</span></a>)</span></span></td></tr>",

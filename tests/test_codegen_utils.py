@@ -1,12 +1,14 @@
 from selectron.ai.codegen_utils import (
     _check_word_repetition,
     _flatten,
+    clean_agent_code,
     validate_cross_key_duplicates,
     validate_empty_columns,
     validate_identical_columns,
     validate_internal_repetition,
     validate_naive_text_match,
     validate_redundant_key_pairs,
+    validate_result,
     validate_text_representation,
 )
 
@@ -544,3 +546,164 @@ def test_validate_naive_match_multiple_outputs():
     feedback = validate_naive_text_match(outputs, html)
     assert len(feedback) == 1
     assert "'desc'" in feedback[0]
+
+
+def test_validate_naive_match_whitespace_diff():
+    """Tests that the validator catches naive matches even with different whitespace."""
+    outputs = [
+        {
+            "desc": "Author  Name @handle\n· 5h   Main   content here",
+        }
+    ]
+    html = ["<div><span>Author Name @handle · 5h</span><p>Main content here</p></div>"]
+    # Naive text: "Author Name @handle · 5h Main content here"
+    feedback = validate_naive_text_match(outputs, html)
+    assert len(feedback) == 1
+    assert "'desc'" in feedback[0]
+
+
+# --- Tests for clean_agent_code ---
+
+
+def test_clean_agent_code_raw_string():
+    code = "def parse(): pass"
+    assert clean_agent_code(code) == code
+
+
+def test_clean_agent_code_markdown_python():
+    code = "```python\ndef parse(): pass\n```"
+    expected = "def parse(): pass"
+    assert clean_agent_code(code) == expected
+
+
+def test_clean_agent_code_markdown_simple():
+    code = "```\ndef parse(): pass\n```"
+    expected = "def parse(): pass"
+    assert clean_agent_code(code) == expected
+
+
+def test_clean_agent_code_json_dict_simple():
+    code_dict = {"code": "def parse(): pass"}
+    expected = "def parse(): pass"
+    assert clean_agent_code(code_dict) == expected
+
+
+def test_clean_agent_code_json_dict_other_key():
+    code_dict = {"result": "import re\ndef parse(): pass"}
+    expected = "import re\ndef parse(): pass"
+    assert clean_agent_code(code_dict) == expected
+
+
+def test_clean_agent_code_json_dict_no_code():
+    code_dict = {"error": "failed"}
+    expected = "{'error': 'failed'}"  # String representation of dict
+    assert clean_agent_code(code_dict) == expected
+
+
+def test_clean_agent_code_json_dict_code_with_markdown():
+    code_dict = {"code": "```python\ndef parse(): pass\n```"}
+    expected = "def parse(): pass"
+    assert clean_agent_code(code_dict) == expected
+
+
+def test_clean_agent_code_other_type():
+    code_list = ["def parse(): pass"]
+    expected = "['def parse(): pass']"  # String representation of list
+    assert clean_agent_code(code_list) == expected
+
+
+def test_clean_agent_code_none():
+    assert clean_agent_code(None) == "None"
+
+
+def test_clean_agent_code_empty_string():
+    assert clean_agent_code("") == ""
+
+
+def test_clean_agent_code_whitespace():
+    code = "  \n def parse(): pass \n  "
+    expected = "def parse(): pass"
+    assert clean_agent_code(code) == expected
+
+
+# --- Tests for validate_result ---
+
+
+def test_validate_result_valid():
+    obj = {
+        "key_str": "value",
+        "key_int": 123,
+        "key_dict_str_str": {"a": "b", "c": "d"},
+        "key_list_str": ["x", "y"],
+        "key_list_mix": [
+            "z",
+            {"k1": "v1", "k2": 10, "k3": None},
+            {"k4": "v4"},
+        ],
+        "key_list_empty_dict": [{}],
+    }
+    ok, msg = validate_result(obj)
+    assert ok is True
+    assert msg == "ok"
+
+
+def test_validate_result_empty_dict():
+    ok, msg = validate_result({})
+    assert ok is False
+    assert msg == "dict is empty"
+
+
+def test_validate_result_not_a_dict():
+    ok, msg = validate_result("string")
+    assert ok is False
+    assert msg == "result is not a dict"
+
+
+def test_validate_result_non_string_key():
+    ok, msg = validate_result({1: "value"})
+    assert ok is False
+    assert "non-string key" in msg
+
+
+def test_validate_result_invalid_value_type():
+    ok, msg = validate_result({"key": 1.23})  # float not allowed
+    assert ok is False
+    assert "invalid value" in msg
+    assert "float" in msg
+
+
+def test_validate_result_invalid_value_none():
+    ok, msg = validate_result({"key": None})
+    assert ok is False
+    assert "invalid value" in msg
+    assert "assigned None" in msg
+
+
+def test_validate_result_invalid_dict_value():
+    ok, msg = validate_result({"key": {"a": 1}})  # dict values must be str
+    assert ok is False
+    assert "invalid value" in msg
+    assert "dict" in msg
+
+
+def test_validate_result_invalid_list_item_type():
+    ok, msg = validate_result({"key": ["a", 1.23]})  # float not allowed in list
+    assert ok is False
+    assert "invalid item at index 1" in msg
+    assert "float" in msg
+    assert "invalid internal types" in msg
+
+
+def test_validate_result_invalid_list_item_dict_value():
+    ok, msg = validate_result({"key": [{"a": 1.23}]})
+    assert ok is False
+    assert "invalid item at index 0" in msg
+    assert "invalid internal types" in msg
+
+
+def test_validate_result_invalid_list_item_dict_key():
+    ok, msg = validate_result({"key": [{1: "a"}]})
+    assert ok is False
+    assert "invalid item at index 0" in msg
+    assert "int" in msg
+    assert "invalid internal types" in msg

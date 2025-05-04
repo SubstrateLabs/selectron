@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Tuple
 
 from bs4 import BeautifulSoup
 
@@ -104,7 +104,6 @@ def validate_text_representation(
             # If text extraction or sanity check fails, skip validation for this sample
             continue
 
-        # --- BEGIN REVISED CHANGE: Check ALL string values for match ---
         plain_tokens = set(plain_text.split())
         has_match = False
 
@@ -115,14 +114,12 @@ def validate_text_representation(
                 if not s_low:
                     continue
 
-                # --- BEGIN CHANGE: Add minimum length check & adjust threshold ---
                 min_match_len = 25
                 overlap_threshold = 0.6
 
                 # Only proceed if the extracted string is reasonably long
                 if len(s_low) < min_match_len:
                     continue
-                # --- END CHANGE ---
 
                 # Check 1: Direct Substring
                 if s_low in plain_text or plain_text in s_low:
@@ -132,22 +129,17 @@ def validate_text_representation(
                 # Check 2: Token Overlap
                 s_tokens = set(s_low.split())
                 # Ensure s_tokens is not empty before division
-                # --- BEGIN CHANGE: Use new threshold ---
                 if (
                     plain_tokens
                     and s_tokens
                     and (len(s_tokens & plain_tokens) / len(s_tokens)) >= overlap_threshold
                 ):
-                    # --- END CHANGE ---
                     has_match = True
                     break  # Found a match for this output dict
 
             if has_match:
                 break  # Exit outer loop once a match is found for the sample
 
-        # --- END REVISED CHANGE ---
-
-        # Only flag if parsing succeeded AND no match was found across ALL values
         if parsing_succeeded and not has_match:
             samples_without_text_match.append(idx)
 
@@ -320,10 +312,13 @@ def validate_naive_text_match(outputs: List[Dict[str, Any]], html_samples: List[
 
             # Only check string values
             if isinstance(value, str):
-                # Use exact match to detect the most naive cases
-                if value.strip() == naive_text:
+                # Normalize whitespace before exact match
+                normalized_value = " ".join(value.strip().split())
+                normalized_naive_text = " ".join(naive_text.split())
+                # Compare based on word sequence, ignoring inter-word spacing differences
+                if normalized_value and normalized_value == normalized_naive_text:
                     naive_match_keys.add(key)
-                    # break # Optional optimization
+                    # break # NOTE: Optional optimization?
 
     for key in naive_match_keys:
         feedback.append(
@@ -331,3 +326,123 @@ def validate_naive_text_match(outputs: List[Dict[str, Any]], html_samples: List[
         )
 
     return feedback
+
+
+def clean_agent_code(agent_output: Any) -> str:
+    """Cleans potential code output from an agent.
+
+    Handles cases where the agent might return:
+    - Raw Python code string.
+    - Code wrapped in markdown fences.
+    - A dictionary containing the code string as a value (attempts extraction).
+    - Other types (attempts string conversion).
+
+    Returns:
+        The cleaned code string.
+    """
+    code_str = ""
+    if isinstance(agent_output, dict):
+        # Try to find a value that looks like Python code
+        found_code = False
+        potential_code = None  # Store potential code here
+        for value in agent_output.values():
+            # Heuristic: Check for common Python keywords
+            if isinstance(value, str) and value.strip():
+                if "def " in value or "import " in value:
+                    potential_code = value
+                    found_code = True
+                    break  # Found likely code, stop searching
+
+        if found_code:
+            code_str = potential_code
+        else:
+            # Fallback: No code-like string found, return string representation of the dict
+            code_str = str(agent_output)
+    else:
+        # Assume it's already a string or convertible
+        code_str = str(agent_output)
+
+    # Strip markdown fences
+    if code_str is None:  # Should not happen with current logic, but safety check
+        code_str = ""
+    cleaned_code = code_str.strip()
+    if cleaned_code.startswith("```python"):
+        cleaned_code = cleaned_code[len("```python") :].strip()
+    elif cleaned_code.startswith("```"):
+        cleaned_code = cleaned_code[len("```") :].strip()
+    if cleaned_code.endswith("```"):
+        cleaned_code = cleaned_code[: -len("```")].strip()
+
+    return cleaned_code
+
+
+def validate_result(obj: Any) -> Tuple[bool, str]:
+    """Ensure obj is a non-empty dict with string keys and allowed value types.
+
+    Allowed value types:
+    - str
+    - int
+    - list[Any] (recursively validated so elements are allowed types)
+    - dict[str, str]
+    """
+
+    def _is_valid_val(val: Any) -> bool:
+        if isinstance(val, str):
+            return True
+        if isinstance(val, int):
+            return True
+        if isinstance(val, dict):
+            # Check for dict[str, str]
+            return all(isinstance(k, str) and isinstance(v, str) for k, v in val.items())
+        if isinstance(val, list):
+            # Explicitly check for list[str | dict[str, str | int | None]]
+            for item in val:
+                is_item_str = isinstance(item, str)
+                # Check if item is a dict where keys are str and values are str, int, or None
+                is_item_dict_flexible_values = isinstance(item, dict) and all(
+                    isinstance(k, str) and isinstance(v_inner, (str, int)) or v_inner is None
+                    for k, v_inner in item.items()
+                )
+                if not (is_item_str or is_item_dict_flexible_values):
+                    return False  # Item is neither str nor dict[str, str | int | None]
+            return True  # All items were valid str or dict[str, str | int | None]
+        return False
+
+    if not isinstance(obj, dict):
+        return False, "result is not a dict"
+    if not obj:
+        return False, "dict is empty"
+    for k, v in obj.items():
+        if not isinstance(k, str):
+            return False, f"non-string key detected: {k!r}"
+        if not _is_valid_val(v):
+            # If validation fails and the value is a list, find the invalid item
+            if isinstance(v, list):
+                for idx, item in enumerate(v):
+                    is_item_str = isinstance(item, str)
+                    # Check if item is a dict where keys are str and values are str, int, or None
+                    is_item_dict_flexible_values = isinstance(item, dict) and all(
+                        isinstance(k, str) and isinstance(v_inner, (str, int)) or v_inner is None
+                        for k, v_inner in item.items()
+                    )
+                    if not (is_item_str or is_item_dict_flexible_values):
+                        # Construct specific feedback for list item failure
+                        return (
+                            False,
+                            f"invalid item at index {idx} for key '{k}'. Expected str or dict[str, str | int | None], but got {type(item)} with invalid internal types.",
+                        )
+                # Should not be reached if _is_valid_val returned False, but as a fallback:
+                return (
+                    False,
+                    f"invalid list value for key '{k}' (reason unclear, check list items).",
+                )
+            else:
+                # Generic feedback for non-list types
+                if v is None:
+                    return (
+                        False,
+                        f"invalid value for key '{k}': assigned None. Omit the key entirely if no valid value is found.",
+                    )
+                else:
+                    return False, f"invalid value for key '{k}': type {type(v)}"
+    return True, "ok"

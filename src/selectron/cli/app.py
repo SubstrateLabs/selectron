@@ -225,8 +225,8 @@ class SelectronApp(App[None]):
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "prompt-input":
-            target_description = event.value.strip()
-            if not target_description:
+            selector_description = event.value.strip()
+            if not selector_description:
                 return
 
             if (
@@ -251,7 +251,7 @@ class SelectronApp(App[None]):
                 self._agent_worker.cancel()
 
             self._agent_worker = self.run_worker(
-                self._run_agent_worker(target_description),
+                self._run_agent_worker(selector_description),
                 exclusive=True,
                 group="agent_worker",
             )
@@ -324,7 +324,7 @@ class SelectronApp(App[None]):
         else:
             self.theme = THEME_LIGHT
 
-    async def _run_agent_worker(self, target_description: str) -> None:
+    async def _run_agent_worker(self, selector_description: str) -> None:
         """Worker task to run the SelectorAgent and handle UI updates."""
         if not self._active_tab_ref or not self._active_tab_ref.html:
             logger.warning("Cannot run agent worker: No active tab reference with html.")
@@ -392,9 +392,9 @@ class SelectronApp(App[None]):
             )
 
             logger.info(
-                f"Running SelectorAgent for target '{target_description}' on tab {tab_ref.id}"
+                f"Running SelectorAgent for target '{selector_description}' on tab {tab_ref.id}"
             )
-            proposal = await agent.run(target_description)
+            proposal = await agent.run(selector_description)
 
             # --- Handle Successful Proposal --- #
             if proposal:
@@ -426,7 +426,7 @@ class SelectronApp(App[None]):
         except Exception as e:
             # Catch unexpected errors *outside* the agent's known failure modes
             logger.error(
-                f"Unexpected error in worker task for target '{target_description}': {e}",
+                f"Unexpected error in worker task for target '{selector_description}': {e}",
                 exc_info=True,
             )
             error_msg = f"Worker Error: {type(e).__name__}"
