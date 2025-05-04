@@ -20,6 +20,7 @@ from selectron.ai.codegen_utils import (
     validate_result,
     validate_text_representation,
 )
+from selectron.util.get_app_dir import get_app_dir
 from selectron.util.logger import get_logger
 from selectron.util.model_config import ModelConfig
 from selectron.util.sample_items import sample_items
@@ -51,25 +52,49 @@ class CodegenAgent:
         html_samples: List[str],
         model_cfg: Optional[ModelConfig] = None,
         save_results: bool = False,
-        output_dir: Optional[Path] = None,
         base_url: Optional[str] = None,
         input_selector: Optional[str] = None,
         input_selector_description: Optional[str] = None,
     ):
         if not html_samples:
             raise ValueError("html_samples must be a non-empty list")
-        if save_results and not output_dir:
-            raise ValueError("output_dir must be provided if save_results is True")
         if save_results and not base_url:
             raise ValueError("base_url must be provided if save_results is True")
 
         self.html_samples = html_samples
         self.model_cfg = model_cfg or ModelConfig()
         self.save_results = save_results
-        self.output_dir = output_dir
         self.base_url = base_url
         self.input_selector = input_selector
         self.input_selector_description = input_selector_description
+
+        # Determine the correct directory to save parsers
+        self.parser_save_dir: Optional[Path] = None
+        if self.save_results:
+            src_parsers_dir = Path("src/selectron/parsers")
+            if src_parsers_dir.is_dir():
+                self.parser_save_dir = src_parsers_dir
+                logger.info(f"Using source parser directory for saving: {self.parser_save_dir}")
+            else:
+                app_parsers_dir = get_app_dir() / "parsers"
+                self.parser_save_dir = app_parsers_dir
+                logger.info(
+                    f"Source parser directory not found. Using app config directory for saving: {self.parser_save_dir}"
+                )
+
+            if self.parser_save_dir:
+                try:
+                    self.parser_save_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"Ensured parser save directory exists: {self.parser_save_dir}")
+                except Exception as e:
+                    logger.error(
+                        f"Failed to create parser save directory {self.parser_save_dir}: {e}",
+                        exc_info=True,
+                    )
+                    # Decide if we should raise an error or just warn and disable saving
+                    logger.warning("Disabling parser saving due to directory creation error.")
+                    self.save_results = False  # Disable saving if dir creation fails
+                    self.parser_save_dir = None
 
     # ---------------------------------------------------------------------
     # Internal helpers
@@ -205,28 +230,46 @@ class CodegenAgent:
             )
 
         # --- Save results if configured ---
-        if self.save_results:
-            assert self.output_dir is not None  # Ensured by __init__ validation
+        if self.save_results and self.parser_save_dir:
             assert self.base_url is not None  # Ensured by __init__ validation
 
-            if self.output_dir.is_dir():
-                url_slug = slugify_url(self.base_url)
-                save_path = self.output_dir / f"{url_slug}.json"
+            # Determine if we are saving to the user directory or the source directory
+            app_parsers_dir = get_app_dir() / "parsers"
+            is_saving_to_user_dir = self.parser_save_dir == app_parsers_dir
 
-                if not save_path.exists():
-                    result_data = {
-                        "python": final_code,
-                        "selector": self.input_selector or "",
-                        "selector_description": self.input_selector_description or "",
-                    }
-                    try:
-                        save_path.write_text(json.dumps(result_data, indent=2, ensure_ascii=False))
-                        logger.info(f"saved codegen result to {save_path}")
-                    except Exception as e:
-                        logger.error(f"failed to write result to {save_path}: {e}", exc_info=True)
+            url_slug = slugify_url(self.base_url)
+            save_path = self.parser_save_dir / f"{url_slug}.json"
+
+            result_data = {
+                "python": final_code,
+                "selector": self.input_selector or "",
+                "selector_description": self.input_selector_description or "",
+            }
+
+            try:
+                if is_saving_to_user_dir:
+                    # Allow overwriting in the user directory
+                    was_existing = save_path.exists()
+                    save_path.write_text(json.dumps(result_data, indent=2, ensure_ascii=False))
+                    if was_existing:
+                        logger.info(f"overwrote existing parser in user directory at {save_path}")
+                    else:
+                        logger.info(f"saved new parser to user directory at {save_path}")
                 else:
-                    logger.warning(f"skipped saving: file already exists at {save_path}")
-            else:
-                logger.warning(f"skipped saving: directory not found at {self.output_dir}")
+                    # Prevent overwriting in the source directory
+                    if not save_path.exists():
+                        save_path.write_text(json.dumps(result_data, indent=2, ensure_ascii=False))
+                        logger.info(f"saved new codegen result to source directory {save_path}")
+                    else:
+                        logger.warning(
+                            f"skipped saving to source directory: file already exists at {save_path}"
+                        )
+            except Exception as e:
+                logger.error(f"failed to write result to {save_path}: {e}", exc_info=True)
+
+        elif self.save_results and not self.parser_save_dir:
+            logger.warning(
+                "Skipped saving: parser save directory was not correctly initialized or created."
+            )
 
         return final_code, final_outputs

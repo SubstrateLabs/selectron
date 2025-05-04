@@ -80,6 +80,54 @@ from selectron.util.slugify_url import slugify_url  # Need this to create slug k
             {slugify_url("file:///path/to"): {"data": "file_parent"}},
             {"data": "file_parent"},
         ),
+        # 13. Domain fallback: no standard match, finds parser on same domain/different path
+        (
+            "https://example.com/user/profile",
+            {
+                slugify_url("https://another.com/"): {"data": "other"},
+                slugify_url("https://example.com/settings"): {"data": "domain_sibling"},
+            },
+            {"data": "domain_sibling"},
+        ),
+        # 14. Domain fallback: prioritizes shallower path
+        (
+            "https://example.com/user/profile/deep",
+            {
+                slugify_url("https://example.com/settings/advanced"): {"data": "domain_deep"},
+                slugify_url("https://example.com/settings"): {"data": "domain_shallow"},
+            },
+            {"data": "domain_shallow"},  # Should pick settings over settings/advanced
+        ),
+        # 15. Domain fallback: standard path fallback wins over domain fallback
+        (
+            "https://example.com/user/profile",
+            {
+                slugify_url("https://example.com/user"): {"data": "path_parent"},
+                slugify_url("https://example.com/settings"): {"data": "domain_sibling"},
+            },
+            {"data": "path_parent"},  # Path fallback should be used first
+        ),
+        # 16. Domain fallback: no matching domain
+        (
+            "https://example.com/user/profile",
+            {slugify_url("https://another.com/settings"): {"data": "other_domain"}},
+            None,
+        ),
+        # 17. Domain fallback: file URI finds sibling
+        (
+            "file:///user/data/config.txt",
+            {slugify_url("file:///user/logs/log.txt"): {"data": "file_sibling"}},
+            {"data": "file_sibling"},
+        ),
+        # 18. Domain fallback: file URI prioritizes shallower
+        (
+            "file:///user/data/deep/config.txt",
+            {
+                slugify_url("file:///user/logs/archive/old.log"): {"data": "file_deep"},
+                slugify_url("file:///user/logs"): {"data": "file_shallow"},
+            },
+            {"data": "file_shallow"},
+        ),
     ],
 )
 def test_find_fallback_parser(

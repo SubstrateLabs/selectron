@@ -18,6 +18,7 @@ from textual.widgets import (
 )
 from textual.worker import Worker
 
+from selectron.ai.codegen_agent import CodegenAgent
 from selectron.ai.selector_agent import (
     Highlighter as HighlighterProtocol,
 )
@@ -61,6 +62,7 @@ class SelectronApp(App[None]):
     _active_tab_dom_string: Optional[str] = None
     _agent_worker: Optional[Worker[None]] = None
     _propose_selection_worker: Optional[Worker[None]] = None
+    _codegen_worker: Optional[Worker[None]] = None
     _highlighter: ChromeHighlighter
     _last_proposed_selector: Optional[str] = None
     _chrome_monitor: Optional[ChromeMonitor] = None
@@ -227,6 +229,18 @@ class SelectronApp(App[None]):
         elif button_id == "submit-button":
             input_widget = self.query_one("#prompt-input", Input)
             await self.on_input_submitted(Input.Submitted(input_widget, input_widget.value))
+        elif button_id == "generate-parser-button":
+            # Trigger parser generation workflow
+            if self._codegen_worker and self._codegen_worker.is_running:
+                logger.info("Cancelling previous codegen worker.")
+                self._codegen_worker.cancel()
+
+            # Run the codegen worker asynchronously
+            self._codegen_worker = self.run_worker(
+                self._run_parser_codegen_worker(),
+                exclusive=True,
+                group="parser_codegen",
+            )
         else:
             logger.warning(f"Unhandled button press: {event.button.id}")
 
@@ -586,3 +600,109 @@ class SelectronApp(App[None]):
 
         async def hide_agent_status(self) -> None:
             await self._highlighter.hide_agent_status(self._tab_ref)
+
+    async def _run_parser_codegen_worker(self) -> None:
+        """Worker task to run CodegenAgent for parser generation."""
+
+        # Preconditions: we need an active tab, a selector, and HTML samples.
+        if not self._active_tab_ref:
+            logger.warning("Cannot run CodegenAgent: no active tab.")
+            await self._update_ui_status(
+                "Parser generation error: no active tab",
+                state="received_error",
+                show_spinner=False,
+            )
+            return
+
+        if not self._last_proposed_selector:
+            logger.warning("Cannot run CodegenAgent: no selector proposal available.")
+            await self._update_ui_status(
+                "Parser generation error: no selector",
+                state="received_error",
+                show_spinner=False,
+            )
+            return
+
+        selector = self._last_proposed_selector
+        tab_ref = self._active_tab_ref
+
+        # Retrieve sample HTML snippets for the selector
+        try:
+            html_samples = await self._highlighter.get_elements_html(
+                tab_ref, selector, max_elements=3
+            )
+        except Exception as e:
+            logger.error(f"Failed to retrieve HTML samples for codegen: {e}", exc_info=True)
+            await self._update_ui_status(
+                "Parser generation error: failed to fetch elements",
+                state="received_error",
+                show_spinner=False,
+            )
+            return
+
+        if not html_samples:
+            logger.warning("CodegenAgent: selector matched no elements – aborting.")
+            await self._update_ui_status(
+                "Parser generation error: no elements matched",
+                state="received_error",
+                show_spinner=False,
+            )
+            return
+
+        # Grab the selector description from prompt input if available
+        try:
+            prompt_input = self.query_one("#prompt-input", Input)
+            selector_description = prompt_input.value.strip()
+        except Exception as e:
+            logger.error(f"Failed to retrieve prompt input for codegen: {e}", exc_info=True)
+            selector_description = ""
+
+        # Disable parser button while running
+        self._set_parser_button_enabled(False)
+
+        # Update UI status
+        await self._update_ui_status(
+            "Generating parser via AI…", state="thinking", show_spinner=True
+        )
+
+        # Run CodegenAgent
+        try:
+            codegen_agent = CodegenAgent(
+                html_samples=html_samples,
+                model_cfg=self._model_config,
+                save_results=True,
+                base_url=tab_ref.url or "",
+                input_selector=selector,
+                input_selector_description=selector_description,
+            )
+
+            logger.info(f"Starting CodegenAgent for url '{tab_ref.url}' with selector '{selector}'")
+
+            generated_code, outputs = await codegen_agent.run()
+
+            _ = (generated_code, outputs)  # silence unused variable lints
+
+            logger.info("CodegenAgent finished successfully.")
+
+            await self._update_ui_status(
+                "Parser generated and saved.",
+                state="final_success",
+                show_spinner=False,
+            )
+
+            # Optionally, re-enable parser button if we want to regenerate again
+            self._set_parser_button_enabled(True)
+
+        except Exception as e:
+            logger.error(f"CodegenAgent failed: {e}", exc_info=True)
+            await self._update_ui_status(
+                "Parser generation failed",
+                state="received_error",
+                show_spinner=False,
+            )
+            # Keep button disabled on error
+
+        finally:
+            # Ensure spinner/badge gets hidden eventually
+            self.call_later(self._delayed_hide_status)
+            # Finished: enable button state managed above

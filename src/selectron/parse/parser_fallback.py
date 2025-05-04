@@ -1,6 +1,7 @@
 import json
 from importlib.abc import Traversable
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional, Union
 from urllib.parse import urlparse, urlunparse
 
 from selectron.util.logger import get_logger
@@ -10,11 +11,20 @@ logger = get_logger(__name__)
 
 
 def _load_parser_from_ref(
-    ref: Traversable, slug: str, url_for_logging: str
+    ref: Union[Traversable, Path], slug: str, url_for_logging: str
 ) -> Optional[Dict[str, Any]]:
-    """Helper to load and parse JSON content from a Traversable resource."""
+    """Helper to load and parse JSON content from a Traversable or Path resource."""
     try:
-        content = ref.read_text(encoding="utf-8")
+        # Check if it's a Path object (from app dir) or Traversable (from package)
+        if isinstance(ref, Path):
+            content = ref.read_text(encoding="utf-8")
+        elif isinstance(ref, Traversable):
+            content = ref.read_text(encoding="utf-8")
+        else:
+            # This case should ideally not happen if ParserRegistry is correct
+            logger.error(f"Invalid parser reference type for slug '{slug}': {type(ref)}")
+            return None
+
         parser_data = json.loads(content)
         # TODO: Add validation for the loaded parser_data structure?
         return parser_data
@@ -39,7 +49,7 @@ def _load_parser_from_ref(
 
 
 def find_fallback_parser(
-    url: str, available_parsers: Dict[str, Traversable]
+    url: str, available_parsers: Dict[str, Union[Traversable, Path]]
 ) -> Optional[Dict[str, Any]]:
     """
     Attempts to load a parser for the given URL from the available_parsers dict,
@@ -51,7 +61,7 @@ def find_fallback_parser(
 
     Args:
         url: The target URL.
-        available_parsers: A dictionary mapping URL slugs to Traversable resources.
+        available_parsers: A dictionary mapping URL slugs to Traversable or Path resources.
 
     Returns:
         The parser definition dictionary if found, otherwise None.
@@ -144,4 +154,77 @@ def find_fallback_parser(
         current_url = next_url
 
     # logger.debug(f"No parser found for '{url}' even after fallback attempts.")
+    # === Domain-wide Fallback ===
+    if can_fallback:
+        # logger.debug(
+        #     f"Path-based fallback failed for '{url}'. Attempting domain-wide fallback."
+        # )
+        target_scheme = parsed_origin.scheme
+        target_netloc = parsed_origin.netloc
+
+        # Find candidate slugs matching the scheme and netloc
+        domain_candidates = []
+
+        # Determine the base slug for the target domain/scheme
+        if target_scheme == "file":
+            # For file URIs, the effective "domain" starts with file:///
+            target_domain_base = slugify_url("file:///")  # Should produce 'file~~3a~~2f~~2f'
+        else:
+            # For http/https etc., slugify the scheme + netloc
+            target_domain_base = slugify_url(
+                urlunparse((target_scheme, target_netloc, "", "", "", ""))
+            )
+            # Handle cases where slugify might simplify http://domain.com to domain.com
+            # but we need to match slugs like domain.com~~2fpath
+            # Check if the target URL only had scheme and netloc
+            is_target_base_only = not parsed_origin.path or parsed_origin.path == "/"
+            if is_target_base_only and not target_domain_base.endswith("~~2f") and target_netloc:
+                # If the available slugs *might* include a root path slug (domain.com~~2f)
+                # we should potentially consider both forms. This is getting complex.
+                # Let's stick to the simpler startswith logic for now.
+                pass  # Keep base as is for now
+
+        for slug, parser_ref in available_parsers.items():
+            # Check if the slug belongs to the same domain/scheme base
+            if slug.startswith(target_domain_base):
+                # Calculate "path depth" - number of path segments after domain base
+                path_part = slug[len(target_domain_base) :]
+                # Depth is the count of slugified slashes ('~~2f')
+                # Add 1 if path_part is not empty but doesn't start with ~~2f (e.g. domain~~3a8080~~2fpath)
+                depth = path_part.count("~~2f")
+                if path_part and not path_part.startswith("~~2f") and "~~2f" in path_part:
+                    # This handles cases like example.com~~3a8080~~2fpath where the first segment isn't delimited by ~~2f
+                    # However, simply counting ~~2f should still give a relative depth measure.
+                    # Let's refine the depth logic: count separators + 1 if non-empty path_part exists.
+                    pass  # Sticking to simple count for sorting relative depth.
+
+                # Ensure we don't match the exact slug we already failed to find in path fallback
+                # (This check might be redundant if path fallback guarantees trying exact first, but safe to keep)
+                # if slug == slugify_url(url):
+                #      continue
+
+                domain_candidates.append({"slug": slug, "ref": parser_ref, "depth": depth})
+            # else: logger.debug(f"Slug '{slug}' does not start with base '{target_domain_base}'")
+
+        if domain_candidates:
+            # Sort by depth (ascending) to find the "most root"
+            domain_candidates.sort(key=lambda x: x["depth"])
+            best_match = domain_candidates[0]
+            best_slug = best_match["slug"]
+            best_ref = best_match["ref"]
+
+            logger.info(
+                f"Using domain-wide fallback for '{url}'. Selected parser "
+                f"with slug '{best_slug}' (depth {best_match['depth']})."
+            )
+            parser_data = _load_parser_from_ref(best_ref, best_slug, url)
+            if parser_data:
+                return parser_data
+            else:
+                logger.warning(
+                    f"Domain-wide fallback failed: could not load parser from ref for slug '{best_slug}'."
+                )
+        # else: logger.debug(f"No suitable domain-wide fallback candidates found for '{url}'.")
+
+    # logger.debug(f"No parser found for '{url}' after all fallback attempts.")
     return None
