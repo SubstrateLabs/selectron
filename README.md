@@ -21,7 +21,7 @@ https://github.com/user-attachments/assets/8f523f33-a786-4871-b081-4fe9b7422a44
 
 </details>
 
-### How it works
+## How it works
 
 - **Chrome integration:** Connects to Chrome over CDP and receives live DOM and screenshot data from your active tab. Selectron uses minimal [dependencies](https://github.com/SubstrateLabs/selectron/blob/main/pyproject.toml) – no [browser-use](https://github.com/browser-use/browser-use), [stagehand](https://github.com/browserbase/stagehand), not even playwright (we prefer [direct CDP](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/chrome/chrome_cdp.py)).
 - **Fully automated parser generation:** An AI agent generates selectors for content described with natural language. Another agent generates code to extract data from selected containers. The final result is a serialized [parser](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/parsers/news.ycombinator.com.json). 
@@ -31,7 +31,7 @@ https://github.com/user-attachments/assets/8f523f33-a786-4871-b081-4fe9b7422a44
    - **HackerNews**
    - (Please [contribute](https://github.com/SubstrateLabs/selectron?tab=readme-ov-file#contributing) more!)
  
-### Use the CLI
+## Use the CLI
 
 ```sh
 # Install in a venv
@@ -43,7 +43,9 @@ pipx install selectron
 selectron
 ```
 
-### Use the library
+## Use the library
+
+### Parse HTML
 
 ```python
 from selectron.lib import parse
@@ -74,9 +76,13 @@ If a parser is registered for the url, you'll receive something like this:
 ]
 ```
 
+### Other functionality
+
+The [chrome](https://github.com/SubstrateLabs/selectron/tree/main/src/selectron/chrome) and [ai](https://github.com/SubstrateLabs/selectron/tree/main/src/selectron/ai) modules are useful, but may be subject to breaking changes – please pin your minor version. 
+
 ## Contributing
 
-Generating parsers is easy, by design:
+Generating parsers is easy by design:
 
 1. Clone the repo
 2. Run the CLI (`make dev`). Connect to Chrome.
