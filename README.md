@@ -10,7 +10,15 @@ Selectron is an AI web scraping library & CLI designed around two goals:
 
 <details> 
 <summary><h3>Demo videos</h3></summary>
-![generation](https://github.com/SubstrateLabs/selectron/blob/main/agent.gif?raw=true)
+
+<h4>Save your Twitter feed to DuckDB</h4>
+
+https://github.com/user-attachments/assets/b2565697-e37e-47ec-8d38-09149471db1c
+
+<h4>Generate a new scraper with AI</h4>
+
+https://github.com/user-attachments/assets/98052a5a-b902-4e8f-9661-d6170d510f47
+
 </details>
 
 ### How it works
