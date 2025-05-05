@@ -78,7 +78,7 @@ If a parser is registered for the url, you'll receive something like this:
 
 ### Other functionality
 
-The [chrome](https://github.com/SubstrateLabs/selectron/tree/main/src/selectron/chrome) and [ai](https://github.com/SubstrateLabs/selectron/tree/main/src/selectron/ai) modules are useful, but may be subject to breaking changes – please pin your minor version. 
+The [chrome](https://github.com/SubstrateLabs/selectron/tree/main/src/selectron/chrome) and [ai](https://github.com/SubstrateLabs/selectron/tree/main/src/selectron/ai) modules are useful but still baking, and subject to breaking changes – please pin your minor version. 
 
 ## Contributing
 
