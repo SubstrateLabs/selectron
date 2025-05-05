@@ -115,7 +115,7 @@ class SelectronApp(App[None]):
             with Container(id="button-row", classes="button-status-row"):
                 yield Button("Start AI selection", id="submit-button")
                 yield Button(
-                    "Start AI parser generation", id="generate-parser-button", disabled=True
+                    "Start parser codegen", id="generate-parser-button", disabled=True
                 )
                 yield Button("Delete Parser", id="delete-parser-button")
             yield Input(placeholder="Enter prompt (or let AI propose...)", id="prompt-input")
