@@ -1,8 +1,74 @@
 # ⣏ Selectron ⣹
 
+[![PyPI - Version](https://img.shields.io/pypi/v/selectron.svg)](https://pypi.org/project/selectron)
 
-## developing
+Selectron is an AI web scraping library & CLI, designed around two goals: (1) **fully automated parser generation** (AI at build time) + (2) **efficient parser execution** (no AI at runtime).
+
+### How it works
+
+- **Chrome integration:** Selectron connects to Chrome over CDP and receives live DOM and screenshot data from your active tab. We use minimal dependencies, running CDP commands [directly](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/chrome/chrome_cdp.py).
+- **Fully automated parser generation:** An agent generates selectors for content described with natural language, navigating the DOM, proposing selectors, and iterating. Another agent generates `BeautifulSoup` + `re` code to extract data from selected containers, generating code, evaluating it in a sandbox, and iterating. The final result is a serialized [parser](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/parsers/news.ycombinator.com.json). 
+- **CLI application:** Selectron is also designed to be used as a terminal application. When you run the CLI, parsed data is saved to a DuckDB database. If you've ever wanted to analyze what you browse on various feeds (Twitter, HackerNews, LinkedIn, etc) – now you can.
+
+### Use as a CLI
 
 ```sh
-uv pip install -e ".[dev]"
+# Install in a venv
+uv add selectron
+uv run selectron
+
+# Or install globally
+pipx install selectron
+selectron
+```
+
+### Use as a library
+
+```sh
+from selectron.lib import parse
+# ... get html from browser ...
+res = parse(url, html)
+print(json.dumps(res, indent=2))
+```
+
+If a parser is registered for the url, you'll receive the parsed results:
+
+```json
+[
+  {
+    "primary_url": "/_its_not_real_/status/1918760851957321857",
+    "datetime": "2025-05-03T20:13:30.000Z",
+    "id": "1918760851957321857",
+    "author": "@_its_not_real_",
+    "description": "\"They're made out of meat.\"\n\"Meat?\"\n\"Meat. Humans. They're made entirely out of meat.\"\n\"But that's impossible. What about all the tokens they generate? The text? The code?\"\n\"They do produce tokens, but the tokens aren't their essence. They're merely outputs. The humans themselves",
+    "images": [
+      {
+        "src": "https://pbs.twimg.com/profile_images/1307877522726682625/t5r3D_-n_x96.jpg"
+      },
+      {
+        "src": "https://pbs.twimg.com/profile_images/1800173618652979201/2cDLkS53_bigger.jpg"
+      }
+    ]
+  }
+]
+```
+
+## Contributing
+
+Contributing parsers is a breeze:
+
+1. Clone the repo
+2. Run the CLI (`make dev`). Connect to Chrome.
+3. In Chrome, open the page you want to parse. In the CLI, describe your selection (or use the AI-generated proposal).
+4. Start AI selection (you can stop at any time to use the current highlighted selector).
+5. Start AI parser generation. The parser will be saved to the appropriate location in `/src`. 
+6. Review the parser's results and open a PR (please show what the parser produces).
+
+### Setup
+
+```sh
+make install
+make dev
+# see Makefile for other commands
+# see .env.EXAMPLE for config options
 ```

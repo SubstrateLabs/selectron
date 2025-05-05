@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "selectron"
 dynamic = ["version"]
-description = 'AI-compiled web parsing (library & CLI)'
+description = 'AI web parsing library & CLI'
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
