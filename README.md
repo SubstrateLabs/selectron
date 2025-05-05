@@ -64,10 +64,7 @@ If a parser is registered for the url, you'll receive something like this:
     "id": "1918760851957321857",
     "author": "@_its_not_real_",
     "description": "\"They're made out of meat.\"\n\"Meat?\"\n\"Meat. Humans. They're made entirely out of meat.\"\n\"But that's impossible. What about all the tokens they generate? The text? The code?\"\n\"They do produce tokens, but the tokens aren't their essence. They're merely outputs. The humans themselves",
-    "images": [
-      { "src": "https://pbs.twimg.com/profile_images/1307877522726682625/t5r3D_-n_x96.jpg" },
-      { "src": "https://pbs.twimg.com/profile_images/1800173618652979201/2cDLkS53_bigger.jpg" }
-    ]
+    "images": [{ "src": "https://pbs.twimg.com/profile_images/1307877522726682625/t5r3D_-n_x96.jpg" }, { "src": "https://pbs.twimg.com/profile_images/1800173618652979201/2cDLkS53_bigger.jpg" }]
   }
 ]
 ```
