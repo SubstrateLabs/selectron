@@ -3,7 +3,7 @@
 [![PyPI - Version](https://img.shields.io/pypi/v/selectron.svg)](https://pypi.org/project/selectron)
 
 Selectron is an AI web scraping library & CLI designed around two goals:
-1. **Fully automated parser generation** (AI at build time)
+1. **Fully automated parser generation** (AI "compilation")
 2. **Efficient parser execution** (No AI at runtime)
 
 ![screenshot](/app.png)
