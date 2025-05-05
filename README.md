@@ -24,7 +24,7 @@ https://github.com/user-attachments/assets/8f523f33-a786-4871-b081-4fe9b7422a44
 ## How it works
 
 - **Chrome integration:** Connects to Chrome over CDP and receives live DOM and screenshot data from your active tab. Selectron uses minimal [dependencies](https://github.com/SubstrateLabs/selectron/blob/main/pyproject.toml) – no [browser-use](https://github.com/browser-use/browser-use) or [stagehand](https://github.com/browserbase/stagehand), not even Playwright (we prefer [direct CDP](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/chrome/chrome_cdp.py)).
-- **Fully automated parser generation:** An AI agent generates selectors for content described with natural language. Another agent generates code to extract data from selected containers. The final result is a serialized [parser](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/parsers/news.ycombinator.com.json). 
+- **Fully automated parser generation:** An AI agent generates selectors for content described with natural language. Another agent generates code to extract data from selected containers. The final result is a [parser](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/parsers/news.ycombinator.com.json). 
 - **CLI application:** When you run the [Textual](https://www.textualize.io) CLI, parsed data is saved to a [DuckDB](https://duckdb.org) database, making it easy to analyze your browsing history or extract structured data from websites. Built-in parsers include:
    - **Twitter**
    - **LinkedIn**
@@ -42,6 +42,14 @@ uv run selectron
 pipx install selectron
 selectron
 ```
+
+When you run `selectron`, it creates a DuckDB database in your app directory, and saves parsed data from given URL to a table named by the URL slug:
+
+- `x.com/home` -> `x.com~~2fhome` (Selectron uses a reversible slug system)
+
+When you run `selectron` inside this repo, parsers are saved to the `src` directory (if a parser for the URL didn't exist).
+
+When you run `selectron` outside this repo, parsers are saved to the app directory (and will overwrite existing parsers).
 
 ## Use the library
 
@@ -75,7 +83,7 @@ The [selectron.chrome](https://github.com/SubstrateLabs/selectron/tree/main/src/
 
 ## Contributing
 
-Generating parsers is easy by design:
+Generating parsers is easy, because it's mostly automated:
 
 1. Clone the repo
 2. Run the CLI (`make dev`). Connect to Chrome.
