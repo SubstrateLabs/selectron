@@ -48,7 +48,7 @@ class HomePanel(Container):
         yield Vertical(
             # Chrome Status Section
             Label("Chrome Connection Status", classes="section-title"),
-            Vertical(id="home-status-content"), # Dynamic content here
+            Vertical(id="home-status-content"),  # Dynamic content here
             # AI Status Section (moved up)
             Label("AI Status", classes="section-title ai-title"),
             Static(id="ai-status-text", classes="status-text"),

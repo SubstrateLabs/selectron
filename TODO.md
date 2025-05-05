@@ -2,10 +2,10 @@
   - screenshot
   - screen gif
 - test pipx usage
-- do we handle re-inserting same item well? (seems no)
 
 ## polish
-- multiple parsers per domain (start with HN)
+- multiple parsers per domain (start with HN threads)
+- test duckdb_utils
 - reuse duckdb connection
 - better model config options?
 - organize prompts, always use dedent

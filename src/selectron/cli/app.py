@@ -500,10 +500,31 @@ class SelectronApp(App[None]):
     async def _update_ui_status(self, message: str, state: str, show_spinner: bool = False) -> None:
         """Helper to update both the terminal label and the browser badge."""
         try:
-            status_label = self.query_one("HomePanel #agent-status-label", Label)
-            status_label.update(escape(message))
+            home_panels = self.query(HomePanel)  # Query for the parent panel first
+            if home_panels:
+                # Query within the first found HomePanel for the specific label ID
+                # The expected type is implicitly Label if the selector targets an ID
+                # or more specific selector usually implies the type.
+                # Pass the type only if querying generically (e.g., query(Widget)).
+                status_labels = home_panels[0].query("#agent-status-label")
+                # We might need to assert the type or check isinstance if query returns NodeList[DOMNode]
+                if status_labels:
+                    node = status_labels[0]
+                    if isinstance(node, Label):
+                        node.update(escape(message))  # Now using the correctly typed variable
+                    else:
+                        logger.warning(
+                            f"NOTE: Found element '#agent-status-label' but it is not a Label (type: {type(node)})."
+                        )
+                else:
+                    logger.warning(
+                        "NOTE: Found HomePanel, but could not find '#agent-status-label' within it."
+                    )
+            else:
+                logger.warning("NOTE: Could not find 'HomePanel' to update status label.")
         except Exception as e:
-            logger.error(f"Failed to update status label: {e}", exc_info=True)
+            # Catch other potential errors during query or update
+            logger.error(f"Failed during status label update: {e}", exc_info=True)
 
         # Update browser badge (if active tab exists)
         if self._active_tab_ref:

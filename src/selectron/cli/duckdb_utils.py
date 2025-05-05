@@ -161,27 +161,31 @@ def _create_table_from_df(
     conn.unregister(temp_view)
 
 
-def _insert_df_into_table(
+def _insert_df_into_table_except_duplicates(
     conn: duckdb.DuckDBPyConnection, table_name: str, df: pl.DataFrame
 ) -> None:
-    """Insert rows from df into existing table (column order is aligned)."""
-    existing_cols = _get_table_columns(conn, table_name)
-    if not existing_cols:
-        logger.warning(
-            f"NOTE: Attempting to insert into '{table_name}' but failed to retrieve columns. Skipping insert."
-        )
-        return
+    """Insert rows from df into existing table, skipping rows that already exist.
 
-    # Ensure df has all existing columns; fill missing ones with None
-    for col in existing_cols:
-        if col not in df.columns:
-            df = df.with_columns(pl.lit(None).alias(col))
-
-    # Reorder df columns to match table order
-    df = df.select(existing_cols)
+    Assumes df schema (columns and order) exactly matches the target table.
+    """
+    # Schema alignment is now handled by the caller (save_parsed_results)
     temp_view = _register_temp_df(conn, df)
-    conn.execute(f"INSERT INTO {_quote_ident(table_name)} SELECT * FROM {temp_view}")
-    conn.unregister(temp_view)
+    try:
+        # Use EXCEPT to insert only rows from the temp view that are not already in the target table
+        insert_query = f"""
+            INSERT INTO {_quote_ident(table_name)}
+            SELECT * FROM {temp_view}
+            EXCEPT
+            SELECT * FROM {_quote_ident(table_name)}
+        """
+        conn.execute(insert_query)
+    except Exception as e:
+        # Log specific error but allow process to continue if needed, or re-raise
+        logger.error(f"NOTE: Failed during EXCEPT insert into '{table_name}': {e}", exc_info=True)
+        # Consider re-raising depending on desired atomicity guarantees
+    finally:
+        # Crucial to unregister the temporary view even if insertion fails
+        conn.unregister(temp_view)
 
 
 def _generate_incremented_name(base: str, existing_names: set[str]) -> str:
@@ -218,25 +222,51 @@ def save_parsed_results(url: str, rows: List[dict[str, Any]]) -> None:
                 table_name = slug
                 if _table_exists(conn, table_name):
                     # Check schema compatibility
-                    existing_cols = set(_get_table_columns(conn, table_name))
-                    incoming_cols = set(df.columns)
-                    missing_cols = incoming_cols - existing_cols
-                    if missing_cols:
-                        for col in missing_cols:
+                    existing_cols_set = set(_get_table_columns(conn, table_name))
+                    incoming_cols_set = set(df.columns)
+
+                    # Add columns to table if they are missing
+                    missing_in_table = incoming_cols_set - existing_cols_set
+                    if missing_in_table:
+                        for col in missing_in_table:
                             # Default to VARCHAR if we can't map type easily
                             try:
                                 conn.execute(
                                     f"ALTER TABLE {_quote_ident(table_name)} ADD COLUMN {_quote_ident(col)} VARCHAR"
                                 )
-                                existing_cols.add(col)
+                                logger.debug(f"Added column '{col}' to table '{table_name}'.")
                             except Exception as e:
                                 logger.error(
                                     f"Failed to add column '{col}' to table '{table_name}': {e}",
                                     exc_info=True,
                                 )
+                                # If alter fails, subsequent insert might fail or be partial.
+                                # Depending on requirements, might need to raise here.
 
-                    logger.debug(f"Inserting into table '{table_name}'.")
-                    _insert_df_into_table(conn, table_name, df)
+                    # Get final table columns *after* potential ALTERs
+                    final_table_cols = _get_table_columns(conn, table_name)
+                    final_table_cols_set = set(final_table_cols)
+
+                    # Add null columns to DataFrame if they are missing
+                    missing_in_df = final_table_cols_set - incoming_cols_set
+                    if missing_in_df:
+                        df = df.with_columns([pl.lit(None).alias(c) for c in missing_in_df])
+
+                    # Ensure DataFrame columns match table order *exactly*
+                    # This is crucial for the SELECT * EXCEPT SELECT * pattern to work reliably
+                    if final_table_cols:
+                        df = df.select(
+                            final_table_cols
+                        )  # Reorder and select only final table columns
+                    else:
+                        logger.warning(
+                            f"Table '{table_name}' has no columns after potential alters; skipping insert."
+                        )
+                        return  # Cannot insert if table structure is somehow broken
+
+                    logger.debug(f"Inserting into table '{table_name}' (skipping duplicates).")
+                    # The df passed here now perfectly matches the target table schema
+                    _insert_df_into_table_except_duplicates(conn, table_name, df)
                 else:
                     logger.info(f"Creating new table '{table_name}' for URL '{url}'.")
                     _create_table_from_df(conn, table_name, df)
