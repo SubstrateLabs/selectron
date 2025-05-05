@@ -13,11 +13,11 @@ Selectron is an AI web scraping library & CLI designed around two goals:
 
 <h4>Save your Twitter feed to DuckDB</h4>
 
-https://github.com/user-attachments/assets/b2565697-e37e-47ec-8d38-09149471db1c
+https://github.com/user-attachments/assets/d8743c32-087f-4137-8451-e4ec3e5716ed
 
 <h4>Generate a new scraper with AI</h4>
 
-https://github.com/user-attachments/assets/98052a5a-b902-4e8f-9661-d6170d510f47
+
 
 </details>
 
