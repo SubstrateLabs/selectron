@@ -2,14 +2,22 @@
 
 [![PyPI - Version](https://img.shields.io/pypi/v/selectron.svg)](https://pypi.org/project/selectron)
 
-Selectron is an AI web scraping library & CLI, designed around two goals: (1) **fully automated parser generation** (AI at build time) + (2) **efficient parser execution** (no AI at runtime).
+Selectron is an AI web scraping library & CLI designed around two goals:
+1. **Fully automated parser generation** (AI at build time)
+2. **Efficient parser execution** (No AI at runtime)
+
+![generation](https://github.com/SubstrateLabs/selectron/blob/main/agent.gif?raw=true)
 
 ### How it works
 
-- **Chrome integration:** Selectron connects to Chrome over CDP and receives live DOM and screenshot data from your active tab. We use minimal dependencies, running CDP commands [directly](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/chrome/chrome_cdp.py).
-- **Fully automated parser generation:** An agent generates selectors for content described with natural language, navigating the DOM, proposing selectors, and iterating. Another agent generates `BeautifulSoup` + `re` code to extract data from selected containers, generating code, evaluating it in a sandbox, and iterating. The final result is a serialized [parser](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/parsers/news.ycombinator.com.json). 
-- **CLI application:** Selectron is also designed to be used as a terminal application. When you run the CLI, parsed data is saved to a DuckDB database. If you've ever wanted to analyze what you browse on various feeds (Twitter, HackerNews, LinkedIn, etc) – now you can.
-
+- **Chrome integration:** Selectron connects to Chrome over CDP and receives live DOM and screenshot data from your active tab. Selectron uses minimal [dependencies](https://github.com/SubstrateLabs/selectron/blob/main/pyproject.toml) – no [browser-use](https://github.com/browser-use/browser-use), [stagehand](https://github.com/browserbase/stagehand), not even playwright (we prefer [direct CDP](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/chrome/chrome_cdp.py)).
+- **Fully automated parser generation:** An AI agent generates selectors for content described with natural language. Another agent generates code to extract data from selected containers. The final result is a serialized [parser](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/parsers/news.ycombinator.com.json). 
+- **CLI application:** When you run the [Textual](https://www.textualize.io) CLI, parsed data is saved to a [DuckDB](https://duckdb.org) database, making it easy to analyze your browsing history or extract structured data from websites. Built-in parsers include:
+   - **Twitter**
+   - **LinkedIn**
+   - **HackerNews**
+   - (Please [contribute](https://github.com/SubstrateLabs/selectron?tab=readme-ov-file#contributing) more!)
+ 
 ### Use as a CLI
 
 ```sh
