@@ -23,7 +23,7 @@ https://github.com/user-attachments/assets/8f523f33-a786-4871-b081-4fe9b7422a44
 
 ## How it works
 
-- **Chrome integration:** Connects to Chrome over CDP and receives live DOM and screenshot data from your active tab. Selectron uses minimal [dependencies](https://github.com/SubstrateLabs/selectron/blob/main/pyproject.toml) – no [browser-use](https://github.com/browser-use/browser-use), [stagehand](https://github.com/browserbase/stagehand), not even playwright (we prefer [direct CDP](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/chrome/chrome_cdp.py)).
+- **Chrome integration:** Connects to Chrome over CDP and receives live DOM and screenshot data from your active tab. Selectron uses minimal [dependencies](https://github.com/SubstrateLabs/selectron/blob/main/pyproject.toml) – no [browser-use](https://github.com/browser-use/browser-use) or [stagehand](https://github.com/browserbase/stagehand), not even Playwright (we prefer [direct CDP](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/chrome/chrome_cdp.py)).
 - **Fully automated parser generation:** An AI agent generates selectors for content described with natural language. Another agent generates code to extract data from selected containers. The final result is a serialized [parser](https://github.com/SubstrateLabs/selectron/blob/main/src/selectron/parsers/news.ycombinator.com.json). 
 - **CLI application:** When you run the [Textual](https://www.textualize.io) CLI, parsed data is saved to a [DuckDB](https://duckdb.org) database, making it easy to analyze your browsing history or extract structured data from websites. Built-in parsers include:
    - **Twitter**
