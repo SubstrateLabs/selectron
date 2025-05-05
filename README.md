@@ -65,12 +65,8 @@ If a parser is registered for the url, you'll receive something like this:
     "author": "@_its_not_real_",
     "description": "\"They're made out of meat.\"\n\"Meat?\"\n\"Meat. Humans. They're made entirely out of meat.\"\n\"But that's impossible. What about all the tokens they generate? The text? The code?\"\n\"They do produce tokens, but the tokens aren't their essence. They're merely outputs. The humans themselves",
     "images": [
-      {
-        "src": "https://pbs.twimg.com/profile_images/1307877522726682625/t5r3D_-n_x96.jpg"
-      },
-      {
-        "src": "https://pbs.twimg.com/profile_images/1800173618652979201/2cDLkS53_bigger.jpg"
-      }
+      { "src": "https://pbs.twimg.com/profile_images/1307877522726682625/t5r3D_-n_x96.jpg" },
+      { "src": "https://pbs.twimg.com/profile_images/1800173618652979201/2cDLkS53_bigger.jpg" }
     ]
   }
 ]
@@ -78,7 +74,7 @@ If a parser is registered for the url, you'll receive something like this:
 
 ### Other functionality
 
-The [chrome](https://github.com/SubstrateLabs/selectron/tree/main/src/selectron/chrome) and [ai](https://github.com/SubstrateLabs/selectron/tree/main/src/selectron/ai) modules are useful but still baking, and subject to breaking changes – please pin your minor version. 
+The [selectron.chrome](https://github.com/SubstrateLabs/selectron/tree/main/src/selectron/chrome) and [selectron.ai](https://github.com/SubstrateLabs/selectron/tree/main/src/selectron/ai) modules are useful, but still baking, and subject to breaking changes – please pin your minor version. 
 
 ## Contributing
 
