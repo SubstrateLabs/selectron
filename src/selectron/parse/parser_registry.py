@@ -29,7 +29,7 @@ class ParserRegistry:
                 )
                 self._parser_dir_ref = None
             else:
-                logger.info(f"Located base parser directory resource: {self._parser_dir_ref}")
+                logger.debug(f"Located base parser directory resource: {self._parser_dir_ref}")
 
         except ModuleNotFoundError:
             logger.warning("Package 'selectron' not found. Cannot load base parsers.")
@@ -42,7 +42,7 @@ class ParserRegistry:
         try:
             self._app_parser_dir = get_app_dir() / "parsers"
             self._app_parser_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Ensured user parser directory exists: {self._app_parser_dir}")
+            logger.debug(f"Ensured user parser directory exists: {self._app_parser_dir}")
         except Exception as e:
             logger.error(
                 f"Failed to create or access user parser directory {self._app_parser_dir}: {e}",
@@ -53,7 +53,7 @@ class ParserRegistry:
         # Perform initial scan
         self.rescan_parsers()  # Call rescan during init
 
-        logger.info(f"Total available parsers loaded: {len(self._available_parsers)}")
+        logger.debug(f"Total available parsers loaded: {len(self._available_parsers)}")
 
     def load_parser(self, url: str) -> List[Tuple[Dict[str, Any], ParserOrigin, Path, str]]:
         """
@@ -172,7 +172,7 @@ class ParserRegistry:
 
         try:
             file_path.unlink()
-            logger.info(f"Successfully deleted source parser file: {file_path}")
+            logger.debug(f"Successfully deleted source parser file: {file_path}")
             # Remove from registry after successful deletion
             del self._available_parsers[slug]
             return True

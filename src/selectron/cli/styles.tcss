@@ -93,20 +93,13 @@ HomePanel {
     padding: 1;
 }
 #home-status-content {
-    margin-bottom: 1;
-    padding-bottom: 1;
     width: 100%;
     align: center top;
-}
-#ai-status-label {
-    margin-bottom: 1;
-    padding-bottom: 1;
-    width: 100%;
-    text-align: center;
 }
 #home-status-content Button {
     margin-top: 1;
     min-width: 30; /* Make buttons wider */
+    color: $warning;
 }
 
 /* Status message styling (used by HomePanel and potentially others) */
@@ -118,5 +111,12 @@ HomePanel {
 }
 .warning-message {
     color: $warning;
+}
+
+/* Add rule for utility buttons */
+.utility-buttons {
+    margin-top: 1; /* Add some space above this row */
+    width: 100%;
+    align: center top;
 }
 

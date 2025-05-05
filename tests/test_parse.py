@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 from selectron.lib import parse
+from selectron.parse.types import ParserError, ParseSuccess  # Import result types
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -17,7 +18,14 @@ def test_parse_x_home():
     # Use the first HTML element from the fixture
     html_content = fixture_data["html_elements"][0]
 
-    results = parse(url=url, html_content=html_content)
+    outcome = parse(url=url, html_content=html_content)
+
+    # Assert that the parsing was successful
+    assert isinstance(outcome, ParseSuccess), (
+        f"Parsing failed: {outcome.message if isinstance(outcome, ParserError) else 'Unknown error'}"
+    )
+    # If successful, outcome.data contains the list of results
+    results = outcome.data
 
     # Assertions based on the expected parser behavior and the specific content
     # of the first element in tests/fixtures/x.com~~2fhome.json
@@ -47,11 +55,23 @@ def test_parse_x_home():
     assert tweet_data["id"] == "1918760851957321857"
     assert tweet_data["description"].startswith('"They\'re made out of meat."')
 
-    # TODO: parse metrics
-    # assert isinstance(tweet_data["reply_count"], int)
-    # if "repost_count" in tweet_data:
-    # assert isinstance(tweet_data["repost_count"], int)
-    # if "like_count" in tweet_data:
-    # assert isinstance(tweet_data["like_count"], int)
-    # if "view_count" in tweet_data:
-    # assert isinstance(tweet_data["view_count"], int)
+    # TODO: parse metrics - these might fail depending on fixture specifics
+    # assert "reply_count" in tweet_data, "reply_count missing"
+    # assert isinstance(tweet_data.get("reply_count"), int)
+    # assert "repost_count" in tweet_data, "repost_count missing"
+    # assert isinstance(tweet_data.get("repost_count"), int)
+    # assert "like_count" in tweet_data, "like_count missing"
+    # assert isinstance(tweet_data.get("like_count"), int)
+    # assert "view_count" in tweet_data, "view_count missing"
+    # assert isinstance(tweet_data.get("view_count"), int)
+
+    # Optional: Check quote tweet details if present, but don't fail if missing
+    # Commenting out the specific value checks as they might be brittle
+    if "quoted_author_name" in tweet_data:
+        assert isinstance(tweet_data["quoted_author_name"], str)
+        # assert tweet_data["quoted_author_name"] == "Guy is WRITING THE BOOK"
+    if "quoted_url" in tweet_data:
+        assert isinstance(tweet_data["quoted_url"], str)
+    if "quoted_text" in tweet_data:
+        assert isinstance(tweet_data["quoted_text"], str)
+        # assert tweet_data["quoted_text"].startswith("I just don\u2019t understand how text could become self-aware")

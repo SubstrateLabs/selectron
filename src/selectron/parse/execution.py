@@ -6,12 +6,12 @@ from bs4 import BeautifulSoup
 
 from selectron.util.logger import get_logger
 
+from .types import ParseOutcome, ParserError, ParseSuccess
+
 logger = get_logger(__name__)
 
 
-def execute_parser_on_html(
-    html_content: str, selector: str, python_code: str
-) -> List[Dict[str, Any]]:
+def execute_parser_on_html(html_content: str, selector: str, python_code: str) -> ParseOutcome:
     """
     Executes a parser's Python code against elements matching a selector in static HTML content.
 
@@ -22,11 +22,9 @@ def execute_parser_on_html(
                      expected to define a 'parse_element' function.
 
     Returns:
-        A list of dictionaries, where each dictionary is the result of
-        calling 'parse_element' on the outer HTML of a matched element.
-        Returns an empty list if the selector finds no elements, the Python
-        code fails to execute or define 'parse_element', or if 'parse_element'
-        fails for all elements.
+        A ParseOutcome object:
+        - ParseSuccess(data=[...]) if successful.
+        - ParserError(...) if an error occurred during setup or execution.
     """
     results: List[Dict[str, Any]] = []
 
@@ -35,38 +33,46 @@ def execute_parser_on_html(
     try:
         exec(python_code, sandbox)
     except Exception as e:
-        logger.error(f"Parser Python code execution error during exec: {e}", exc_info=True)
-        return []  # Cannot proceed if the code itself fails
+        msg = f"Parser Python code execution error during exec: {e}"
+        logger.error(msg, exc_info=True)
+        return ParserError(error_type="python_exec_error", message=msg, details=str(e))
 
     parse_fn = sandbox.get("parse_element")
     if not callable(parse_fn):
-        logger.error("Parser Python code does not define a callable 'parse_element' function.")
-        return []  # Cannot proceed without the target function
+        msg = "Parser Python code does not define a callable 'parse_element' function."
+        logger.error(msg)
+        return ParserError(error_type="parse_fn_missing", message=msg)
 
     # Parse the provided HTML content
     try:
         soup = BeautifulSoup(html_content, "html.parser")
     except Exception as e:
-        logger.error(f"Failed to parse provided HTML content: {e}", exc_info=True)
-        return []  # Cannot proceed if HTML parsing fails
+        msg = f"Failed to parse provided HTML content: {e}"
+        logger.error(msg, exc_info=True)
+        return ParserError(error_type="html_parse_error", message=msg, details=str(e))
 
     # Find elements matching the selector
     try:
         elements = soup.select(selector)
     except Exception as e:
-        # Catch errors related to invalid selectors etc.
-        logger.error(f"Error applying selector '{selector}' to HTML: {e}", exc_info=True)
-        return []  # Cannot proceed if selector fails
+        msg = f"Error applying selector '{selector}' to HTML: {e}"
+        logger.error(msg, exc_info=True)
+        return ParserError(error_type="selector_error", message=msg, details=str(e))
 
     if not elements:
-        logger.debug(f"Selector '{selector}' matched no elements in the provided HTML.")
-        return []  # Return empty list if no elements match
+        msg = f"Selector '{selector}' matched no elements in the provided HTML."
+        logger.debug(msg)
+        # Returning success with empty list, as finding nothing isn't necessarily an *error*
+        # Caller can decide if empty list is problematic.
+        # Alternative: return ParserError(error_type="no_elements_found", message=msg)
+        return ParseSuccess(data=[])
 
     # Execute parse_fn on each element's outer HTML
     repr_short = reprlib.Repr()
     repr_short.maxstring = 50
     repr_short.maxother = 50
 
+    individual_errors = []
     for i, element in enumerate(elements):
         try:
             # Convert element back to string to pass to parse_fn
@@ -81,10 +87,15 @@ def execute_parser_on_html(
                 )
         except Exception as e:
             # Log error for the specific element but continue with others
+            err_msg = f"Error running parse_element for element {i + 1}: {e}"
             logger.error(
-                f"Error running parse_element for element {i + 1}: {e}",
+                err_msg,
                 exc_info=True,
             )
+            individual_errors.append(err_msg)
 
     logger.debug(f"Executed parser on {len(elements)} elements, got {len(results)} results.")
-    return results
+    # If *all* elements failed, maybe that should be an error? For now, return successful results.
+    # Consider adding logic here if needed.
+
+    return ParseSuccess(data=results)

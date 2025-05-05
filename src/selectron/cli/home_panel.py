@@ -1,9 +1,13 @@
+import logging
 from typing import Literal
 
 from textual.app import ComposeResult
-from textual.containers import Container, Vertical
+from textual.containers import Container, Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import Button, Label, Static
+
+logger = logging.getLogger(__name__)
 
 ChromeStatus = Literal[
     "unknown",
@@ -25,14 +29,37 @@ class HomePanel(Container):
     chrome_status: reactive[ChromeStatus] = reactive[ChromeStatus]("unknown")
     ai_status: reactive[AiStatus] = reactive[AiStatus]("disabled")  # Default to disabled
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Set initial values for reactive attributes
+        self.chrome_status = "checking"
+        self.ai_status = "disabled"
+
+        # Define buttons in __init__
+        self.launch_chrome_button = Button(
+            "🚀 Launch Chrome", id="launch-chrome", variant="primary"
+        )
+        self.restart_chrome_button = Button(
+            "🔄 Restart Chrome (with debug)", id="restart-chrome", variant="warning"
+        )
+        self.open_duckdb_button = Button("🦆 Open DuckDB UI", id="open-duckdb", variant="default")
+
     def compose(self) -> ComposeResult:
-        # This container will hold the dynamically changing content
         yield Vertical(
-            Vertical(id="home-status-content"),  # Container for chrome status widgets
-            Label("AI status: checking...", id="ai-status-label"),  # AI status label
-            Label(
-                "Interact with a page in Chrome to get started", id="agent-status-label"
-            ),  # Agent status label always present below
+            # Chrome Status Section
+            Label("Chrome Connection Status", classes="section-title"),
+            Vertical(id="home-status-content"), # Dynamic content here
+            # AI Status Section (moved up)
+            Label("AI Status", classes="section-title ai-title"),
+            Static(id="ai-status-text", classes="status-text"),
+            # Agent Status Section (moved up)
+            Label("Agent Status", classes="section-title"),
+            Static("Interact with a page in Chrome to get started", id="agent-status-label"),
+            # Utility Buttons Section (at the bottom)
+            Horizontal(
+                self.open_duckdb_button,
+                classes="button-group utility-buttons",
+            ),
         )
 
     def watch_chrome_status(self, old_status: ChromeStatus, new_status: ChromeStatus) -> None:
@@ -50,28 +77,41 @@ class HomePanel(Container):
 
     def update_ai_ui(self, status: AiStatus) -> None:
         """Updates the dedicated AI status label."""
-        ai_label = self.query_one("#ai-status-label", Label)
-        message = "AI status: Unknown"
-        css_class = ""
-        if status == "enabled_anthropic":
-            message = "AI Enabled (Anthropic)"
-            css_class = "success-message"
-        elif status == "enabled_openai":
-            message = "AI Enabled (OpenAI)"
-            css_class = "success-message"
-        elif status == "disabled":
-            message = "AI Disabled (No API key found)"
-            css_class = "warning-message"
 
-        ai_label.update(message)
-        ai_label.set_classes(css_class)  # Apply styling class
+        async def _update_label():
+            try:
+                ai_widget = self.query_one("#ai-status-text", Static)
+            except NoMatches:
+                logger.error("Failed to find #ai-status-text container during update.")
+                return
+
+            message = "AI status: Unknown"
+            css_class = ""
+            if status == "enabled_anthropic":
+                message = "AI Enabled (Anthropic)"
+                css_class = "success-message"
+            elif status == "enabled_openai":
+                message = "AI Enabled (OpenAI)"
+                css_class = "success-message"
+            elif status == "disabled":
+                message = "AI Disabled (No API key found)"
+                css_class = "warning-message"
+
+            ai_widget.update(message)
+            ai_widget.set_classes(css_class)  # Apply styling class
+
+        self.app.call_later(_update_label)
 
     def update_chrome_ui(self, status: ChromeStatus) -> None:
-        status_container = self.query_one(
-            "#home-status-content", Vertical
-        )  # Target the inner container
-
         async def clear_and_mount():
+            try:
+                status_container = self.query_one(
+                    "#home-status-content", Vertical
+                )  # Target the inner container
+            except NoMatches:
+                logger.error("Failed to find #home-status-content container during update.")
+                return
+
             await status_container.remove_children()  # Clear the inner container
             widgets_to_mount = []
             # Use class attributes for status messages for styling

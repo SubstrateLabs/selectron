@@ -166,6 +166,14 @@ class MonitorEventHandler:
                     self.app._propose_selection_worker.cancel()
 
                 async def _do_propose_selection():
+                    if self.app._ai_status == "disabled":
+                        # Optionally hide status or show a message indicating disabled status
+                        if self.app._active_tab_ref:  # Ensure tab ref is not None
+                            active_ref = self.app._active_tab_ref  # Assign to non-optional var
+                            self.app.call_later(
+                                lambda: asyncio.create_task(self._try_hide_status(active_ref))
+                            )
+                        return  # Do not proceed if AI is disabled
                     try:
                         # Use app's model config
                         proposal = await propose_selection(screenshot, self.app._model_config)

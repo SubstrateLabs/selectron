@@ -1,12 +1,11 @@
-- publish
-  - publish script
-  - test pipx usage
-  - test sdk usage
 - readme
   - screenshot
   - screen gif
+- test pipx usage
+- do we handle re-inserting same item well? (seems no)
 
 ## polish
+- multiple parsers per domain (start with HN)
 - reuse duckdb connection
 - better model config options?
 - organize prompts, always use dedent
