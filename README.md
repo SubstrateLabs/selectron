@@ -6,7 +6,12 @@ Selectron is an AI web scraping library & CLI designed around two goals:
 1. **Fully automated parser generation** (AI at build time)
 2. **Efficient parser execution** (No AI at runtime)
 
+![screenshot](/app.png)
+
+<details> 
+<summary><h3>Demo videos</h3></summary>
 ![generation](https://github.com/SubstrateLabs/selectron/blob/main/agent.gif?raw=true)
+</details>
 
 ### How it works
 
@@ -18,7 +23,7 @@ Selectron is an AI web scraping library & CLI designed around two goals:
    - **HackerNews**
    - (Please [contribute](https://github.com/SubstrateLabs/selectron?tab=readme-ov-file#contributing) more!)
  
-### Use as a CLI
+### Use the CLI
 
 ```sh
 # Install in a venv
@@ -30,16 +35,16 @@ pipx install selectron
 selectron
 ```
 
-### Use as a library
+### Use the library
 
-```sh
+```python
 from selectron.lib import parse
 # ... get html from browser ...
 res = parse(url, html)
 print(json.dumps(res, indent=2))
 ```
 
-If a parser is registered for the url, you'll receive the parsed results:
+If a parser is registered for the url, you'll receive something like this:
 
 ```json
 [
@@ -63,7 +68,7 @@ If a parser is registered for the url, you'll receive the parsed results:
 
 ## Contributing
 
-Contributing parsers is a breeze:
+Generating parsers is easy, by design:
 
 1. Clone the repo
 2. Run the CLI (`make dev`). Connect to Chrome.
