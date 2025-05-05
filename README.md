@@ -3,8 +3,8 @@
 [![PyPI - Version](https://img.shields.io/pypi/v/selectron.svg)](https://pypi.org/project/selectron)
 
 Selectron is an AI web parsing library & CLI designed around two goals:
-1. **Fully automated parser generation** ("AI-compiled" code) 
-2. **Efficient parser execution** (No AI at runtime)
+1. **Fully automated parser generation** – AI-"compiles" (generates) parsers on-demand
+2. **Efficient parser execution** – Parsers are cached, no LLM calls at runtime
 
 ![screenshot](/app.png)
 
