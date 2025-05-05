@@ -1,20 +1,16 @@
-- function without AI?
-- sdk? 
-  - parse(url)
-  - test parse on a single example in script
-  - remove old codegen script
 - publish
+  - publish script
   - test pipx usage
   - test sdk usage
+- readme
+  - screenshot
+  - screen gif
 
 ## polish
 - reuse duckdb connection
 - better model config options?
 - organize prompts, always use dedent
 - CI tests
-
-## publish
-- readme
 
 ## issues
 - sometimes selector agent gets "lost in the sauce" with tool attempts

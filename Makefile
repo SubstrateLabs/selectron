@@ -3,6 +3,9 @@
 dev:
 	uv run selectron
 
+publish:
+	uv run scripts/publish.py
+
 # ================================
 # housekeeping
 # ================================

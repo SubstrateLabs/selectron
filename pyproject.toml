@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 keywords = []
-authors = [{ name = "Ben G🥦", email = "ben@substrate.run" }]
+authors = [{ name = "Substrate Labs Inc.", email = "ben@substrate.run" }]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Programming Language :: Python",
